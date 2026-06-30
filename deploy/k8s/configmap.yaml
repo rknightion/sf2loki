@@ -1,0 +1,52 @@
+# Application config, mounted at /etc/sf2loki/config.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sf2loki-config
+  labels:
+    app.kubernetes.io/name: sf2loki
+data:
+  config.yaml: |
+    salesforce:
+      login_url: https://login.salesforce.com
+      # client_id is supplied via env (SF2LOKI_SALESFORCE__CLIENT_ID) from the sf2loki-env Secret.
+      username: svc@example.com
+      private_key_file: /etc/sf2loki/secrets/server.key
+      api_version: "60.0"
+    sources:
+      pubsub:
+        enabled: true
+        topics:
+          - /event/LoginEventStream
+          - /event/ApiAnomalyEvent
+        include: ["/event/*"]
+    sink:
+      type: loki
+      loki:
+        url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+        tenant_id: "123456"
+        auth_token_file: /etc/sf2loki/secrets/loki-token
+        encoding: protobuf
+        compression: snappy
+        labels:
+          environment: prod
+        structured_metadata_fields: [replay_id, schema_id, user_id, username, source_ip, session_key]
+    state:
+      store: configmap
+      configmap_name: sf2loki-state
+    service:
+      log_level: info
+      log_format: json
+      metrics_addr: ":9090"
+      health_addr: ":8080"
+      shutdown_grace: PT25S
+---
+# Pre-created (empty) ConfigMap holding resume state; the service RMWs it.
+# Must exist before the pod starts (the store does not create it).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sf2loki-state
+  labels:
+    app.kubernetes.io/name: sf2loki
+data: {}

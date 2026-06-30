@@ -1,0 +1,72 @@
+# sf2loki example configuration.
+#
+# Precedence (highest first): env (SF2LOKI_* with __ nesting) > this file > defaults.
+# Secrets are injected from *_file paths (k8s Secret mounts); a missing/unreadable
+# secret file is fatal at startup (no silent blanks).
+
+salesforce:
+  login_url: https://login.salesforce.com      # or https://test.salesforce.com / your My Domain
+  client_id: REPLACE_ME                          # Connected App consumer key; override via SF2LOKI_SALESFORCE__CLIENT_ID
+  username: svc@example.com                      # integration user (pre-authorised on the Connected App)
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+  org_id: null                                   # auto-resolved via /services/oauth2/userinfo when null
+
+sources:
+  pubsub:
+    enabled: true
+    endpoint: api.pubsub.salesforce.com:7443
+    default_num_requested: 100                   # flow-control batch size
+    replay_preset: CUSTOM                         # falls back to LATEST when no stored replay_id
+    topics:
+      - /event/LoginEventStream
+      - /event/ApiAnomalyEvent
+    include: ["/event/*"]                          # operator inclusion/exclusion globs
+    exclude: []
+  eventlog_objects:
+    enabled: false
+    objects:
+      # durations are ISO-8601 (PT5M = 5 min) or plain seconds — not "5m"
+      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: PT5M, lookback: PT1H}
+  eventlogfile:
+    enabled: false                                # Phase 3 stub
+
+sink:
+  type: loki
+  loki:
+    # Grafana Cloud:   https://logs-prod-xx.grafana.net/loki/api/v1/push  (+ tenant_id + auth_token)
+    # Self-hosted:     http://loki:3100/loki/api/v1/push                  (+ tenant_id -> X-Scope-OrgID)
+    # Local Alloy:     http://alloy:3100/loki/api/v1/push                 (no auth)
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    encoding: protobuf                            # protobuf (default) | json
+    compression: snappy                           # snappy (protobuf) | gzip (json) | none
+    batch:
+      max_entries: 1000
+      max_bytes: 1048576
+      flush_interval: PT1S                       # ISO-8601 duration (or seconds as a number)
+    labels:
+      environment: prod                           # job + sf_org_id are added automatically
+    structured_metadata_fields:
+      - replay_id
+      - schema_id
+      - event_uuid
+      - user_id
+      - username
+      - source_ip
+      - session_key
+
+state:
+  store: configmap                                # configmap (k8s-native, no PVC) | file
+  configmap_name: sf2loki-state
+  namespace: null                                 # null -> read from the in-cluster service account
+  file:
+    path: /var/lib/sf2loki/state.json             # only used when store: file
+
+service:
+  log_level: info
+  log_format: json
+  metrics_addr: ":9090"
+  health_addr: ":8080"
+  shutdown_grace: PT25S                           # ISO-8601 duration (or seconds as a number)

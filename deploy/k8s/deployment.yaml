@@ -1,0 +1,82 @@
+# Single replica with Recreate: the Pub/Sub API delivers events independently per
+# subscriber connection (no consumer groups), so two concurrent replicas would
+# double-deliver. Recreate ensures the old pod is gone before the new one starts;
+# replay_id checkpointing resumes without overlap. See DESIGN.md §13.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sf2loki
+  labels:
+    app.kubernetes.io/name: sf2loki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sf2loki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sf2loki
+    spec:
+      serviceAccountName: sf2loki
+      # Must exceed service.shutdown_grace (25s) so graceful flush/commit completes.
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sf2loki
+          image: ghcr.io/rknightion/sf2loki:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/sf2loki/config.yaml"]
+          envFrom:
+            - secretRef:
+                name: sf2loki-env
+          ports:
+            - {name: metrics, containerPort: 9090}
+            - {name: health, containerPort: 8080}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: config, mountPath: /etc/sf2loki, readOnly: true}
+            - {name: secrets, mountPath: /etc/sf2loki/secrets, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: sf2loki-config
+        - name: secrets
+          secret:
+            secretName: sf2loki-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sf2loki
+  labels:
+    app.kubernetes.io/name: sf2loki
+spec:
+  selector:
+    app.kubernetes.io/name: sf2loki
+  ports:
+    - {name: metrics, port: 9090, targetPort: metrics}
+    - {name: health, port: 8080, targetPort: health}

@@ -1,0 +1,35 @@
+# ServiceAccount + Role for the ConfigMap checkpoint store (state.store: configmap).
+# The service reads/updates a single ConfigMap (sf2loki-state) for resume state,
+# so no PVC is required. Drop this file if you use state.store: file + a PVC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sf2loki
+  labels:
+    app.kubernetes.io/name: sf2loki
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sf2loki-state
+  labels:
+    app.kubernetes.io/name: sf2loki
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["sf2loki-state"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sf2loki-state
+  labels:
+    app.kubernetes.io/name: sf2loki
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sf2loki-state
+subjects:
+  - kind: ServiceAccount
+    name: sf2loki

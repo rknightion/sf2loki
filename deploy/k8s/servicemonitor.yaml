@@ -1,0 +1,16 @@
+# Prometheus Operator ServiceMonitor scraping /metrics. Requires the Prometheus
+# Operator CRDs; drop this file if you scrape via annotations or a different stack.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sf2loki
+  labels:
+    app.kubernetes.io/name: sf2loki
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sf2loki
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
