@@ -161,12 +161,15 @@ implementation can be added later for active-passive failover with **zero** chan
    in config to skip this call entirely (and drop the `openid` scope — see below).
 
 **App config (External Client App — the path Salesforce recommends/now requires for new apps):**
-- **OAuth scope: `api` only.** It covers REST/SOQL, the EventLogFile `/LogFile` blob download, and the
-  Pub/Sub API (which has no scope of its own — it authenticates with a plain access token in the gRPC
-  `accesstoken` header). `refresh_token`/`offline_access` is **not** needed (JWT bearer issues no
-  refresh token). `openid` is needed **only if** `org_id` is left unset (for the `/userinfo` call) —
-  prefer setting `org_id` and using `api` alone. Everything else (`web`, `full`, `chatter_api`,
-  `visualforce`, `id`, the `cdp_*`/`sfap_api`/`interaction_api` Data Cloud scopes) stays off.
+- **OAuth scopes: `api` + `refresh_token` (offline_access).** `api` covers REST/SOQL, the EventLogFile
+  `/LogFile` blob download, and the Pub/Sub API (which has no scope of its own — it authenticates with a
+  plain access token in the gRPC `accesstoken` header). `refresh_token` is **required by Salesforce's
+  pre-authorized JWT bearer path** even though the flow never issues or uses a refresh token — without
+  it the grant fails `invalid_request: "refresh_token scope is required and the connected app should be
+  installed and preauthorized"` (verified against a dev org). `openid` is needed **only if** `org_id` is
+  left unset (for the `/userinfo` call) — prefer setting `org_id` to avoid it. Everything else (`web`,
+  `full`, `chatter_api`, `visualforce`, `id`, the `cdp_*`/`sfap_api`/`interaction_api` Data Cloud
+  scopes) stays off.
 - **Flow Enablement: enable JWT Bearer Flow only.** Leaving Client-Credentials / Auth-Code / Device /
   Token-Exchange off means the app can only mint tokens our one way — attack-surface reduction at no
   cost.

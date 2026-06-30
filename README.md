@@ -76,15 +76,20 @@ Field by field:
 **App Settings**
 - **Callback URL** — required field, but JWT bearer performs no redirect, so it's stored and never
   invoked. Use a placeholder: `https://login.salesforce.com/services/oauth2/callback`.
-- **OAuth Scopes** — move **only** `Manage user data via APIs (api)` into *Selected*. That one scope
-  covers REST/SOQL, the EventLogFile `/LogFile` download, and the Pub/Sub API (which has no scope of
-  its own — it just needs a valid access token). Leave **everything else** in *Available*:
-  `Access the identity URL service (id…)`, `web`, `Full access (full)`, `chatter_api`, `visualforce`,
-  and all Data Cloud / platform scopes (`cdp_segment_api`, `cdp_identityresolution_api`,
-  `cdp_calculated_insight_api`, `sfap_api`, `interaction_api`, `cdp_api`).
-  - `refresh_token`/`offline_access` is **not** required — JWT bearer issues no refresh token.
+- **OAuth Scopes** — move into *Selected*: **`Manage user data via APIs (api)`** and **`Perform requests
+  at any time (refresh_token, offline_access)`**. `api` covers REST/SOQL, the EventLogFile `/LogFile`
+  download, and the Pub/Sub API (which has no scope of its own — it just needs a valid access token).
+  Leave **everything else** in *Available*: `Access the identity URL service (id…)`, `web`,
+  `Full access (full)`, `chatter_api`, `visualforce`, and all Data Cloud / platform scopes
+  (`cdp_segment_api`, `cdp_identityresolution_api`, `cdp_calculated_insight_api`, `sfap_api`,
+  `interaction_api`, `cdp_api`).
+  - **`refresh_token` is required** even though JWT bearer never issues or uses a refresh token —
+    Salesforce's **pre-authorized** JWT bearer path refuses the grant without it
+    (`invalid_request: "refresh_token scope is required and the connected app should be installed and
+    preauthorized"`). Verified empirically against a dev org. The scope is present on the app; the
+    service never exercises it.
   - `openid` is needed **only if** you leave `salesforce.org_id` unset (it authorises the `/userinfo`
-    org-id lookup). **Recommended: set `org_id` in config and keep `api` alone.**
+    org-id lookup). Set `org_id` in config to avoid needing it.
 - **Introspect all Tokens** — ❌ leave unticked (authorises introspecting *every* token in the org; the
   app can already introspect its own).
 - **Configure ID token** — ❌ leave unticked (only relevant when `openid` is requested and an ID token
