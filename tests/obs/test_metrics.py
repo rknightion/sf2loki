@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry
-
 from sf2loki.obs.metrics import Metrics
 
 
 def make_metrics(**kwargs: object) -> Metrics:
-    registry = CollectorRegistry()
-    return Metrics(registry=registry, **kwargs)  # type: ignore[arg-type]
+    return Metrics(**kwargs)  # type: ignore[arg-type]
 
 
 def test_events_ingested_counter() -> None:

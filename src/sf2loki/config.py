@@ -7,6 +7,7 @@ missing/unreadable secret file is fatal at load time (no silent blanks).
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from datetime import timedelta
@@ -97,6 +98,18 @@ def _interpolate_env(value: Any) -> Any:
     return value
 
 
+class SalesforceLimitsConfig(BaseModel):
+    """Org-limits metric poller.
+
+    Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
+    limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...). Cheap
+    (one REST call per interval) and useful product telemetry.
+    """
+
+    enabled: bool = False
+    poll_interval: Duration = timedelta(minutes=5)
+
+
 class SalesforceConfig(BaseModel):
     # login_url, when left blank, is derived from ``environment`` below. An
     # explicit value (a custom My Domain URL) always takes precedence.
@@ -116,6 +129,7 @@ class SalesforceConfig(BaseModel):
     private_key: SecretStr | None = None
     api_version: str = "60.0"
     org_id: str | None = None
+    limits: SalesforceLimitsConfig = Field(default_factory=SalesforceLimitsConfig)
 
     @model_validator(mode="after")
     def _resolve_login_url_and_validate_mode(self) -> SalesforceConfig:
@@ -282,12 +296,41 @@ class StateConfig(BaseModel):
     namespace: str | None = None
 
 
+class TelemetryConfig(BaseModel):
+    """OTLP metrics egress (self-observability + Salesforce product metrics).
+
+    When ``enabled`` is false, metrics are still recorded in-process (cheap, used
+    by tests via the in-memory reader) but exported nowhere — there is no
+    Prometheus scrape endpoint; sf2loki is OTLP-push-native.
+    """
+
+    enabled: bool = False
+    # Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP
+    # gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics;
+    # for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.
+    endpoint: str = ""
+    # Auth for the OTLP endpoint. "basic" sends Authorization: Basic
+    # base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic,
+    # the credentials default to the Loki sink's tenant_id/auth_token when left
+    # blank — Grafana Cloud uses one stack credential for both Loki and OTLP.
+    auth: Literal["basic", "none"] = "basic"
+    basic_auth_user: str = ""
+    basic_auth_token: SecretStr | None = None
+    basic_auth_token_file: Path | None = None
+    # Explicit headers, merged on top of any computed Authorization header.
+    # Values support ${ENV} interpolation at config load.
+    headers: dict[str, str] = Field(default_factory=dict)
+    export_interval: Duration = timedelta(seconds=60)
+    # Extra OTel resource attributes merged onto the defaults (service.name, etc.).
+    resource_attributes: dict[str, str] = Field(default_factory=dict)
+
+
 class ServiceConfig(BaseModel):
     log_level: str = "info"
     log_format: Literal["json", "logfmt"] = "json"
-    metrics_addr: str = ":9090"
     health_addr: str = ":8080"
     shutdown_grace: Duration = timedelta(seconds=25)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
 
 
 class Config(BaseSettings):
@@ -359,7 +402,35 @@ def resolve_secrets(cfg: Config) -> Config:
         cfg.sink.loki.auth_token,
         "loki auth token",
     )
+    # Telemetry basic-auth token is optional (falls back to the Loki token when
+    # left unset), so resolve it if a file is given but never require it here.
+    cfg.service.telemetry.basic_auth_token = _resolve_secret_file(
+        cfg.service.telemetry.basic_auth_token_file,
+        cfg.service.telemetry.basic_auth_token,
+        "telemetry basic auth token",
+    )
     return cfg
+
+
+def telemetry_headers(telemetry: TelemetryConfig, loki: LokiConfig) -> dict[str, str]:
+    """Build the final OTLP export headers (Basic auth + any explicit headers).
+
+    For ``auth="basic"`` the credentials default to the Loki sink's
+    ``tenant_id``/``auth_token`` when not set explicitly (Grafana Cloud shares one
+    stack credential across Loki and OTLP). ``auth="none"`` sends no Authorization
+    header (e.g. an in-cluster Alloy receiver). Explicit ``headers`` always merge
+    on top. The base64 value carries no trailing newline (required by the gateway).
+    """
+    headers: dict[str, str] = {}
+    if telemetry.auth == "basic":
+        user = telemetry.basic_auth_user or (loki.tenant_id or "")
+        token_secret = telemetry.basic_auth_token or loki.auth_token
+        token = token_secret.get_secret_value() if token_secret is not None else ""
+        if user and token:
+            encoded = base64.b64encode(f"{user}:{token}".encode()).decode("ascii")
+            headers["Authorization"] = f"Basic {encoded}"
+    headers.update(telemetry.headers)
+    return headers
 
 
 def load(path: Path | None = None) -> Config:

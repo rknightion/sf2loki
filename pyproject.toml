@@ -16,11 +16,12 @@ dependencies = [
     "pyjwt[crypto]>=2.8",
     "cryptography>=42.0",
     "cramjam>=2.8",
-    "prometheus-client>=0.20",
     "structlog>=24.1",
     "tenacity>=8.3",
     "pyyaml>=6.0",
     "uvloop>=0.19 ; sys_platform != 'win32'",
+    "opentelemetry-sdk>=1.43.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.43.0",
 ]
 
 [project.scripts]

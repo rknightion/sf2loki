@@ -20,12 +20,12 @@ from typing import TYPE_CHECKING
 import httpx
 
 from sf2loki.auth.jwt_auth import TokenProvider
-from sf2loki.config import Config, LokiBatchConfig
+from sf2loki.config import Config, LokiBatchConfig, telemetry_headers
 from sf2loki.coordinate.base import NoopCoordinator
 from sf2loki.model import Batch, LogEntry
 from sf2loki.obs.health import Health
 from sf2loki.obs.logging import configure_logging, get_logger
-from sf2loki.obs.metrics import Metrics, start_metrics_server
+from sf2loki.obs.metrics import Metrics
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.sink import LokiSink
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
@@ -36,6 +36,7 @@ from sf2loki.state.configmap_store import ConfigMapCheckpointStore
 from sf2loki.state.file_store import FileCheckpointStore
 
 if TYPE_CHECKING:
+    from sf2loki.obs.limits_poller import LimitsPoller
     from sf2loki.sinks.base import Sink
     from sf2loki.sources.base import Source
     from sf2loki.state.base import CheckpointStore
@@ -296,6 +297,7 @@ class App:
         metrics: Metrics,
         health: Health,
         closers: Sequence[Callable[[], Awaitable[None]]],
+        limits_poller: LimitsPoller | None = None,
     ) -> None:
         self._cfg = cfg
         self._pipeline = pipeline
@@ -303,12 +305,16 @@ class App:
         self._metrics = metrics
         self._health = health
         self._closers = list(closers)
+        self._limits_poller = limits_poller
 
     @classmethod
     def build(cls, cfg: Config) -> App:
         """Composition root — construct every wired-up implementation (no network)."""
         configure_logging(cfg.service.log_level, cfg.service.log_format)
-        metrics = Metrics()
+        metrics = Metrics(
+            telemetry=cfg.service.telemetry,
+            otlp_headers=telemetry_headers(cfg.service.telemetry, cfg.sink.loki),
+        )
         health = Health()
 
         sf_http = httpx.AsyncClient()
@@ -377,6 +383,17 @@ class App:
             metrics=metrics,
         )
 
+        limits_poller: LimitsPoller | None = None
+        if cfg.salesforce.limits.enabled:
+            from sf2loki.obs.limits_poller import LimitsPoller
+            from sf2loki.salesforce.limits_client import LimitsClient
+
+            limits_poller = LimitsPoller(
+                LimitsClient(cfg.salesforce, tokens, sf_http),
+                metrics,
+                cfg.salesforce.limits.poll_interval,
+            )
+
         closers.extend([sink.aclose, sf_http.aclose, loki_http.aclose])
         return cls(
             cfg=cfg,
@@ -385,6 +402,7 @@ class App:
             metrics=metrics,
             health=health,
             closers=closers,
+            limits_poller=limits_poller,
         )
 
     async def run(self) -> None:
@@ -395,9 +413,6 @@ class App:
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, stop.set)
 
-        metrics_server = start_metrics_server(
-            self._cfg.service.metrics_addr, self._metrics.registry
-        )
         await self._health.start(self._cfg.service.health_addr)
 
         # Resolve the org id once and assemble deployment-wide labels.
@@ -411,7 +426,16 @@ class App:
 
         async def on_acquire() -> None:
             self._health.set_ready()
-            await _drain_with_grace(self._pipeline.run(stop), stop, grace)
+            poller_task: asyncio.Task[None] | None = None
+            if self._limits_poller is not None:
+                poller_task = asyncio.create_task(self._limits_poller.run(stop))
+            try:
+                await _drain_with_grace(self._pipeline.run(stop), stop, grace)
+            finally:
+                if poller_task is not None:
+                    poller_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await poller_task
 
         async def on_lose() -> None:
             self._health.set_not_ready()
@@ -423,7 +447,7 @@ class App:
                 await asyncio.wait_for(self._shutdown(), timeout=_CLOSE_TIMEOUT)
             self._health.set_not_ready()
             await self._health.stop()
-            metrics_server[0].shutdown()
+            self._metrics.shutdown()
 
     async def _shutdown(self) -> None:
         for close in self._closers:

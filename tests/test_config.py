@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import base64
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from sf2loki.config import (
     ConfigError,
@@ -12,10 +13,13 @@ from sf2loki.config import (
     EventLogFileTypeConfig,
     EventLogObjectConfig,
     LokiBatchConfig,
+    LokiConfig,
     SalesforceConfig,
     ServiceConfig,
     SourcesConfig,
+    TelemetryConfig,
     load,
+    telemetry_headers,
 )
 
 
@@ -339,3 +343,41 @@ def test_client_credentials_missing_secret_is_fatal(tmp_path: Path) -> None:
     cfg_path = _write_cc_config(tmp_path, tmp_path / "nope.txt")
     with pytest.raises(ConfigError):
         load(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry (OTLP metrics egress) config + auth header resolution
+
+
+def test_telemetry_disabled_by_default() -> None:
+    t = TelemetryConfig()
+    assert t.enabled is False
+    assert t.auth == "basic"
+
+
+def test_telemetry_headers_basic_defaults_to_loki_creds() -> None:
+    t = TelemetryConfig(enabled=True, endpoint="https://otlp/otlp/v1/metrics")
+    loki = LokiConfig(url="http://loki/push", tenant_id="12345", auth_token=SecretStr("glc_tok"))
+    headers = telemetry_headers(t, loki)
+    expected = "Basic " + base64.b64encode(b"12345:glc_tok").decode("ascii")
+    assert headers["Authorization"] == expected
+    assert "\n" not in headers["Authorization"]
+
+
+def test_telemetry_headers_explicit_creds_override_loki() -> None:
+    t = TelemetryConfig(enabled=True, basic_auth_user="999", basic_auth_token=SecretStr("tok2"))
+    loki = LokiConfig(url="http://loki/push", tenant_id="12345", auth_token=SecretStr("glc_tok"))
+    headers = telemetry_headers(t, loki)
+    assert headers["Authorization"] == "Basic " + base64.b64encode(b"999:tok2").decode("ascii")
+
+
+def test_telemetry_headers_none_auth_omits_authorization() -> None:
+    t = TelemetryConfig(enabled=True, auth="none")
+    loki = LokiConfig(url="http://loki/push", tenant_id="12345", auth_token=SecretStr("glc_tok"))
+    assert "Authorization" not in telemetry_headers(t, loki)
+
+
+def test_telemetry_headers_explicit_headers_merge() -> None:
+    t = TelemetryConfig(enabled=True, auth="none", headers={"X-Scope-OrgID": "7"})
+    headers = telemetry_headers(t, LokiConfig(url="http://loki/push"))
+    assert headers["X-Scope-OrgID"] == "7"
