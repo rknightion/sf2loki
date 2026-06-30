@@ -38,11 +38,11 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sf2loki.config import EventLogFileConfig
+from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
 from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.eventlogfile_client import EventLogFileMeta
-from sf2loki.shaping import extract_timestamp, route_fields
+from sf2loki.shaping import extract_timestamp, promote_labels, route_fields
 from sf2loki.state.base import CheckpointStore
 
 _MAX_CARRIED_IDS = 200
@@ -90,11 +90,11 @@ class EventLogFileSource:
             if stop.is_set():
                 return
 
-            for event_type in self._cfg.event_types:
+            for type_cfg in self._cfg.event_types:
                 if stop.is_set():
                     return
 
-                async for entry in self._process_event_type(event_type, state, stop):
+                async for entry in self._process_event_type(type_cfg, state, stop):
                     yield entry
 
             if self._poll_once:
@@ -108,10 +108,18 @@ class EventLogFileSource:
 
     async def _process_event_type(
         self,
-        event_type: str,
+        type_cfg: EventLogFileTypeConfig,
         state: CheckpointStore,
         stop: asyncio.Event,
     ) -> AsyncIterator[LogEntry]:
+        event_type = type_cfg.name
+        # Per-type structured-metadata override; None means "use the global set".
+        sm_fields = (
+            type_cfg.structured_metadata_fields
+            if type_cfg.structured_metadata_fields is not None
+            else self._sm_fields
+        )
+        label_fields = type_cfg.labels
         key = f"eventlogfile:{event_type}"
         default_since = (datetime.now(UTC) - self._cfg.lookback).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -160,8 +168,11 @@ class EventLogFileSource:
                     carried_last_created, carried_ids = current_last_created, current_ids
 
                 ts = extract_timestamp(row, field_names=(self._cfg.timestamp_column, "TIMESTAMP"))
-                line, sm = route_fields(row, self._sm_fields)
+                line, sm = route_fields(row, sm_fields)
+                # Promoted labels first, then reserved keys — reserved win so a
+                # promoted column can never clobber source identity.
                 labels: dict[str, str] = {
+                    **promote_labels(row, label_fields),
                     "source": "eventlogfile",
                     "event_type": event_type,
                 }

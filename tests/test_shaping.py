@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sf2loki.shaping import extract_timestamp, route_fields
+from sf2loki.shaping import cap_line, extract_timestamp, promote_labels, route_fields
 
 
 def test_route_fields_routes_only_listed_present_keys() -> None:
@@ -18,6 +18,51 @@ def test_route_fields_routes_only_listed_present_keys() -> None:
 def test_route_fields_skips_null_sm_values() -> None:
     _, sm = route_fields({"UserId": None, "Ip": "x"}, ["UserId", "Ip"])
     assert sm == {"Ip": "x"}
+
+
+def test_promote_labels_present_and_stringified() -> None:
+    labels = promote_labels({"API_TYPE": "REST", "COUNT": 3, "X": "y"}, ["API_TYPE", "COUNT"])
+    assert labels == {"API_TYPE": "REST", "COUNT": "3"}
+
+
+def test_promote_labels_skips_absent_and_null() -> None:
+    labels = promote_labels({"A": None, "B": "v"}, ["A", "B", "MISSING"])
+    assert labels == {"B": "v"}
+
+
+def test_promote_labels_empty_when_no_fields() -> None:
+    assert promote_labels({"A": "v"}, []) == {}
+
+
+def test_cap_line_under_limit_untouched() -> None:
+    line, truncated = cap_line("hello", 100)
+    assert line == "hello"
+    assert truncated is False
+
+
+def test_cap_line_disabled_when_zero() -> None:
+    big = "x" * 1000
+    line, truncated = cap_line(big, 0)
+    assert line == big
+    assert truncated is False
+
+
+def test_cap_line_truncates_with_marker_under_limit() -> None:
+    big = "x" * 1000
+    line, truncated = cap_line(big, 100)
+    assert truncated is True
+    assert len(line.encode("utf-8")) <= 100
+    assert "truncated" in line
+
+
+def test_cap_line_utf8_multibyte_boundary_safe() -> None:
+    # Each '€' is 3 UTF-8 bytes; cutting at a byte budget must not split a char.
+    big = "€" * 200  # 600 bytes
+    line, truncated = cap_line(big, 100)
+    assert truncated is True
+    assert len(line.encode("utf-8")) <= 100
+    # No replacement char / no UnicodeDecodeError implies a clean boundary.
+    line.encode("utf-8").decode("utf-8")
 
 
 def test_extract_timestamp_epoch_millis() -> None:

@@ -129,15 +129,70 @@ class EventLogObjectsConfig(BaseModel):
     objects: list[EventLogObjectConfig] = Field(default_factory=list)
 
 
+# Label keys injected/reserved by the pipeline + sink; a promoted ELF column
+# must not reuse these (it would clobber source identity or be silently
+# overridden by the injected static labels in app._produce).
+_RESERVED_LABEL_KEYS: frozenset[str] = frozenset(
+    {"source", "event_type", "job", "sf_org_id", "environment"}
+)
+_LABEL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class EventLogFileTypeConfig(BaseModel):
+    """Per-event-type ELF ingestion config.
+
+    A bare string in ``eventlogfile.event_types`` coerces to ``{name: <string>}``
+    (backward compatible). ``structured_metadata_fields`` defaults to ``None``,
+    meaning "fall back to the global ``sink.loki.structured_metadata_fields``";
+    set it to a list (including ``[]``) to override per type. ``labels`` lists
+    columns promoted to stream labels — keep these LOW cardinality.
+    """
+
+    name: str
+    structured_metadata_fields: list[str] | None = None
+    labels: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_labels(self) -> EventLogFileTypeConfig:
+        for label in self.labels:
+            if label in _RESERVED_LABEL_KEYS:
+                raise ValueError(
+                    f"eventlogfile type {self.name!r}: cannot promote reserved label "
+                    f"key {label!r} (reserved: {', '.join(sorted(_RESERVED_LABEL_KEYS))})"
+                )
+            if not _LABEL_NAME_RE.match(label):
+                raise ValueError(
+                    f"eventlogfile type {self.name!r}: promoted label {label!r} is not a "
+                    "valid Loki label name (must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+        return self
+
+
+def _coerce_event_type(value: object) -> object:
+    """Coerce a bare string event-type into a per-type mapping."""
+    if isinstance(value, str):
+        return {"name": value}
+    return value
+
+
+def _coerce_event_types(value: object) -> object:
+    if isinstance(value, list):
+        return [_coerce_event_type(v) for v in value]
+    return value
+
+
 class EventLogFileConfig(BaseModel):
     enabled: bool = False
     # Ingest exactly ONE interval; hourly and daily files are redundant copies
     # of the same events (Salesforce), so ingesting both double-counts.
     interval: Literal["Hourly", "Daily"] = "Hourly"
-    # ELF EventType values to ingest (e.g. ["Login", "API", "Report"]). Required
-    # when enabled — there is no sensible "all" default given ~70 types and the
-    # either/or-per-category model.
-    event_types: list[str] = Field(default_factory=list)
+    # ELF EventTypes to ingest. Each item is either a bare string (e.g. "Login")
+    # or a per-type object (name + optional structured_metadata_fields/labels).
+    # Required when enabled — there is no sensible "all" default given ~70 types
+    # and the either/or-per-category model.
+    event_types: Annotated[list[EventLogFileTypeConfig], BeforeValidator(_coerce_event_types)] = (
+        Field(default_factory=list)
+    )
     poll_interval: Duration = timedelta(hours=1)  # how often to list new files
     lookback: Duration = timedelta(hours=24)  # initial window when no checkpoint
     timestamp_column: str = "TIMESTAMP_DERIVED"  # per-row timestamp column
@@ -166,6 +221,10 @@ class LokiBatchConfig(BaseModel):
     max_entries: int = 1000
     max_bytes: int = 1_048_576
     flush_interval: Duration = timedelta(seconds=1)
+    # Per-line UTF-8 byte cap; lines longer than this are truncated (with a
+    # marker) before push so one oversized row can't 400 its whole batch.
+    # Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
+    max_line_bytes: int = 262144
 
 
 class LokiConfig(BaseModel):

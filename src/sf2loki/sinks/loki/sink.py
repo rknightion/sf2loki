@@ -17,6 +17,7 @@ import tenacity
 from sf2loki.config import LokiConfig
 from sf2loki.model import Batch
 from sf2loki.obs.metrics import Metrics
+from sf2loki.shaping import cap_line
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.labels import guard_labels
 from sf2loki.sinks.loki.push import encode_json, encode_protobuf
@@ -150,6 +151,8 @@ class LokiSink:
         if not batch.entries:
             return
 
+        self._cap_lines(batch)
+
         body, content_headers = self._encode(batch)
         status = await self._post(body, content_headers)
 
@@ -182,6 +185,25 @@ class LokiSink:
 
         # Any other 4xx is also permanent.
         raise PermanentSinkError(f"Loki rejected batch (HTTP {status})")
+
+    def _cap_lines(self, batch: Batch) -> None:
+        """Truncate any over-cap lines in place before encoding.
+
+        A single oversized line would otherwise be rejected by Loki (HTTP 400,
+        ``max_line_size`` exceeded) and take its whole batch down. Truncating
+        here keeps the rest of the batch deliverable. Idempotent — re-capping an
+        already-capped line is a no-op, so this is safe under 413 split recursion.
+        """
+        cap = self._cfg.batch.max_line_bytes
+        if cap <= 0:
+            return
+        for entry in batch.entries:
+            capped, truncated = cap_line(entry.line, cap)
+            if truncated:
+                entry.line = capped
+                self._metrics.lines_truncated.labels(
+                    source=entry.labels.get("source", "unknown")
+                ).inc()
 
     async def aclose(self) -> None:
         await self._client.aclose()

@@ -28,7 +28,9 @@ data:
       # eventlogfile:
       #   enabled: true
       #   interval: Hourly        # Hourly | Daily (pick one)
-      #   event_types: [Report, ApexExecution, URI]
+      #   event_types:            # bare string, or {name, structured_metadata_fields?, labels?}
+      #     - Report
+      #     - {name: ApexExecution, structured_metadata_fields: [ENTRY_POINT], labels: [QUIDDITY]}
       #   poll_interval: 1h
       #   lookback: 24h
     sink:
@@ -42,6 +44,8 @@ data:
         labels:
           environment: prod
         structured_metadata_fields: [replay_id, schema_id, user_id, username, source_ip, session_key]
+        batch:
+          max_line_bytes: 262144  # per-line cap; oversized lines truncated before push (0 disables)
     state:
       store: configmap
       configmap_name: sf2loki-state

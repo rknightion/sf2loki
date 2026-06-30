@@ -151,6 +151,13 @@ class Metrics:
             registry=self.registry,
         )
 
+        self.lines_truncated = Counter(
+            "sf2loki_lines_truncated",
+            "Total log lines truncated to the configured max_line_bytes, per source",
+            ["source"],
+            registry=self.registry,
+        )
+
         self.build_info = Gauge(
             "sf2loki_build_info",
             "Build metadata; value is always 1",

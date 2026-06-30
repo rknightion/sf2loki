@@ -358,7 +358,7 @@ class App:
                     metrics=metrics,
                 )
             )
-            elf_event_types = list(cfg.sources.eventlogfile.event_types)
+            elf_event_types = [t.name for t in cfg.sources.eventlogfile.event_types]
 
         # Fail fast if one event category is fed by more than one source (which
         # would ingest duplicate events). Bypass with sources.allow_overlap.

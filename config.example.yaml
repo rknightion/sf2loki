@@ -8,11 +8,13 @@
 
 salesforce:
   login_url: https://login.salesforce.com      # or https://test.salesforce.com / your My Domain
-  client_id: ${SF_CLIENT_ID}                    # Connected App consumer key
-  username: svc@example.com                      # integration user (pre-authorised on the Connected App)
+  client_id: ${SF_CLIENT_ID}                    # External Client App consumer key
+  username: svc@example.com                      # integration user (pre-authorised on the app's Policies tab)
   private_key_file: /etc/sf2loki/secrets/server.key
   api_version: "60.0"
-  org_id: null                                   # auto-resolved via /services/oauth2/userinfo when null
+  org_id: null                                   # set this to keep the app on the `api` scope alone;
+                                                 # left null it is auto-resolved via /services/oauth2/userinfo
+                                                 # (which then needs the `openid` scope)
 
 sources:
   # Either/or per event category: ingest each category (Login, API, Report, ...)
@@ -43,10 +45,18 @@ sources:
     # EventLogFile (CSV) ingestion. ~70 event types; schema is read per-file.
     enabled: false
     interval: Hourly                              # Hourly (3-6h fresh) | Daily (>=1d) — pick ONE
-    event_types:                                  # ELF EventType values to ingest (required when enabled)
+    event_types:                                  # ELF EventTypes to ingest (required when enabled)
+      # Each item is a bare string OR a per-type object. A bare string uses the
+      # global structured_metadata_fields below and promotes no extra labels.
       - Login
       - API
-      - Report
+      # Per-type object: override structured metadata and/or promote columns to
+      # stream labels for just this type. structured_metadata_fields overrides
+      # the global list (omit to inherit it; [] to suppress it). labels MUST be
+      # LOW cardinality — each distinct value is a new Loki stream.
+      - name: ReportExport
+        structured_metadata_fields: [REPORT_ID, OWNER_ID]
+        labels: [DELEGATED_USER]
     poll_interval: 1h                             # how often to list new files
     lookback: 24h                                 # initial window on first run (no checkpoint = "from now")
     timestamp_column: TIMESTAMP_DERIVED           # per-row event time column
@@ -67,6 +77,10 @@ sink:
       max_entries: 1000
       max_bytes: 1048576
       flush_interval: 1s
+      max_line_bytes: 262144                      # per-line UTF-8 cap; oversized lines are
+                                                  # truncated (with a marker) before push so one
+                                                  # fat row can't 400 its batch. 0 disables.
+                                                  # Mirror your Loki server's max_line_size.
     labels:
       environment: prod                           # job + sf_org_id are added automatically
     structured_metadata_fields:

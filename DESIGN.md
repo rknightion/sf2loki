@@ -150,14 +150,34 @@ implementation can be added later for active-passive failover with **zero** chan
 
 `auth/jwt_auth.py`, server-to-server, no interactive login.
 
-1. Mint an RS256 JWT: `iss`=Connected-App consumer key, `sub`=integration username,
+1. Mint an RS256 JWT: `iss`=External-Client-App consumer key, `sub`=integration username,
    `aud`=login URL (`https://login.salesforce.com`, `test.salesforce.com`, or the My Domain URL),
    `exp`=now+~3 min. Sign with the private key (file- or env-injected).
 2. POST to `{login_url}/services/oauth2/token`, `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
    `assertion=<jwt>` → `{access_token, instance_url}`.
 3. The JWT flow returns **no refresh token** — re-mint a JWT and re-request on expiry or on 401.
 4. **org id (`tenantid`)** for Pub/Sub metadata is resolved once via
-   `GET {instance_url}/services/oauth2/userinfo` → `organization_id` (overridable in config).
+   `GET {instance_url}/services/oauth2/userinfo` → `organization_id`. Set `salesforce.org_id`
+   in config to skip this call entirely (and drop the `openid` scope — see below).
+
+**App config (External Client App — the path Salesforce recommends/now requires for new apps):**
+- **OAuth scope: `api` only.** It covers REST/SOQL, the EventLogFile `/LogFile` blob download, and the
+  Pub/Sub API (which has no scope of its own — it authenticates with a plain access token in the gRPC
+  `accesstoken` header). `refresh_token`/`offline_access` is **not** needed (JWT bearer issues no
+  refresh token). `openid` is needed **only if** `org_id` is left unset (for the `/userinfo` call) —
+  prefer setting `org_id` and using `api` alone. Everything else (`web`, `full`, `chatter_api`,
+  `visualforce`, `id`, the `cdp_*`/`sfap_api`/`interaction_api` Data Cloud scopes) stays off.
+- **Flow Enablement: enable JWT Bearer Flow only.** Leaving Client-Credentials / Auth-Code / Device /
+  Token-Exchange off means the app can only mint tokens our one way — attack-surface reduction at no
+  cost.
+- **Security toggles:** the three defaults (`Require secret for Web Server Flow` / `…Refresh Token
+  Flow` / `Require PKCE`) govern flows we don't use — harmless, leave ticked. The refresh-token
+  controls (rotation, idle-TTL, IP allowlist) are moot (no refresh token). "Issue JWT-based access
+  tokens for named users" changes the access-token *format* (≠ JWT bearer auth) — leave off; opaque,
+  server-revocable tokens are preferable here.
+- **Policies tab (admin-owned):** Permitted Users = *Admin approved users are pre-authorized*
+  (mandatory for JWT bearer) + a permission set on the integration user; add a login-IP restriction
+  there if egress IPs are stable. Upload the X.509 public cert under OAuth Settings → JWT Bearer Flow.
 
 ```python
 class TokenProvider:
@@ -226,7 +246,16 @@ Per configured `EventType`: list new `EventLogFile` records via SOQL
 (`WHERE EventType=… AND Interval=… AND CreatedDate >= :since ORDER BY CreatedDate, Id`), download each
 `LogFile` blob (`GET …/sobjects/EventLogFile/{id}/LogFile`, CSV), parse it **schema-agnostically**
 (columns vary per type and API version — read the CSV header / `LogFileFieldNames`, never hardcode the
-~70 type schemas), and emit one `LogEntry` per row. Per-row timestamp = `TIMESTAMP_DERIVED`.
+~70 type schemas), and emit one `LogEntry` per row. Per-row timestamp = `TIMESTAMP_DERIVED`. Emitting
+one entry **per row** (not per file) is also what keeps lines under Loki's per-line size limit — see §9.
+
+- **Per-type routing.** `event_types` items are either a bare string (e.g. `Login`) or a per-type
+  object `{name, structured_metadata_fields?, labels?}`. `structured_metadata_fields` overrides the
+  global `sink.loki.structured_metadata_fields` for that type (omit/`null` → inherit the global; `[]` →
+  suppress it). `labels` promotes the named columns to **stream labels** for that type — a deliberate
+  cardinality knob: only promote low-cardinality columns (each distinct value is a new stream).
+  Promotion can never clobber the reserved keys (`source`/`event_type`/`job`/`sf_org_id`/`environment`);
+  config validation rejects promoting any of them or a non-identifier label name.
 
 - **One interval only.** Hourly and Daily files are redundant copies of the same events; ingesting
   both double-counts. `interval` config selects one (default `Hourly`, ~3–6h fresh; `Daily` is ≥1 day
@@ -261,6 +290,13 @@ to the same either/or overlap guard (§10) as Phase 2.
   `tenant_id:token`), self-hosted (`X-Scope-OrgID`), or local Alloy `loki.source.api` (URL only, no
   auth) — all the same push API, switched by config.
 - **Batching**: `max_entries` / `max_bytes` / `flush_interval`; proactive split before a 413.
+- **Per-line cap** (`batch.max_line_bytes`, default 262144 = Loki's `max_line_size` default; `0`
+  disables): a line longer than the cap is truncated on a UTF-8 boundary with a `…[truncated, original
+  N bytes]` marker before push, and `sf2loki_lines_truncated_total{source}` is incremented. Without
+  this, a single oversized line (e.g. a giant ELF `QUERY`/`URI` column) would draw a 400 from Loki and,
+  since 400 is permanent, take its **whole batch** down. (One entry per row already prevents the
+  whole-file-as-one-line mistake; this guards the rarer fat-single-row case.) Mirror your Loki server's
+  `max_line_size`.
 - **Retry classification**: 429/5xx/transport → retryable (bounded backoff w/ jitter); 400 / 413
   (unsplittable) / encode error → permanent (drop + count + advance).
 
@@ -296,8 +332,15 @@ Queryable as `{event_type="LoginEventStream"} | user_id="005…"` with no stream
 to labels multiplies streams by every identity seen → millions of low-throughput streams: blown
 per-tenant stream limits, exploding index/DPM cost, and degraded query planning. Structured metadata
 delivers the same filterability *without* the cardinality — exactly its design intent. `labels.py`
-enforces a **startup allowlist guard**: any label key not in the permitted set fails fast (mirrors
-`genai-otel-bridge`'s governance guard).
+enforces a **startup allowlist guard**: any *static* label key not in the permitted set fails fast
+(mirrors `genai-otel-bridge`'s governance guard).
+
+**Per-type label promotion (ELF escape hatch).** When a deployment genuinely needs a *low*-cardinality
+ELF column as a stream label (not just filterable metadata), an `eventlogfile` type can list it under
+`labels` (§8). This bypasses the static allowlist by design — it's an explicit, per-type opt-in — so it
+is the operator's responsibility to keep the chosen column low-cardinality; config still refuses to let
+it shadow a reserved label key. Prefer `structured_metadata_fields` unless you actually need to slice
+streams by that column.
 
 **Overlap guard (`sources/overlap.py`).** A second startup guard enforces the either/or model: it
 normalises every enabled source's identifiers (Pub/Sub topics, stored object names, ELF event types)
@@ -341,7 +384,12 @@ sources:
     enabled: false
     objects:
       - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
-  eventlogfile: {enabled: false}                 # Phase 3 stub
+  eventlogfile:
+    enabled: false
+    interval: Hourly                             # Hourly | Daily — pick ONE
+    event_types:                                 # bare string, or {name, structured_metadata_fields?, labels?}
+      - Login
+      - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
 
 sink:
   type: loki
@@ -351,7 +399,7 @@ sink:
     auth_token_file: /etc/sf2loki/secrets/loki-token
     encoding: protobuf                           # protobuf (default) | json
     compression: snappy                          # snappy (protobuf) | gzip (json)
-    batch: {max_entries: 1000, max_bytes: 1048576, flush_interval: 1s}
+    batch: {max_entries: 1000, max_bytes: 1048576, flush_interval: 1s, max_line_bytes: 262144}
     labels: {environment: prod}                  # job + sf_org_id added automatically
     structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]
 

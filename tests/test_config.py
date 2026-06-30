@@ -9,7 +9,9 @@ from pydantic import ValidationError
 from sf2loki.config import (
     ConfigError,
     EventLogFileConfig,
+    EventLogFileTypeConfig,
     EventLogObjectConfig,
+    LokiBatchConfig,
     ServiceConfig,
     SourcesConfig,
     load,
@@ -181,11 +183,58 @@ sink:
 def test_eventlogfile_config_defaults() -> None:
     cfg = EventLogFileConfig(enabled=True, event_types=["Login"])
     assert cfg.interval == "Hourly"
-    assert cfg.event_types == ["Login"]
+    # Bare strings coerce to per-type objects (backward compatible).
+    assert [t.name for t in cfg.event_types] == ["Login"]
+    assert cfg.event_types[0].structured_metadata_fields is None
+    assert cfg.event_types[0].labels == []
     assert cfg.poll_interval == timedelta(hours=1)
     assert cfg.lookback == timedelta(hours=24)
     assert cfg.timestamp_column == "TIMESTAMP_DERIVED"
     assert cfg.page_size == 1000
+
+
+def test_eventlogfile_rich_per_type_objects() -> None:
+    cfg = EventLogFileConfig(
+        enabled=True,
+        event_types=[
+            "Login",
+            {
+                "name": "ReportExport",
+                "structured_metadata_fields": ["REPORT_ID", "OWNER_ID"],
+                "labels": ["DELEGATED_USER"],
+            },
+        ],
+    )
+    assert [t.name for t in cfg.event_types] == ["Login", "ReportExport"]
+    # Bare string -> no overrides (falls back to global at runtime).
+    assert cfg.event_types[0].structured_metadata_fields is None
+    assert cfg.event_types[0].labels == []
+    # Rich object carries per-type sm + label promotion.
+    assert cfg.event_types[1].structured_metadata_fields == ["REPORT_ID", "OWNER_ID"]
+    assert cfg.event_types[1].labels == ["DELEGATED_USER"]
+
+
+def test_eventlogfile_type_rejects_reserved_label() -> None:
+    with pytest.raises(ValidationError):
+        EventLogFileTypeConfig(name="Login", labels=["source"])
+
+
+def test_eventlogfile_type_rejects_invalid_label_identifier() -> None:
+    with pytest.raises(ValidationError):
+        EventLogFileTypeConfig(name="Login", labels=["not-a-valid-label"])
+
+
+def test_eventlogfile_type_accepts_valid_label() -> None:
+    cfg = EventLogFileTypeConfig(name="API", labels=["API_TYPE", "METHOD_NAME"])
+    assert cfg.labels == ["API_TYPE", "METHOD_NAME"]
+
+
+def test_loki_batch_max_line_bytes_default() -> None:
+    assert LokiBatchConfig().max_line_bytes == 262144
+
+
+def test_loki_batch_max_line_bytes_override() -> None:
+    assert LokiBatchConfig(max_line_bytes=0).max_line_bytes == 0
 
 
 def test_eventlogfile_interval_rejects_junk() -> None:

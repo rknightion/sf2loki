@@ -20,6 +20,11 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - **Cardinality discipline**: a fixed label allowlist (`job`, `source`, `event_type`, `sf_org_id`,
   `environment`); everything high-cardinality (`user_id`, `source_ip`, `replay_id`, …) goes to
   structured metadata or the JSON line — never labels. A startup guard fails fast on stray labels.
+  Structured-metadata promotion is configurable globally and **per ELF event type**; per-type `labels`
+  is an explicit opt-in escape hatch for the rare low-cardinality column you want as a stream label.
+- **Loki-safe lines**: one entry per ELF row (never a whole file as one line), plus a per-line byte cap
+  (`batch.max_line_bytes`, default 256 KiB) that truncates an oversized line before push so one fat row
+  can't get its whole batch rejected.
 - **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a file or a k8s
   ConfigMap; at-least-once delivery, structural backpressure (no silent drops).
 - **Self-observable**: Prometheus `/metrics`, `/healthz`, `/readyz`, structured logs, graceful
@@ -30,22 +35,35 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 The service authenticates server-to-server with the JWT bearer flow — no interactive login, no
 refresh token (it re-mints a JWT on expiry / 401).
 
-1. **Generate an RSA keypair and self-signed cert** (the cert goes on the Connected App; the private
-   key is mounted into the pod):
+1. **Generate an RSA keypair and self-signed cert** (the cert goes on the External Client App; the
+   private key is mounted into the pod):
    ```bash
    openssl genrsa -out server.key 2048
    openssl req -new -x509 -key server.key -out server.crt -days 3650 \
      -subj "/CN=sf2loki"
    ```
-2. **Create a Connected App** (Setup → App Manager → New Connected App):
-   - Enable OAuth Settings; callback URL can be a placeholder (`https://login.salesforce.com`).
-   - **Use digital signatures** → upload `server.crt`.
-   - OAuth scopes: `api`, `refresh_token, offline_access` (the JWT flow ignores the refresh token but
-     the scope is required), and `openid` (for `/userinfo` org-id resolution).
-   - Save; copy the **Consumer Key** → this is `salesforce.client_id`.
-3. **Pre-authorise the integration user**: edit the Connected App policies → *Permitted Users:
-   Admin approved users are pre-authorized*, then assign the app to a Permission Set / Profile that
-   the integration user has.
+2. **Create an External Client App** (Setup → External Client App Manager → New — the path Salesforce
+   recommends, and now requires for new apps in place of Connected Apps):
+   - Enable OAuth. Callback URL is a required field but is never invoked by JWT bearer (no redirect) —
+     a placeholder like `https://login.salesforce.com/services/oauth2/callback` is fine.
+   - **OAuth scope: `api` only** — it covers REST/SOQL, the EventLogFile `/LogFile` download, and the
+     Pub/Sub API (no scope of its own; it just needs a valid access token). `refresh_token`/
+     `offline_access` is **not** required (JWT bearer issues no refresh token). Add `openid` **only if**
+     you leave `salesforce.org_id` unset (it permits the `/userinfo` org-id lookup) — otherwise set
+     `org_id` in config and keep `api` alone. Leave all other scopes off.
+   - **Flow Enablement: tick *Enable JWT Bearer Flow* only.** Leaving the other flows
+     (Client-Credentials, Auth-Code, Device, Token-Exchange) off means the app can only be used our one
+     way — pure attack-surface reduction.
+   - **Security:** the three default toggles (require secret for web-server / refresh-token flows,
+     require PKCE) govern flows we don't use — harmless, leave them ticked. The refresh-token controls
+     are moot (no refresh token). Leave *Issue JWT-based access tokens for named users* off (it changes
+     the access-token format and is unrelated to JWT bearer auth).
+   - **OAuth Settings → JWT Bearer Flow → upload `server.crt`** (the ECA equivalent of "use digital
+     signatures").
+   - Save; copy the **Consumer Key** (App Settings) → this is `salesforce.client_id`.
+3. **Pre-authorise the integration user** (Policies tab — admin-owned): *Permitted Users: Admin
+   approved users are pre-authorized* (mandatory for JWT bearer), then assign the app to a Permission
+   Set the integration user holds. Add a login-IP restriction here if your egress IPs are stable.
 4. **Permission sets / licences** for the integration user:
    - **Shield Event Monitoring** add-on (for most RTEM streaming channels) and **Threat Detection**
      (for anomaly channels such as `ApiAnomalyEvent`).

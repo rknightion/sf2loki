@@ -419,3 +419,95 @@ class TestAclose:
         s = LokiSink(cfg, client)
         await s.aclose()
         assert client.is_closed
+
+
+# ---------------------------------------------------------------------------
+# Per-line byte cap (max_line_bytes)
+# ---------------------------------------------------------------------------
+
+
+def _cfg_line_cap(max_line_bytes: int) -> LokiConfig:
+    return LokiConfig(
+        url=PUSH_URL,
+        encoding="json",
+        compression="none",
+        batch=LokiBatchConfig(max_line_bytes=max_line_bytes),
+        labels={"source": "pubsub", "event_type": "LoginEventStream"},
+    )
+
+
+class TestLineCap:
+    @respx.mock
+    async def test_oversized_line_truncated_before_push(self) -> None:
+        route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg_line_cap(200)
+        big = "x" * 5000
+        entry = LogEntry(
+            timestamp=TS,
+            labels={"source": "eventlogfile", "event_type": "API"},
+            line=big,
+            structured_metadata={},
+            checkpoint=CheckpointToken(key="eventlogfile:API", value="1"),
+        )
+        metrics = Metrics()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client, metrics=metrics)
+            await s.push(Batch(entries=[entry]))
+
+        body = route.calls.last.request.content.decode("utf-8")
+        # The 5000-char line must not appear in full; a truncation marker should.
+        assert "x" * 5000 not in body
+        assert "truncated" in body
+        # The entry was mutated in place to the capped line.
+        assert len(entry.line.encode("utf-8")) <= 200
+        assert (
+            metrics.registry.get_sample_value(
+                "sf2loki_lines_truncated_total", {"source": "eventlogfile"}
+            )
+            == 1.0
+        )
+
+    @respx.mock
+    async def test_under_cap_line_untouched(self) -> None:
+        route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg_line_cap(262144)
+        entry = LogEntry(
+            timestamp=TS,
+            labels={"source": "eventlogfile", "event_type": "API"},
+            line="small line",
+            structured_metadata={},
+            checkpoint=CheckpointToken(key="eventlogfile:API", value="1"),
+        )
+        metrics = Metrics()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client, metrics=metrics)
+            await s.push(Batch(entries=[entry]))
+
+        assert entry.line == "small line"
+        assert route.call_count == 1
+        assert (
+            metrics.registry.get_sample_value(
+                "sf2loki_lines_truncated_total", {"source": "eventlogfile"}
+            )
+            is None
+        )
+
+    @respx.mock
+    async def test_cap_disabled_when_zero(self) -> None:
+        route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg_line_cap(0)
+        big = "y" * 5000
+        entry = LogEntry(
+            timestamp=TS,
+            labels={"source": "eventlogfile", "event_type": "API"},
+            line=big,
+            structured_metadata={},
+            checkpoint=CheckpointToken(key="eventlogfile:API", value="1"),
+        )
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            await s.push(Batch(entries=[entry]))
+
+        assert entry.line == big  # untouched
+        body = route.calls.last.request.content.decode("utf-8")
+        assert "y" * 5000 in body

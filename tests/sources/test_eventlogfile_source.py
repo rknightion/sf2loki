@@ -15,7 +15,7 @@ from typing import Literal
 
 import pytest
 
-from sf2loki.config import EventLogFileConfig
+from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
 from sf2loki.salesforce.eventlogfile_client import EventLogFileMeta
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.state.file_store import FileCheckpointStore
@@ -146,6 +146,109 @@ async def test_sm_fields_promoted_to_structured_metadata(
     assert len(entries) == 1
     assert entries[0].structured_metadata.get("USER_ID") == "005xx"
     assert "USER_ID" not in entries[0].labels
+
+
+@pytest.mark.asyncio
+async def test_per_type_sm_fields_override_global(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A type's structured_metadata_fields overrides the global sm_fields."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1", event_type="API")
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "API_TYPE": "REST", "USER_ID": "005"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=[EventLogFileTypeConfig(name="API", structured_metadata_fields=["API_TYPE"])],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+    # Global sm_fields would promote USER_ID, but the per-type override wins.
+    source = EventLogFileSource(cfg, client, sm_fields=["USER_ID"], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    assert len(entries) == 1
+    assert entries[0].structured_metadata == {"API_TYPE": "REST"}
+    assert "USER_ID" not in entries[0].structured_metadata
+
+
+@pytest.mark.asyncio
+async def test_empty_per_type_sm_fields_suppresses_global(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """An explicit empty list (not None) suppresses the global sm_fields."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1", event_type="API")
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "USER_ID": "005"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=[EventLogFileTypeConfig(name="API", structured_metadata_fields=[])],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+    source = EventLogFileSource(cfg, client, sm_fields=["USER_ID"], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    assert entries[0].structured_metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_per_type_labels_promoted_to_stream_labels(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1", event_type="API")
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "API_TYPE": "REST"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=[EventLogFileTypeConfig(name="API", labels=["API_TYPE"])],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    assert entries[0].labels == {
+        "source": "eventlogfile",
+        "event_type": "API",
+        "API_TYPE": "REST",
+    }
+
+
+@pytest.mark.asyncio
+async def test_promoted_label_cannot_clobber_source_identity(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Even if a row has a column colliding with event_type, reserved keys win."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1", event_type="API")
+    # event_type is reserved so it can't be configured for promotion; simulate a
+    # benign promoted column whose VALUE differs from the event_type to prove the
+    # reserved key is not overwritten.
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "REQUEST_STATUS": "S"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=[EventLogFileTypeConfig(name="API", labels=["REQUEST_STATUS"])],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    assert entries[0].labels["source"] == "eventlogfile"
+    assert entries[0].labels["event_type"] == "API"
+    assert entries[0].labels["REQUEST_STATUS"] == "S"
 
 
 @pytest.mark.asyncio

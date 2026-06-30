@@ -26,6 +26,47 @@ def route_fields(
     return line, sm
 
 
+def promote_labels(payload: Mapping[str, object], label_fields: Sequence[str]) -> dict[str, str]:
+    """Promote selected payload fields to (stringified) stream labels.
+
+    Only fields present and non-null are promoted. Mirrors :func:`route_fields`'s
+    structured-metadata selection, but the result is intended for stream labels
+    — so callers MUST restrict *label_fields* to low-cardinality columns to avoid
+    a Loki stream-cardinality explosion.
+    """
+    return {k: str(payload[k]) for k in label_fields if payload.get(k) is not None}
+
+
+_TRUNCATION_MARKER = "…[truncated, original {orig} bytes]"
+
+
+def cap_line(line: str, max_bytes: int) -> tuple[str, bool]:
+    """Cap *line* to at most *max_bytes* UTF-8 bytes, returning (line, truncated).
+
+    A non-positive *max_bytes* disables the cap. When the line fits it is
+    returned unchanged. Otherwise it is truncated on a UTF-8 character boundary
+    (never splitting a multibyte char) and a marker noting the original size is
+    appended; the marker is included in the byte budget so the result never
+    exceeds *max_bytes*. Idempotent: re-capping an already-capped line is a
+    no-op. If the budget is too small to fit even the marker, the line is hard
+    cut to *max_bytes* with no marker.
+    """
+    if max_bytes <= 0:
+        return line, False
+    encoded = line.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return line, False
+
+    marker = _TRUNCATION_MARKER.format(orig=len(encoded))
+    marker_bytes = len(marker.encode("utf-8"))
+    budget = max_bytes - marker_bytes
+    if budget <= 0:
+        # Marker won't fit; hard-cut to the limit on a char boundary, no marker.
+        return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+    head = encoded[:budget].decode("utf-8", errors="ignore")
+    return head + marker, True
+
+
 def _parse_ts_value(value: object) -> datetime | None:
     """Parse a single timestamp value, or return None if it can't be parsed.
 
