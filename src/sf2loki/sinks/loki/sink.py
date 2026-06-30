@@ -16,6 +16,7 @@ import tenacity
 
 from sf2loki.config import LokiConfig
 from sf2loki.model import Batch
+from sf2loki.obs.metrics import Metrics
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.labels import guard_labels
 from sf2loki.sinks.loki.push import encode_json, encode_protobuf
@@ -38,12 +39,19 @@ class LokiSink:
     ``async aclose() -> None``.
     """
 
-    def __init__(self, cfg: LokiConfig, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        cfg: LokiConfig,
+        client: httpx.AsyncClient,
+        *,
+        metrics: Metrics | None = None,
+    ) -> None:
         guard_labels(cfg.labels)  # fail fast on disallowed static label keys
 
         self._cfg = cfg
         self._client = client
         self._headers = self._build_headers()
+        self._metrics = metrics if metrics is not None else Metrics()
 
     # ------------------------------------------------------------------
     # Header construction
@@ -146,6 +154,7 @@ class LokiSink:
         status = await self._post(body, content_headers)
 
         if 200 <= status < 300:
+            self._metrics.loki_bytes_pushed.inc(len(body))
             return
 
         if status == 413:

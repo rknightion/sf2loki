@@ -15,6 +15,7 @@ from pydantic import SecretStr
 
 from sf2loki.auth.jwt_auth import AccessToken, AuthError, TokenProvider
 from sf2loki.config import SalesforceConfig
+from sf2loki.obs.metrics import Metrics
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -332,3 +333,44 @@ async def test_jwt_exp_claim_is_near_future(
 
     # exp should be ~180s from minting time
     assert before + 170 <= claims["exp"] <= after + 190
+
+
+@respx.mock
+async def test_successful_mint_increments_auth_refreshes(sf_config: SalesforceConfig) -> None:
+    """A successful token mint increments the auth_refreshes counter."""
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+    metrics = Metrics()
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client, metrics=metrics)
+        await provider.token()
+
+    assert metrics.registry.get_sample_value("sf2loki_auth_refreshes_total") == 1.0
+
+
+@respx.mock
+async def test_auth_error_increments_auth_errors(sf_config: SalesforceConfig) -> None:
+    """A non-retryable token-endpoint error increments the auth_errors counter."""
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    metrics = Metrics()
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client, metrics=metrics)
+        with pytest.raises(AuthError):
+            await provider.token()
+
+    assert metrics.registry.get_sample_value("sf2loki_auth_errors_total") == 1.0
+
+
+@respx.mock
+async def test_metrics_defaults_to_a_private_registry_when_omitted(
+    sf_config: SalesforceConfig,
+) -> None:
+    """No metrics passed in -> a default Metrics() is used internally; no crash."""
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client)
+        token = await provider.token()
+
+    assert token.value == ACCESS_TOKEN_VALUE

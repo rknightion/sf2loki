@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from sf2loki.config import PubSubConfig
 from sf2loki.model import CheckpointToken, LogEntry
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.pubsub_client import DecodedEvent, PubSubClient, preset_for
 from sf2loki.shaping import extract_timestamp, route_fields
 
@@ -57,6 +58,7 @@ class PubSubSource:
         queue_maxsize: int = 1000,
         reconnect_backoff: float = 1.0,
         max_backoff: float = 30.0,
+        metrics: Metrics | None = None,
     ) -> None:
         self._cfg = cfg
         self._client = client
@@ -64,6 +66,7 @@ class PubSubSource:
         self._queue_maxsize = queue_maxsize
         self._reconnect_backoff = reconnect_backoff
         self._max_backoff = max_backoff
+        self._metrics = metrics if metrics is not None else Metrics()
 
     # ------------------------------------------------------------------
     # Public API
@@ -157,9 +160,13 @@ class PubSubSource:
             replay_id = b""
 
         backoff = self._reconnect_backoff
+        attempt = 0
 
         try:
             while not stop.is_set():
+                if attempt > 0:
+                    self._metrics.pubsub_reconnects.labels(topic=topic).inc()
+                attempt += 1
                 try:
                     async for ev in self._client.subscribe(
                         topic,

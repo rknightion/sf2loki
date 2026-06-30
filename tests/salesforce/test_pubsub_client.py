@@ -22,6 +22,7 @@ import pytest
 
 from sf2loki.auth.jwt_auth import AccessToken
 from sf2loki.config import PubSubConfig
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
 from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
 from sf2loki.salesforce.pubsub_client import DecodedEvent, PubSubClient, preset_for
@@ -131,6 +132,43 @@ class BasicFakeServicer(pb_grpc.PubSubServicer):
             return
 
 
+class MalformedPayloadFakeServicer(pb_grpc.PubSubServicer):
+    """Servicer that returns one bad-payload event followed by one good event.
+
+    Used to verify a single decode error doesn't kill the stream.
+    """
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        return pb.SchemaInfo(schema_json=_SCHEMA_JSON, schema_id=request.schema_id)
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        good_record = {"Id": "ok", "EventDate": "2024-01-01T00:00:00Z"}
+        async for _req in request_iterator:
+            yield pb.FetchResponse(
+                events=[
+                    pb.ConsumerEvent(
+                        event=pb.ProducerEvent(
+                            id="evt-bad",
+                            schema_id=_SCHEMA_ID,
+                            payload=b"\xff\xff\xff not valid avro",
+                        ),
+                        replay_id=b"\x01",
+                    ),
+                    _make_consumer_event(good_record, b"\x02"),
+                ],
+                latest_replay_id=b"\x02",
+                rpc_id="rpc-1",
+                pending_num_requested=5,
+            )
+            return
+
+
 class FlowControlFakeServicer(pb_grpc.PubSubServicer):
     """Servicer that forces a flow-control top-up by setting pending=0.
 
@@ -200,13 +238,14 @@ async def _make_server_and_client(
     servicer: pb_grpc.PubSubServicer,
     cfg: PubSubConfig,
     tokens: FakeTokenProvider,
+    metrics: Metrics | None = None,
 ) -> tuple[grpc.aio.Server, PubSubClient]:
     server: grpc.aio.Server = grpc.aio.server()
     pb_grpc.add_PubSubServicer_to_server(servicer, server)
     port: int = server.add_insecure_port("127.0.0.1:0")
     await server.start()
     channel: grpc.aio.Channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
-    client = PubSubClient(cfg, tokens, channel=channel)
+    client = PubSubClient(cfg, tokens, channel=channel, metrics=metrics)
     return server, client
 
 
@@ -337,6 +376,77 @@ async def test_get_schema_returns_json_and_sends_metadata(
         assert meta.get("accesstoken") == token_provider._token.value
         assert meta.get("instanceurl") == token_provider._token.instance_url
         assert meta.get("tenantid") == token_provider._org
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: metrics wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_updates_schema_cache_size(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """Decoding an event updates the schema_cache_size gauge."""
+    record = {"Id": "EV001", "EventDate": "2024-06-01T12:00:00Z"}
+    servicer = BasicFakeServicer([_make_consumer_event(record, b"\x01")])
+    metrics = Metrics()
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider, metrics)
+
+    try:
+        async for _ in client.subscribe("/event/X", replay_preset=pb.LATEST):
+            pass
+        assert metrics.registry.get_sample_value("sf2loki_schema_cache_size") == 1.0
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_updates_pending_credits(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """Each FetchResponse updates the pubsub_pending_credits gauge for its topic."""
+    record = {"Id": "EV001", "EventDate": "2024-06-01T12:00:00Z"}
+    servicer = BasicFakeServicer([_make_consumer_event(record, b"\x01")], pending_after=42)
+    metrics = Metrics()
+    topic = "/event/ApexCalloutEventStream"
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider, metrics)
+
+    try:
+        async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+            pass
+        val = metrics.registry.get_sample_value("sf2loki_pubsub_pending_credits", {"topic": topic})
+        assert val == 42.0
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_skips_malformed_event_and_counts_decode_error(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """A malformed payload is skipped (counted), not fatal to the rest of the stream."""
+    servicer = MalformedPayloadFakeServicer()
+    metrics = Metrics()
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider, metrics)
+
+    try:
+        events: list[DecodedEvent] = []
+        async for ev in client.subscribe("/event/X", replay_preset=pb.LATEST):
+            events.append(ev)
+
+        # The good event still comes through despite the bad one preceding it.
+        assert len(events) == 1
+        assert events[0].payload == {"Id": "ok", "EventDate": "2024-01-01T00:00:00Z"}
+        decode_errors = metrics.registry.get_sample_value(
+            "sf2loki_decode_errors_total", {"reason": "EOFError"}
+        )
+        assert decode_errors == 1.0
     finally:
         await server.stop(None)
         await client.aclose()

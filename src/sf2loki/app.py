@@ -183,6 +183,31 @@ class Pipeline:
             last[entry.checkpoint.key] = entry.checkpoint.value
         for key, value in last.items():
             await self._state.commit(key, value)
+            self._record_commit_metric(key, value)
+
+    def _record_commit_metric(self, key: str, value: str) -> None:
+        if key.startswith("pubsub:"):
+            topic = key.removeprefix("pubsub:")
+            self._metrics.last_replay_commit_ts.labels(topic=topic).set(
+                datetime.now(UTC).timestamp()
+            )
+        elif key.startswith("eventlog_objects:"):
+            obj = key.removeprefix("eventlog_objects:")
+            self._metrics.watermark_ts.labels(source="eventlog_objects", object=obj).set(
+                _parse_watermark_seconds(value)
+            )
+
+
+def _parse_watermark_seconds(value: str) -> float:
+    """Best-effort parse of a checkpoint value into a Unix timestamp.
+
+    This feeds an observability gauge only — an unparseable value falls back
+    to "now" rather than raising, since it must never break checkpoint commit.
+    """
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return datetime.now(UTC).timestamp()
 
 
 def _build_state(cfg: Config) -> CheckpointStore:
@@ -222,10 +247,10 @@ class App:
         health = Health()
 
         sf_http = httpx.AsyncClient()
-        tokens = TokenProvider(cfg.salesforce, sf_http)
+        tokens = TokenProvider(cfg.salesforce, sf_http, metrics=metrics)
 
         loki_http = httpx.AsyncClient()
-        sink = LokiSink(cfg.sink.loki, loki_http)
+        sink = LokiSink(cfg.sink.loki, loki_http, metrics=metrics)
 
         state = _build_state(cfg)
         sm_fields = cfg.sink.loki.structured_metadata_fields
@@ -236,8 +261,12 @@ class App:
         if cfg.sources.pubsub.enabled:
             from sf2loki.salesforce.pubsub_client import PubSubClient
 
-            pubsub_client = PubSubClient(cfg.sources.pubsub, tokens)
-            sources.append(PubSubSource(cfg.sources.pubsub, pubsub_client, sm_fields=sm_fields))
+            pubsub_client = PubSubClient(cfg.sources.pubsub, tokens, metrics=metrics)
+            sources.append(
+                PubSubSource(
+                    cfg.sources.pubsub, pubsub_client, sm_fields=sm_fields, metrics=metrics
+                )
+            )
             closers.append(pubsub_client.aclose)
 
         if cfg.sources.eventlog_objects.enabled:

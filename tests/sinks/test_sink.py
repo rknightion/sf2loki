@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from sf2loki.config import LokiBatchConfig, LokiConfig
 from sf2loki.model import Batch, CheckpointToken, LogEntry
+from sf2loki.obs.metrics import Metrics
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki import sink as sink_module
 from sf2loki.sinks.loki.labels import LabelGuardError
@@ -216,6 +217,18 @@ class TestResponseHandling:
         async with httpx.AsyncClient() as client:
             s = LokiSink(cfg, client)
             await s.push(_batch(1))  # no exception
+
+    @respx.mock
+    async def test_successful_push_increments_bytes_pushed(self) -> None:
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg()
+        metrics = Metrics()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client, metrics=metrics)
+            await s.push(_batch(1))
+
+        val = metrics.registry.get_sample_value("sf2loki_loki_bytes_pushed_total")
+        assert val is not None and val > 0.0
 
     @respx.mock
     async def test_500_repeated_raises_retryable_sink_error(

@@ -14,6 +14,7 @@ import jwt
 import tenacity
 
 from sf2loki.config import SalesforceConfig
+from sf2loki.obs.metrics import Metrics
 
 # JWT assertion lifetime — Salesforce rejects exp > 3 minutes in the future.
 _JWT_LIFETIME: timedelta = timedelta(seconds=180)
@@ -68,12 +69,19 @@ class TokenProvider:
     ``await token()`` calls do not double-mint.
     """
 
-    def __init__(self, cfg: SalesforceConfig, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        cfg: SalesforceConfig,
+        client: httpx.AsyncClient,
+        *,
+        metrics: Metrics | None = None,
+    ) -> None:
         self._cfg = cfg
         self._client = client
         self._cached: AccessToken | None = None
         self._org_id_cached: str | None = None
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._metrics = metrics if metrics is not None else Metrics()
 
     # ------------------------------------------------------------------
     # Public API
@@ -187,14 +195,18 @@ class TokenProvider:
         try:
             async for attempt in retry:
                 with attempt:
-                    return await self._request_token()
+                    token = await self._request_token()
+                    self._metrics.auth_refreshes.inc()
+                    return token
         except tenacity.RetryError as exc:
+            self._metrics.auth_errors.inc()
             # Unwrap the underlying exception for a cleaner error message.
             cause = exc.last_attempt.exception()
             if isinstance(cause, _TokenEndpointError):
                 raise AuthError(str(cause)) from cause
             raise AuthError(f"token endpoint unreachable after retries: {cause}") from cause
         except _TokenEndpointError as exc:
+            self._metrics.auth_errors.inc()
             # 4xx: not retried; surface immediately.
             raise AuthError(str(exc)) from exc
 

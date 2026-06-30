@@ -182,3 +182,56 @@ async def test_no_sources_returns_immediately() -> None:
         sources=[], sink=FakeSink(), state=FakeState(), batch=_batch_cfg(), metrics=Metrics()
     )
     await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+
+# --- Commit metrics (last_replay_commit_ts / watermark_ts) ------------------
+
+
+async def test_commit_updates_last_replay_commit_ts_for_pubsub_key() -> None:
+    src = FakeSource([_entry("pubsub:/event/LoginEventStream", "AAEC")])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_last_replay_commit_timestamp_seconds",
+        {"topic": "/event/LoginEventStream"},
+    )
+    assert val is not None and val > 0.0
+
+
+async def test_commit_updates_watermark_ts_for_eventlog_objects_key() -> None:
+    src = FakeSource([_entry("eventlog_objects:LoginEvent", "2024-06-01T12:00:00.000Z")])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_watermark_timestamp_seconds",
+        {"source": "eventlog_objects", "object": "LoginEvent"},
+    )
+    expected = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC).timestamp()
+    assert val is not None and abs(val - expected) < 1.0
+
+
+async def test_commit_watermark_falls_back_to_now_on_unparseable_value() -> None:
+    """A checkpoint value that isn't a parseable timestamp doesn't crash the pipeline."""
+    src = FakeSource([_entry("eventlog_objects:LoginEvent", "not-a-timestamp")])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_watermark_timestamp_seconds",
+        {"source": "eventlog_objects", "object": "LoginEvent"},
+    )
+    assert val is not None and val > 0.0  # best-effort "now" fallback, not a crash

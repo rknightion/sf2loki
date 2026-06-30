@@ -17,6 +17,7 @@ import grpc
 import grpc.aio
 
 from sf2loki.config import PubSubConfig
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
 from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
 from sf2loki.salesforce.avro_codec import AvroCodec
@@ -111,9 +112,11 @@ class PubSubClient:
         tokens: TokenProvider,
         *,
         channel: grpc.aio.Channel | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._cfg = cfg
         self._tokens = tokens
+        self._metrics = metrics if metrics is not None else Metrics()
 
         if channel is None:
             # Production path: TLS channel owned by this client.
@@ -190,13 +193,23 @@ class PubSubClient:
         async for response in call:
             for ce in response.events:
                 schema_id: str = ce.event.schema_id
-                decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
+                try:
+                    decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
+                except Exception as exc:
+                    # One malformed event must not kill the whole topic stream.
+                    self._metrics.decode_errors.labels(reason=type(exc).__name__).inc()
+                    continue
+                self._metrics.schema_cache_size.set(self._codec.cache_size())
                 yield DecodedEvent(
                     topic=topic,
                     replay_id=ce.replay_id,
                     schema_id=schema_id,
                     payload=decoded_payload,
                 )
+
+            self._metrics.pubsub_pending_credits.labels(topic=topic).set(
+                response.pending_num_requested
+            )
 
             # Flow-control: top up when outstanding credits drop to or below
             # the low watermark so the server never runs dry.  Guard against

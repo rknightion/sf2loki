@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 import pytest
 
 from sf2loki.config import PubSubConfig
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.pubsub_client import DecodedEvent, preset_for
 from sf2loki.sources.pubsub_source import PubSubSource
 
@@ -122,12 +123,15 @@ def make_source(
     client: FakePubSubClient | None = None,
     sm_fields: list[str] | None = None,
     stop: asyncio.Event | None = None,
+    metrics: Metrics | None = None,
 ) -> PubSubSource:
     if cfg is None:
         cfg = make_cfg()
     if client is None:
         client = FakePubSubClient({TOPIC: [make_event()]}, stop_after_first=stop)
-    return PubSubSource(cfg, client, sm_fields=sm_fields or [], reconnect_backoff=0.01)
+    return PubSubSource(
+        cfg, client, sm_fields=sm_fields or [], reconnect_backoff=0.01, metrics=metrics
+    )
 
 
 async def collect_n(
@@ -460,3 +464,34 @@ def test_source_name() -> None:
     """PubSubSource.name is 'pubsub'."""
     src = make_source()
     assert src.name == "pubsub"
+
+
+# ---------------------------------------------------------------------------
+# Metrics wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconnect_increments_metric() -> None:
+    """Each reconnect (not the initial connection) increments pubsub_reconnects."""
+    stop = asyncio.Event()
+    # No stop_after_first: the fake client keeps returning empty streams after the
+    # first batch, forcing _run_topic to reconnect repeatedly until stop is set.
+    client = FakePubSubClient({TOPIC: [make_event()]})
+    metrics = Metrics()
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client, metrics=metrics)
+    state = FakeCheckpointStore()
+
+    entries: list = []
+
+    async def consume() -> None:
+        async for entry in src.events(state, stop):
+            entries.append(entry)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.2)  # let several reconnect cycles elapse (backoff stays ~0.01s)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    val = metrics.registry.get_sample_value("sf2loki_pubsub_reconnects_total", {"topic": TOPIC})
+    assert val is not None and val >= 1.0
