@@ -59,6 +59,16 @@ def sf_config_with_org_id(private_key_pem: str) -> SalesforceConfig:
     )
 
 
+@pytest.fixture()
+def cc_config() -> SalesforceConfig:
+    return SalesforceConfig(
+        login_url="https://login.salesforce.com",
+        auth_mode="client_credentials",
+        client_id="myclientid",
+        client_secret=SecretStr("mysecret"),
+    )
+
+
 TOKEN_ENDPOINT = "https://login.salesforce.com/services/oauth2/token"
 INSTANCE_URL = "https://myorg.my.salesforce.com"
 ACCESS_TOKEN_VALUE = "dummy_access_token_12345"
@@ -122,6 +132,48 @@ async def test_token_posts_to_endpoint_and_returns_access_token(
     assert claims["iss"] == sf_config.client_id
     assert claims["sub"] == sf_config.username
     assert claims["aud"] == sf_config.login_url
+
+
+@respx.mock
+async def test_client_credentials_posts_client_credentials_grant(
+    cc_config: SalesforceConfig,
+) -> None:
+    """client_credentials mode POSTs a client_credentials grant (no JWT assertion)."""
+    route = respx.post(TOKEN_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_token_response())
+    )
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(cc_config, client)
+        token = await provider.token()
+
+    assert token.value == ACCESS_TOKEN_VALUE
+    assert token.instance_url == INSTANCE_URL
+
+    request = route.calls.last.request
+    body = dict(p.split("=", 1) for p in request.content.decode().split("&") if "=" in p)
+    assert body.get("grant_type") == "client_credentials"
+    assert body.get("client_id") == "myclientid"
+    assert body.get("client_secret") == "mysecret"
+    assert "assertion" not in body  # no JWT minted in this mode
+
+
+@respx.mock
+async def test_client_credentials_caches_and_refreshes(cc_config: SalesforceConfig) -> None:
+    """client_credentials reuses the shared cache/invalidate path."""
+    route = respx.post(TOKEN_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_token_response())
+    )
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(cc_config, client)
+        t1 = await provider.token()
+        t2 = await provider.token()
+        assert t1 is t2
+        assert route.call_count == 1
+        provider.invalidate()
+        await provider.token()
+        assert route.call_count == 2
 
 
 @respx.mock

@@ -12,6 +12,7 @@ from sf2loki.config import (
     EventLogFileTypeConfig,
     EventLogObjectConfig,
     LokiBatchConfig,
+    SalesforceConfig,
     ServiceConfig,
     SourcesConfig,
     load,
@@ -265,3 +266,76 @@ def test_eventlogfile_duration_shorthand() -> None:
 
 def test_sources_config_allow_overlap_default_false() -> None:
     assert SourcesConfig().allow_overlap is False
+
+
+# ---------------------------------------------------------------------------
+# Auth mode + environment toggle (Datadog-parity)
+
+
+def test_environment_sandbox_derives_login_url() -> None:
+    cfg = SalesforceConfig(client_id="cid", username="svc@example.com", environment="sandbox")
+    assert cfg.login_url == "https://test.salesforce.com"
+
+
+def test_environment_production_is_default_login_url() -> None:
+    cfg = SalesforceConfig(client_id="cid", username="svc@example.com")
+    assert cfg.environment == "production"
+    assert cfg.login_url == "https://login.salesforce.com"
+
+
+def test_explicit_login_url_overrides_environment() -> None:
+    cfg = SalesforceConfig(
+        client_id="cid",
+        username="svc@example.com",
+        environment="sandbox",
+        login_url="https://acme.my.salesforce.com",
+    )
+    assert cfg.login_url == "https://acme.my.salesforce.com"
+
+
+def test_auth_mode_defaults_to_jwt_bearer() -> None:
+    cfg = SalesforceConfig(client_id="cid", username="svc@example.com")
+    assert cfg.auth_mode == "jwt_bearer"
+
+
+def test_jwt_bearer_requires_username() -> None:
+    with pytest.raises(ValidationError):
+        SalesforceConfig(client_id="cid", auth_mode="jwt_bearer")
+
+
+def test_client_credentials_does_not_require_username() -> None:
+    cfg = SalesforceConfig(client_id="cid", auth_mode="client_credentials")
+    assert cfg.username == ""
+    assert cfg.auth_mode == "client_credentials"
+
+
+def _write_cc_config(tmp_path: Path, secret_file: Path) -> Path:
+    p = tmp_path / "cc.yaml"
+    p.write_text(
+        f"""
+salesforce:
+  auth_mode: client_credentials
+  client_id: cid
+  client_secret_file: {secret_file}
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+""".lstrip()
+    )
+    return p
+
+
+def test_client_credentials_resolves_secret_file(tmp_path: Path) -> None:
+    sec = tmp_path / "secret.txt"
+    sec.write_text("topsecret\n")
+    cfg = load(_write_cc_config(tmp_path, sec))
+    assert cfg.salesforce.client_secret is not None
+    assert cfg.salesforce.client_secret.get_secret_value() == "topsecret"
+    # private key is NOT required in client_credentials mode
+    assert cfg.salesforce.private_key is None
+
+
+def test_client_credentials_missing_secret_is_fatal(tmp_path: Path) -> None:
+    cfg_path = _write_cc_config(tmp_path, tmp_path / "nope.txt")
+    with pytest.raises(ConfigError):
+        load(cfg_path)

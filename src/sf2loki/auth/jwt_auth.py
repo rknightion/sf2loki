@@ -161,15 +161,20 @@ class TokenProvider:
         Raises :class:`_TokenEndpointError` on any non-2xx response so that
         tenacity can inspect the status code and decide whether to retry.
         """
-        assertion = self._mint_jwt()
         token_url = f"{self._cfg.login_url}/services/oauth2/token"
-        response = await self._client.post(
-            token_url,
-            data={
+        if self._cfg.auth_mode == "client_credentials":
+            assert self._cfg.client_secret is not None, "client secret must be resolved before use"
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": self._cfg.client_id,
+                "client_secret": self._cfg.client_secret.get_secret_value(),
+            }
+        else:
+            data = {
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                "assertion": assertion,
-            },
-        )
+                "assertion": self._mint_jwt(),
+            }
+        response = await self._client.post(token_url, data=data)
         if not response.is_success:
             raise _TokenEndpointError(response.status_code, response.text)
 

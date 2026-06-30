@@ -98,13 +98,40 @@ def _interpolate_env(value: Any) -> Any:
 
 
 class SalesforceConfig(BaseModel):
-    login_url: str = "https://login.salesforce.com"
+    # login_url, when left blank, is derived from ``environment`` below. An
+    # explicit value (a custom My Domain URL) always takes precedence.
+    login_url: str = ""
+    environment: Literal["production", "sandbox"] = "production"
+    # OAuth flow: ``jwt_bearer`` (asymmetric key + cert, no shared secret) or
+    # ``client_credentials`` (consumer key + secret — mirrors the Datadog
+    # managed-collector setup). Defaults to jwt_bearer for backward compat.
+    auth_mode: Literal["jwt_bearer", "client_credentials"] = "jwt_bearer"
     client_id: str
-    username: str
+    # client_credentials flow secret (injectable from file/env like the key).
+    client_secret: SecretStr | None = None
+    client_secret_file: Path | None = None
+    # Required for jwt_bearer (the JWT ``sub`` claim); unused for client_credentials.
+    username: str = ""
     private_key_file: Path | None = None
     private_key: SecretStr | None = None
     api_version: str = "60.0"
     org_id: str | None = None
+
+    @model_validator(mode="after")
+    def _resolve_login_url_and_validate_mode(self) -> SalesforceConfig:
+        # Derive login_url from environment when not set explicitly. An explicit
+        # custom My Domain URL is left untouched (takes precedence).
+        if not self.login_url:
+            self.login_url = (
+                "https://test.salesforce.com"
+                if self.environment == "sandbox"
+                else "https://login.salesforce.com"
+            )
+        # jwt_bearer needs a username for the JWT ``sub`` claim; client_credentials
+        # runs as the External Client App's "Run As" user and needs none.
+        if self.auth_mode == "jwt_bearer" and not self.username:
+            raise ValueError("salesforce.username is required when auth_mode is 'jwt_bearer'")
+        return self
 
 
 class PubSubConfig(BaseModel):
@@ -303,14 +330,30 @@ def _resolve_secret_file(
 
 
 def resolve_secrets(cfg: Config) -> Config:
-    """Load file-injected secrets in place; fail fast on missing required secrets."""
-    cfg.salesforce.private_key = _resolve_secret_file(
-        cfg.salesforce.private_key_file,
-        cfg.salesforce.private_key,
-        "salesforce private key",
-    )
-    if cfg.salesforce.private_key is None:
-        raise ConfigError("salesforce private key required (set private_key or private_key_file)")
+    """Load file-injected secrets in place; fail fast on missing required secrets.
+
+    The required Salesforce secret depends on ``auth_mode``: ``client_credentials``
+    needs ``client_secret``; ``jwt_bearer`` needs ``private_key``.
+    """
+    sf = cfg.salesforce
+    if sf.auth_mode == "client_credentials":
+        sf.client_secret = _resolve_secret_file(
+            sf.client_secret_file, sf.client_secret, "salesforce client secret"
+        )
+        if sf.client_secret is None:
+            raise ConfigError(
+                "salesforce client secret required for auth_mode=client_credentials "
+                "(set client_secret or client_secret_file)"
+            )
+    else:  # jwt_bearer
+        sf.private_key = _resolve_secret_file(
+            sf.private_key_file, sf.private_key, "salesforce private key"
+        )
+        if sf.private_key is None:
+            raise ConfigError(
+                "salesforce private key required for auth_mode=jwt_bearer "
+                "(set private_key or private_key_file)"
+            )
     cfg.sink.loki.auth_token = _resolve_secret_file(
         cfg.sink.loki.auth_token_file,
         cfg.sink.loki.auth_token,

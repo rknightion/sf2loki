@@ -29,6 +29,9 @@ build/
 # --- Superpowers scratch: NEVER commit specs/plans (operating-model HARD RULE) ---
 docs/superpowers/
 
+# --- Local working notes / scratch (not deliverables) ---
+ko.md
+
 # --- OS / editor ---
 .DS_Store
 *.swp
