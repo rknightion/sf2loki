@@ -238,6 +238,42 @@ async def test_flush_retry_loop_is_stop_aware(monkeypatch: pytest.MonkeyPatch) -
     assert state.committed == {}
 
 
+async def test_commit_updates_watermark_ts_for_eventlogfile_key() -> None:
+    import json
+
+    val_json = json.dumps({"last_created": "2024-06-01T12:00:00.000Z", "ids": ["0AT1"]})
+    src = FakeSource([_entry("eventlogfile:Login", val_json)])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_watermark_timestamp_seconds",
+        {"source": "eventlogfile", "object": "Login"},
+    )
+    expected = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC).timestamp()
+    assert val is not None and abs(val - expected) < 1.0
+
+
+async def test_commit_eventlogfile_watermark_falls_back_on_bad_json() -> None:
+    src = FakeSource([_entry("eventlogfile:Login", "not-json")])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_watermark_timestamp_seconds",
+        {"source": "eventlogfile", "object": "Login"},
+    )
+    assert val is not None and val > 0.0
+
+
 async def test_commit_watermark_falls_back_to_now_on_unparseable_value() -> None:
     """A checkpoint value that isn't a parseable timestamp doesn't crash the pipeline."""
     src = FakeSource([_entry("eventlog_objects:LoginEvent", "not-a-timestamp")])

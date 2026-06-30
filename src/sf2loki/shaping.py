@@ -26,17 +26,45 @@ def route_fields(
     return line, sm
 
 
-def extract_timestamp(payload: Mapping[str, object]) -> datetime:
-    """Best-effort event occurrence time.
+def _parse_ts_value(value: object) -> datetime | None:
+    """Parse a single timestamp value, or return None if it can't be parsed.
 
-    Tries ``EventDate`` then ``CreatedDate`` (epoch-millis or ISO-8601),
-    falling back to ingest time. Always timezone-aware (UTC).
+    Accepts epoch-millis (int/float), ISO-8601 strings (with or without a 'Z'
+    or offset), and the EventLogFile compact ``yyyyMMddHHmmss.SSS`` format.
+    Any naive result is coerced to UTC so callers always get an aware datetime.
     """
-    for field_name in ("EventDate", "CreatedDate"):
+    if isinstance(value, int | float):
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    text = str(value)
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            # ELF legacy TIMESTAMP column, e.g. "20231231130000.000" (UTC).
+            dt = datetime.strptime(text, "%Y%m%d%H%M%S.%f")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def extract_timestamp(
+    payload: Mapping[str, object],
+    field_names: Sequence[str] = ("EventDate", "CreatedDate"),
+) -> datetime:
+    """Best-effort event occurrence time, always timezone-aware (UTC).
+
+    Tries each name in *field_names* in order (default ``EventDate`` then
+    ``CreatedDate``; EventLogFile passes ``TIMESTAMP_DERIVED``/``TIMESTAMP``),
+    accepting epoch-millis, ISO-8601, or the ELF compact format. Falls back to
+    ingest time when no field yields a parseable value.
+    """
+    for field_name in field_names:
         value = payload.get(field_name)
         if value is None:
             continue
-        if isinstance(value, int | float):
-            return datetime.fromtimestamp(value / 1000, tz=UTC)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = _parse_ts_value(value)
+        if parsed is not None:
+            return parsed
     return datetime.now(UTC)

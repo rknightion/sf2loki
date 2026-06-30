@@ -160,12 +160,18 @@ class LokiSink:
         if status == 413:
             if len(batch.entries) == 1:
                 raise PermanentSinkError("unsplittable 413: single-entry batch rejected")
-            # Split and recurse — re-encode each half independently.
+            # Split and recurse — re-encode each half independently. A permanent
+            # failure in one half (e.g. one oversized entry that 413s even when
+            # alone) must NOT discard the other half: drop+count just the poison
+            # and keep delivering the rest. Only a top-level single-entry batch
+            # propagates PermanentSinkError (no parent to absorb it).
             mid = len(batch.entries) // 2
-            left = Batch(entries=batch.entries[:mid])
-            right = Batch(entries=batch.entries[mid:])
-            await self.push(left)
-            await self.push(right)
+            for half in (Batch(entries=batch.entries[:mid]), Batch(entries=batch.entries[mid:])):
+                try:
+                    await self.push(half)
+                except PermanentSinkError:
+                    self._metrics.loki_push.labels(outcome="dropped").inc(len(half.entries))
+                    logger.warning("dropping %d unsplittable Loki entries (413)", len(half.entries))
             return
 
         if status == 400:

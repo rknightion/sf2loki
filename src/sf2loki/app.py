@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.sink import LokiSink
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
+from sf2loki.sources.overlap import check_overlap
 from sf2loki.sources.pubsub_source import PubSubSource
 from sf2loki.state.configmap_store import ConfigMapCheckpointStore
 from sf2loki.state.file_store import FileCheckpointStore
@@ -210,6 +212,11 @@ class Pipeline:
             self._metrics.watermark_ts.labels(source="eventlog_objects", object=obj).set(
                 _parse_watermark_seconds(value)
             )
+        elif key.startswith("eventlogfile:"):
+            event_type = key.removeprefix("eventlogfile:")
+            self._metrics.watermark_ts.labels(source="eventlogfile", object=event_type).set(
+                _parse_eventlogfile_watermark(value)
+            )
 
 
 def _parse_watermark_seconds(value: str) -> float:
@@ -221,6 +228,18 @@ def _parse_watermark_seconds(value: str) -> float:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
+        return datetime.now(UTC).timestamp()
+
+
+def _parse_eventlogfile_watermark(value: str) -> float:
+    """Parse an eventlogfile checkpoint (JSON {"last_created", "ids"}) → Unix ts.
+
+    Falls back to "now" on any parse error — observability only, never raises.
+    """
+    try:
+        last_created = json.loads(value).get("last_created", "")
+        return _parse_watermark_seconds(str(last_created))
+    except ValueError, AttributeError, TypeError:
         return datetime.now(UTC).timestamp()
 
 
@@ -301,16 +320,19 @@ class App:
 
         sources: list[Source] = []
         closers: list[Callable[[], Awaitable[None]]] = []
+        pubsub_topics: list[str] = []
+        stored_objects: list[str] = []
+        elf_event_types: list[str] = []
 
         if cfg.sources.pubsub.enabled:
             from sf2loki.salesforce.pubsub_client import PubSubClient
 
             pubsub_client = PubSubClient(cfg.sources.pubsub, tokens, metrics=metrics)
-            sources.append(
-                PubSubSource(
-                    cfg.sources.pubsub, pubsub_client, sm_fields=sm_fields, metrics=metrics
-                )
+            pubsub_src = PubSubSource(
+                cfg.sources.pubsub, pubsub_client, sm_fields=sm_fields, metrics=metrics
             )
+            sources.append(pubsub_src)
+            pubsub_topics = pubsub_src.resolve_topics()
             closers.append(pubsub_client.aclose)
 
         if cfg.sources.eventlog_objects.enabled:
@@ -320,9 +342,20 @@ class App:
             sources.append(
                 EventLogObjectsSource(cfg.sources.eventlog_objects, soql, sm_fields=sm_fields)
             )
+            stored_objects = [o.name for o in cfg.sources.eventlog_objects.objects]
 
         if cfg.sources.eventlogfile.enabled:
             sources.append(EventLogFileSource(cfg.sources.eventlogfile))
+            elf_event_types = list(cfg.sources.eventlogfile.event_types)
+
+        # Fail fast if one event category is fed by more than one source (which
+        # would ingest duplicate events). Bypass with sources.allow_overlap.
+        check_overlap(
+            pubsub_topics=pubsub_topics,
+            stored_objects=stored_objects,
+            elf_event_types=elf_event_types,
+            allow_overlap=cfg.sources.allow_overlap,
+        )
 
         pipeline = Pipeline(
             sources=sources,

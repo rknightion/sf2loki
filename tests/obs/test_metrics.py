@@ -153,3 +153,39 @@ def test_default_version_in_build_info() -> None:
     m = make_metrics()
     val = m.registry.get_sample_value("sf2loki_build_info", {"version": "0.1.0"})
     assert val == 1.0
+
+
+def test_eventlogfile_files_processed_counter() -> None:
+    m = make_metrics()
+    m.eventlogfile_files_processed.labels(event_type="Login").inc()
+    val = m.registry.get_sample_value(
+        "sf2loki_eventlogfile_files_processed_total", {"event_type": "Login"}
+    )
+    assert val == 1.0
+
+
+def test_eventlogfile_rows_ingested_counter() -> None:
+    m = make_metrics()
+    m.eventlogfile_rows_ingested.labels(event_type="API").inc(42)
+    val = m.registry.get_sample_value(
+        "sf2loki_eventlogfile_rows_ingested_total", {"event_type": "API"}
+    )
+    assert val == 42.0
+
+
+def test_eventlogfile_download_bytes_counter() -> None:
+    m = make_metrics()
+    m.eventlogfile_download_bytes.labels(event_type="Login").inc(2048)
+    val = m.registry.get_sample_value(
+        "sf2loki_eventlogfile_download_bytes_total", {"event_type": "Login"}
+    )
+    assert val == 2048.0
+
+
+def test_eventlogfile_download_errors_counter() -> None:
+    m = make_metrics()
+    m.eventlogfile_download_errors.labels(reason="HTTPStatusError").inc()
+    val = m.registry.get_sample_value(
+        "sf2loki_eventlogfile_download_errors_total", {"reason": "HTTPStatusError"}
+    )
+    assert val == 1.0

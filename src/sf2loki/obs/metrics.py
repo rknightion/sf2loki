@@ -122,6 +122,35 @@ class Metrics:
             registry=self.registry,
         )
 
+        # --- EventLogFile source (Phase 3) ---
+        self.eventlogfile_files_processed = Counter(
+            "sf2loki_eventlogfile_files_processed",
+            "Total EventLogFile records downloaded and parsed, per event type",
+            ["event_type"],
+            registry=self.registry,
+        )
+
+        self.eventlogfile_rows_ingested = Counter(
+            "sf2loki_eventlogfile_rows_ingested",
+            "Total CSV rows ingested from EventLogFiles, per event type",
+            ["event_type"],
+            registry=self.registry,
+        )
+
+        self.eventlogfile_download_bytes = Counter(
+            "sf2loki_eventlogfile_download_bytes",
+            "Total bytes downloaded from EventLogFile LogFile endpoints, per event type",
+            ["event_type"],
+            registry=self.registry,
+        )
+
+        self.eventlogfile_download_errors = Counter(
+            "sf2loki_eventlogfile_download_errors",
+            "Total EventLogFile listing/download errors, per reason",
+            ["reason"],
+            registry=self.registry,
+        )
+
         self.build_info = Gauge(
             "sf2loki_build_info",
             "Build metadata; value is always 1",

@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, Field, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    SecretStr,
+    ValidationError,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -124,12 +131,35 @@ class EventLogObjectsConfig(BaseModel):
 
 class EventLogFileConfig(BaseModel):
     enabled: bool = False
+    # Ingest exactly ONE interval; hourly and daily files are redundant copies
+    # of the same events (Salesforce), so ingesting both double-counts.
+    interval: Literal["Hourly", "Daily"] = "Hourly"
+    # ELF EventType values to ingest (e.g. ["Login", "API", "Report"]). Required
+    # when enabled — there is no sensible "all" default given ~70 types and the
+    # either/or-per-category model.
+    event_types: list[str] = Field(default_factory=list)
+    poll_interval: Duration = timedelta(hours=1)  # how often to list new files
+    lookback: Duration = timedelta(hours=24)  # initial window when no checkpoint
+    timestamp_column: str = "TIMESTAMP_DERIVED"  # per-row timestamp column
+    page_size: int = 1000  # SOQL LIMIT for the file-listing query
+
+    @model_validator(mode="after")
+    def _require_event_types_when_enabled(self) -> EventLogFileConfig:
+        if self.enabled and not self.event_types:
+            raise ValueError(
+                "eventlogfile.enabled is true but event_types is empty; "
+                "list the ELF EventType values to ingest (e.g. [Login, API])"
+            )
+        return self
 
 
 class SourcesConfig(BaseModel):
     pubsub: PubSubConfig = Field(default_factory=PubSubConfig)
     eventlog_objects: EventLogObjectsConfig = Field(default_factory=EventLogObjectsConfig)
     eventlogfile: EventLogFileConfig = Field(default_factory=EventLogFileConfig)
+    # Bypass the fail-fast overlap guard (sources/overlap.py) that refuses to
+    # start when one event category is enabled on more than one source.
+    allow_overlap: bool = False
 
 
 class LokiBatchConfig(BaseModel):

@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sf2loki.config import ConfigError, EventLogObjectConfig, ServiceConfig, load
+from sf2loki.config import (
+    ConfigError,
+    EventLogFileConfig,
+    EventLogObjectConfig,
+    ServiceConfig,
+    SourcesConfig,
+    load,
+)
 
 
 def _write_config(tmp_path: Path, key_file: Path) -> Path:
@@ -165,3 +172,47 @@ sink:
 
     with pytest.raises(ConfigError, match="NOT_SET_ANYWHERE"):
         load(p)
+
+
+# ---------------------------------------------------------------------------
+# EventLogFile config (Phase 3)
+
+
+def test_eventlogfile_config_defaults() -> None:
+    cfg = EventLogFileConfig(enabled=True, event_types=["Login"])
+    assert cfg.interval == "Hourly"
+    assert cfg.event_types == ["Login"]
+    assert cfg.poll_interval == timedelta(hours=1)
+    assert cfg.lookback == timedelta(hours=24)
+    assert cfg.timestamp_column == "TIMESTAMP_DERIVED"
+    assert cfg.page_size == 1000
+
+
+def test_eventlogfile_interval_rejects_junk() -> None:
+    with pytest.raises(ValidationError):
+        EventLogFileConfig(enabled=True, event_types=["Login"], interval="weekly")  # type: ignore[arg-type]
+
+
+def test_eventlogfile_enabled_requires_event_types() -> None:
+    with pytest.raises(ValidationError):
+        EventLogFileConfig(enabled=True, event_types=[])
+
+
+def test_eventlogfile_disabled_allows_empty_event_types() -> None:
+    cfg = EventLogFileConfig(enabled=False)
+    assert cfg.event_types == []
+
+
+def test_eventlogfile_duration_shorthand() -> None:
+    cfg = EventLogFileConfig(
+        enabled=True,
+        event_types=["Login"],
+        poll_interval="15m",  # type: ignore[arg-type]
+        lookback="2h",  # type: ignore[arg-type]
+    )
+    assert cfg.poll_interval == timedelta(minutes=15)
+    assert cfg.lookback == timedelta(hours=2)
+
+
+def test_sources_config_allow_overlap_default_false() -> None:
+    assert SourcesConfig().allow_overlap is False

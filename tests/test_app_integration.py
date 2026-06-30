@@ -12,6 +12,7 @@ from sf2loki.config import Config
 from sf2loki.sinks.loki.labels import LabelGuardError
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
+from sf2loki.sources.overlap import OverlapError
 from sf2loki.sources.pubsub_source import PubSubSource
 
 
@@ -60,7 +61,8 @@ def test_build_all_sources() -> None:
         sources={
             "pubsub": {"enabled": True, "topics": ["/event/X"]},
             "eventlog_objects": {"enabled": True, "objects": [{"name": "LoginEvent"}]},
-            "eventlogfile": {"enabled": True},
+            # Disjoint categories (x / login / report) so the overlap guard passes.
+            "eventlogfile": {"enabled": True, "event_types": ["Report"]},
         }
     )
     appn = App.build(cfg)
@@ -80,6 +82,30 @@ def test_build_rejects_disallowed_label() -> None:
     cfg = _cfg(sink={"loki": {"url": "http://x/loki/api/v1/push", "labels": {"user_id": "bad"}}})
     with pytest.raises(LabelGuardError):
         App.build(cfg)
+
+
+def test_build_rejects_overlapping_category() -> None:
+    # Streaming LoginEventStream AND polling LoginEvent = the same data twice.
+    cfg = _cfg(
+        sources={
+            "pubsub": {"enabled": True, "topics": ["/event/LoginEventStream"]},
+            "eventlog_objects": {"enabled": True, "objects": [{"name": "LoginEvent"}]},
+        }
+    )
+    with pytest.raises(OverlapError):
+        App.build(cfg)
+
+
+def test_build_allows_overlap_when_opted_in() -> None:
+    cfg = _cfg(
+        sources={
+            "allow_overlap": True,
+            "pubsub": {"enabled": True, "topics": ["/event/LoginEventStream"]},
+            "eventlog_objects": {"enabled": True, "objects": [{"name": "LoginEvent"}]},
+        }
+    )
+    appn = App.build(cfg)
+    assert {PubSubSource, EventLogObjectsSource} == set(_source_types(appn))
 
 
 # ---------------------------------------------------------------------------

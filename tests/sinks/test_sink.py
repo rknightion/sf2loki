@@ -354,6 +354,41 @@ class TestSplitting:
             with pytest.raises(PermanentSinkError, match="unsplittable 413"):
                 await s.push(_batch(1))
 
+    @respx.mock
+    async def test_413_poison_entry_does_not_discard_siblings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the middle entry is unsplittably-413; the other two must still be delivered."""
+        monkeypatch.setattr(sink_module, "_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr(sink_module, "_WAIT_MIN", 0.0)
+        monkeypatch.setattr(sink_module, "_WAIT_MAX", 0.0)
+
+        delivered: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.content
+            # The poison entry (line 1) makes any batch containing it 413.
+            if b"log line 1" in body:
+                return httpx.Response(413)
+            # Record which non-poison lines were successfully delivered.
+            for n in (0, 2):
+                if f"log line {n}".encode() in body:
+                    delivered.append(f"line-{n}")
+            return httpx.Response(204)
+
+        respx.post(PUSH_URL).mock(side_effect=handler)
+        cfg = _cfg(encoding="json", compression="none")  # inspectable bodies
+        metrics = Metrics()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client, metrics=metrics)
+            await s.push(_batch(3))  # entries 0,1,2 — only 1 is poison
+
+        assert sorted(delivered) == ["line-0", "line-2"]  # siblings delivered, not discarded
+        dropped = metrics.registry.get_sample_value(
+            "sf2loki_loki_push_total", {"outcome": "dropped"}
+        )
+        assert dropped == 1.0  # exactly the one poison entry counted
+
 
 # ---------------------------------------------------------------------------
 # Empty batch
