@@ -277,6 +277,59 @@ async def test_events_yields_correct_timestamp() -> None:
     assert entries[0].timestamp == expected_ts
 
 
+@pytest.mark.asyncio
+async def test_cdc_event_timestamp_from_commit_timestamp() -> None:
+    """A CDC change event (no EventDate/CreatedDate) uses ChangeEventHeader.commitTimestamp.
+
+    This keeps a replayed CDC duplicate byte-identical (stable timestamp) so Loki's
+    native dedup collapses it; otherwise it would fall back to ingest time (now()).
+    """
+    stop = asyncio.Event()
+    cdc = DecodedEvent(
+        topic="/data/AccountChangeEvent",
+        replay_id=REPLAY_ID_1,
+        schema_id="cdc1",
+        payload={
+            "Name": "Acme",
+            "ChangeEventHeader": {
+                "entityName": "Account",
+                "changeType": "CREATE",
+                "commitTimestamp": EPOCH_MS,
+            },
+        },
+    )
+    client = FakePubSubClient({"/data/AccountChangeEvent": [cdc]}, stop_after_first=stop)
+    src = make_source(cfg=make_cfg(topics=["/data/AccountChangeEvent"]), client=client)
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert entries[0].timestamp == datetime.fromtimestamp(EPOCH_MS / 1000, tz=UTC)
+
+
+@pytest.mark.asyncio
+async def test_eventdate_takes_precedence_over_commit_timestamp() -> None:
+    """When both EventDate and a CDC header exist, EventDate wins (top-level event time)."""
+    stop = asyncio.Event()
+    other_ms = EPOCH_MS + 60_000
+    ev = DecodedEvent(
+        topic=TOPIC,
+        replay_id=REPLAY_ID_1,
+        schema_id="s",
+        payload={
+            "EventDate": EPOCH_MS,
+            "ChangeEventHeader": {"commitTimestamp": other_ms},
+        },
+    )
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client)
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert entries[0].timestamp == datetime.fromtimestamp(EPOCH_MS / 1000, tz=UTC)
+
+
 # ---------------------------------------------------------------------------
 # Structured metadata tests
 # ---------------------------------------------------------------------------

@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import fnmatch
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sf2loki.config import PubSubConfig
@@ -207,12 +208,33 @@ class PubSubSource:
             # Always put a sentinel so the drain loop can terminate.
             await queue.put(None)
 
+    @staticmethod
+    def _event_timestamp(payload: Mapping[str, object]) -> datetime:
+        """Best event time for a Pub/Sub payload, preferring stable event-time fields.
+
+        Order: ``EventDate`` (RTEM streams) → ``CreatedDate`` (platform events) →
+        ``ChangeEventHeader.commitTimestamp`` (CDC change events, epoch millis) →
+        ingest time. Using the CDC commit timestamp (rather than falling back to
+        ``now()``) keeps a replayed change event byte-identical, so Loki's native
+        dedup collapses at-least-once duplicates instead of storing them twice.
+        """
+        header = payload.get("ChangeEventHeader")
+        commit_ts = header.get("commitTimestamp") if isinstance(header, Mapping) else None
+        ts_source = {
+            "EventDate": payload.get("EventDate"),
+            "CreatedDate": payload.get("CreatedDate"),
+            "commitTimestamp": commit_ts,
+        }
+        return extract_timestamp(
+            ts_source, field_names=("EventDate", "CreatedDate", "commitTimestamp")
+        )
+
     def _to_log_entry(self, topic: str, ev: DecodedEvent) -> LogEntry:
         """Convert a DecodedEvent to a LogEntry ready for the pipeline."""
         event_type = topic.rstrip("/").rsplit("/", 1)[-1]
         labels: dict[str, str] = {"source": "pubsub", "event_type": event_type}
         line, sm = route_fields(ev.payload, self._sm_fields)
-        timestamp = extract_timestamp(ev.payload)
+        timestamp = self._event_timestamp(ev.payload)
         checkpoint = CheckpointToken(
             key=f"pubsub:{topic}",
             value=base64.b64encode(ev.replay_id).decode("ascii"),
