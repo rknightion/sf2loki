@@ -1,0 +1,426 @@
+# sf2loki — Design
+
+A long-running Python service that ingests Salesforce Event Monitoring data — Real-Time
+Event Monitoring (RTEM) streaming events, stored RTEM/event objects, and (later) EventLogFile —
+and pushes it to Grafana Loki with strict label-cardinality discipline.
+
+Targets Grafana Cloud Loki and self-hosted Loki / local Alloy (`loki.source.api`). Runs in
+Kubernetes; the container is optimised first.
+
+---
+
+## 1. Goals & non-goals
+
+**Goals**
+- Stream Salesforce RTEM events via the Pub/Sub API (gRPC + Avro) into Loki, resumably.
+- Poll stored event objects via SOQL as a backfill/catch-up path that complements streaming.
+- Push to Loki with a small, fixed, low-cardinality label set; everything high-cardinality goes
+  in the JSON log line and/or **structured metadata** — never labels.
+- Be a well-behaved, self-observable, containerised service: `/metrics`, `/healthz`, `/readyz`,
+  structured logs, retries, graceful shutdown.
+- Pluggable **sources** behind one interface and a pluggable **sink** (Loki now, OTLP later).
+
+**Non-goals (now)**
+- Multi-replica horizontal scale-out of a single topic (Pub/Sub has no consumer-group semantics —
+  see §13). Single replica + a coordinator seam for future active-passive failover.
+- EventLogFile ingestion is **stubbed** (§7), designed to drop in as another source.
+- Exactly-once delivery. We are **at-least-once**; Loki absorbs duplicate identical entries.
+
+---
+
+## 2. Stack
+
+- **Python 3.12**, **asyncio** throughout. Pub/Sub gRPC streaming (`grpc.aio`), Loki HTTP push
+  (`httpx`), and SOQL polling are all I/O-bound — one event loop, `uvloop`, no thread/GIL contention.
+- **uv** (deps + lockfile), **ruff**, **mypy --strict**, **pytest** + **pytest-asyncio**, **just**.
+- Runtime deps: `grpcio` / `grpcio-tools`, `fastavro`, `httpx`, `pydantic` + `pydantic-settings`,
+  `pyjwt[crypto]`, `cryptography`, `protobuf`, `cramjam` (snappy), `prometheus-client`, `structlog`,
+  `tenacity`, `uvloop`.
+
+Why Python over Go (the `genai-otel-bridge` reference is Go): the workload is modest-volume and
+I/O-bound (GIL/footprint are not constraints), the specified toolchain is Python, and Salesforce's
+**official Pub/Sub client example is Python** (grpcio + avro), which de-risks the trickiest path.
+
+---
+
+## 3. Architecture
+
+Composition-root + frozen-seam design lifted from `genai-otel-bridge`: `cmd`/entrypoint wires
+everything; all logic lives behind locked interfaces so implementations can be added without
+touching the core.
+
+```
+                         ┌──────────────────────────────────────────────┐
+                         │                  app.Pipeline                  │
+  Salesforce             │                                                │
+  ┌───────────┐ gRPC     │  ┌────────────┐   LogEntry   ┌──────────────┐ │   HTTP push
+  │ Pub/Sub   │────────► │  │  Source(s) │ ───────────► │   Batcher    │ │ ──────────────► Loki
+  │  API      │ Avro     │  │  (async    │   (stream)   │  + Sink.push │ │  (protobuf+snappy
+  └───────────┘          │  │  iterators)│              └──────┬───────┘ │   or JSON+gzip)
+  ┌───────────┐ REST/    │  └─────┬──────┘                     │ on success
+  │ SOQL /    │ SOQL     │        │ events()                   ▼          │
+  │ REST API  │────────► │        │                   CheckpointStore.commit
+  └───────────┘          │        │                   (replay_id / watermark)
+                         └────────┼───────────────────────────────────────┘
+                                  │
+                    obs: /metrics /healthz /readyz · structlog
+```
+
+**Data flow.** Each `Source.events()` yields `LogEntry` objects (already shaped: timestamp, labels,
+JSON line, structured metadata, and a `CheckpointToken`). The shared `Pipeline` batches by
+size/bytes/interval, calls `Sink.push(batch)`, and on success commits the latest `CheckpointToken`
+per key. **Backpressure is structural**: a slow sink suspends consumption of the async generator →
+the Pub/Sub source stops topping up flow-control credits → Salesforce stops sending. No silent drops;
+lag metrics rise instead (`genai-otel-bridge`'s "block-on-full, never silent loss", via generator
+suspension rather than a bounded channel).
+
+---
+
+## 4. Frozen seams
+
+These signatures are the contract every lane codes against. Changing them later is expensive, so
+they are locked here.
+
+### `model.py` — vendor-neutral types
+```python
+@dataclass(frozen=True, slots=True)
+class CheckpointToken:
+    key: str      # "pubsub:/event/LoginEventStream" | "eventlog_objects:LoginEvent"
+    value: str    # base64(replay_id) for streaming; ISO-8601 EventDate for polling
+
+@dataclass(slots=True)
+class LogEntry:
+    timestamp: datetime                  # event occurrence time (EventDate/CreatedDate)
+    labels: Mapping[str, str]            # low-cardinality only; validated against allowlist
+    line: str                            # canonical JSON of the full decoded event
+    structured_metadata: Mapping[str, str]
+    checkpoint: CheckpointToken
+
+@dataclass(slots=True)
+class Batch:
+    entries: list[LogEntry]
+```
+Per-key monotonicity is guaranteed by each source emitting in order (replay_id is monotonic per
+topic; SOQL is `ORDER BY EventDate`), so "commit the last flushed token per key" is a correct resume
+point without explicit sequence numbers.
+
+### `sources/base.py` — producer
+```python
+class Source(Protocol):
+    name: str                            # "pubsub" | "eventlog_objects" | "eventlogfile"
+    def events(self, state: "CheckpointStore",
+               stop: asyncio.Event) -> AsyncIterator[LogEntry]: ...
+```
+
+### `sinks/base.py` — consumer
+```python
+class RetryableSinkError(Exception): ...     # sink's own retry budget exhausted → Pipeline backs off, retries
+class PermanentSinkError(Exception): ...      # 400 / unsplittable 413 → Pipeline drops batch, counts gap, advances
+
+class Sink(Protocol):
+    async def push(self, batch: Batch) -> None: ...
+    async def aclose(self) -> None: ...
+```
+The sink does its own bounded internal retries (tenacity); it only raises when it cannot make
+progress. Drop-and-advance on `PermanentSinkError` mirrors `genai-otel-bridge`'s reject handling
+(never stall the whole pipeline on one poison batch; the gap is counted and alertable).
+
+### `state/base.py` — resume state
+```python
+class CheckpointStore(Protocol):
+    async def load(self, key: str) -> str | None: ...
+    async def commit(self, key: str, value: str) -> None: ...
+```
+Implementations: `file_store` (default; JSON on emptyDir/PVC, atomic temp-then-rename) and
+`configmap_store` (k8s-native, no PVC; RMW with resource-version optimistic concurrency).
+
+### `coordinate/base.py` — leadership (no-op now, HA later)
+```python
+class Coordinator(Protocol):
+    async def run(self, *, on_acquire, on_lose, stop: asyncio.Event) -> None: ...
+```
+`NoopCoordinator` acquires immediately (single replica = always leader). A k8s `Lease`-based
+implementation can be added later for active-passive failover with **zero** changes to sources/sink.
+
+---
+
+## 5. Salesforce auth — OAuth 2.0 JWT bearer
+
+`auth/jwt_auth.py`, server-to-server, no interactive login.
+
+1. Mint an RS256 JWT: `iss`=Connected-App consumer key, `sub`=integration username,
+   `aud`=login URL (`https://login.salesforce.com`, `test.salesforce.com`, or the My Domain URL),
+   `exp`=now+~3 min. Sign with the private key (file- or env-injected).
+2. POST to `{login_url}/services/oauth2/token`, `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
+   `assertion=<jwt>` → `{access_token, instance_url}`.
+3. The JWT flow returns **no refresh token** — re-mint a JWT and re-request on expiry or on 401.
+4. **org id (`tenantid`)** for Pub/Sub metadata is resolved once via
+   `GET {instance_url}/services/oauth2/userinfo` → `organization_id` (overridable in config).
+
+```python
+class TokenProvider:
+    async def token(self) -> AccessToken          # cached; proactive + reactive (401) refresh
+    async def org_id(self) -> str
+@dataclass
+class AccessToken: value: str; instance_url: str; expires_at: datetime
+```
+
+---
+
+## 6. Phase 1 — Pub/Sub streaming → Loki
+
+`salesforce/pubsub_client.py`, `salesforce/avro_codec.py`, `sources/pubsub_source.py`.
+
+- **Stubs**: vendored `proto/pubsub_api.proto` (from forcedotcom/pub-sub-api) → generated
+  `salesforce/_generated/pubsub_api_pb2{,_grpc}.py` via `just proto` (committed, not built at runtime).
+- **Transport**: `grpc.aio.secure_channel("api.pubsub.salesforce.com:7443", …)`. Per-call metadata:
+  `accesstoken`, `instanceurl`, `tenantid`.
+- **Subscribe** (bidi streaming): send `FetchRequest{topic_name, replay_preset, replay_id,
+  num_requested=N}`; receive `FetchResponse{events[], latest_replay_id, pending_num_requested}`.
+  **Flow control**: top up credits (send another `FetchRequest`) as `pending_num_requested` drains
+  below a low-watermark, so the bus stays fed but bounded.
+- **Decode**: each `event.payload` is Avro-decoded with the schema fetched via `GetSchema{schema_id}`,
+  **cached by `schema_id`** (immutable per id) in `avro_codec`.
+- **Multiplexing**: one asyncio task per topic, each owning its `Subscribe` stream + flow-control
+  loop, decoding into a shared bounded `asyncio.Queue` that `events()` drains. Per-topic `replay_id`
+  committed independently. Queue-full → topic tasks pause → fewer credits topped up → Salesforce
+  backpressure.
+- **Resume**: `replay_id` per topic persisted on checkpoint commit. Restart →
+  `replay_preset=CUSTOM` from the stored id; if none, fall back to `LATEST` (configurable). Gaps
+  beyond Pub/Sub retention (≈24–72 h) are covered by the Phase 2 SOQL backfill.
+
+---
+
+## 7. Phase 2 — Stored data → Loki (SOQL polling)
+
+`salesforce/soql_client.py`, `sources/eventlog_objects_source.py`. Shares auth, sink, state, labels.
+
+Per configured object: poll `SELECT <fields> FROM <obj> WHERE <ts_field> > :watermark
+ORDER BY <ts_field>` on a cadence; emit `LogEntry`s; advance the watermark to the max timestamp
+**only after the window is fully pushed** (crash → re-query from the last committed watermark =
+gap recovery). Complements Phase 1 as the catch-up/backfill path when the streaming replay window is
+exceeded.
+
+**Caveat (flagged):** Threat-Detection `*EventStore` objects are **BigObjects** with restrictive
+SOQL — you may filter only on indexed fields (in index order) and ORDER BY is limited. Handled
+per-object via a small object descriptor (which field is the indexed watermark, what's queryable),
+not a generic query builder.
+
+---
+
+## 8. Phase 3 — EventLogFile (stubbed, designed-in)
+
+`sources/eventlogfile_source.py` ships as a skeleton implementing `Source` but raising
+`NotImplementedError`, with the path documented: query `EventLogFile` rows (daily/hourly) → download
+the base64 `LogFile` CSV → parse per-`EventType` column schemas → emit `LogEntry`s. Because it is
+just another `Source`, landing it needs **no** changes to the pipeline, sink, state, or config loader.
+
+---
+
+## 9. Loki sink
+
+`sinks/loki/{sink.py,push.py,labels.py}`.
+
+- **Encoding (default): protobuf + snappy** — the canonical `logproto.PushRequest` wire format used
+  by Promtail/Alloy/Grafana Agent. Vendored `proto/loki_push.proto` → generated stubs via `just proto`
+  (same mechanism as the Pub/Sub proto). Snappy (block format) via `cramjam` (no libsnappy C
+  dependency). `Content-Type: application/x-protobuf`.
+- **Encoding (debug): JSON + gzip** — `POST /loki/api/v1/push` with
+  `{"streams":[{"stream":{…}, "values":[["<ns ts>","<line>", {<structured metadata>}]]}]}`. Selectable
+  for human-inspectable payloads in tests/debugging. Structured metadata supported in both encodings.
+- **Targets**: Grafana Cloud (`https://logs-prod-*.grafana.net/loki/api/v1/push`, HTTP Basic
+  `tenant_id:token`), self-hosted (`X-Scope-OrgID`), or local Alloy `loki.source.api` (URL only, no
+  auth) — all the same push API, switched by config.
+- **Batching**: `max_entries` / `max_bytes` / `flush_interval`; proactive split before a 413.
+- **Retry classification**: 429/5xx/transport → retryable (bounded backoff w/ jitter); 400 / 413
+  (unsplittable) / encode error → permanent (drop + count + advance).
+
+> **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:
+> true`** (default on Grafana Cloud; must be enabled self-hosted / in Alloy's Loki).
+
+---
+
+## 10. Label & cardinality strategy — the whole point
+
+**Stream labels — low-cardinality, ~constant per deployment:**
+
+| label         | source                | distinct values            |
+|---------------|-----------------------|----------------------------|
+| `job`         | constant (`sf2loki`)  | 1                          |
+| `source`      | module                | 3 (`pubsub`/`eventlog_objects`/`eventlogfile`) |
+| `event_type`  | event name            | ~20–50                     |
+| `sf_org_id`   | resolved org id       | 1 per deployment           |
+| `environment` | operator-set          | 1 per deployment           |
+
+→ **active streams ≈ `source × event_type` ≈ 30–90 per deployment** — comfortably within Grafana
+Cloud per-tenant stream limits and cheap in DPM terms.
+
+**Structured metadata — high-cardinality, filterable, NOT labels** (operator-configurable promotion
+list, with sensible per-event defaults): `replay_id`, `schema_id`, `event_uuid`/`EventIdentifier`,
+`user_id`, `username`, `source_ip`, `session_key`, `request_id`/`api_id`, `related_event_id`.
+Queryable as `{event_type="LoginEventStream"} | user_id="005…"` with no stream-cardinality cost.
+
+**Log line**: the full decoded Avro/SOQL event as canonical JSON. **Entry timestamp = event
+`EventDate`/`CreatedDate`** (fallback: ingest time).
+
+**Justification.** A Loki stream is one unique label-set. Promoting `user`/`IP`/`session`/`request_id`
+to labels multiplies streams by every identity seen → millions of low-throughput streams: blown
+per-tenant stream limits, exploding index/DPM cost, and degraded query planning. Structured metadata
+delivers the same filterability *without* the cardinality — exactly its design intent. `labels.py`
+enforces a **startup allowlist guard**: any label key not in the permitted set fails fast (mirrors
+`genai-otel-bridge`'s governance guard).
+
+> **Backfill caveat (flagged)**: Loki rejects entries older than `reject_old_samples_max_age`
+> (default 1 week). Phase 2/3 backfill of older events needs that limit raised, or ingest-time
+> stamping for the over-age tail (counted, not silent).
+
+---
+
+## 11. Config schema
+
+`pydantic-settings`: load from YAML and/or env (`SF2LOKI_…`, `__` nesting). Secrets injectable via
+`*_file` fields (k8s secret mounts) or `${ENV}` interpolation; missing/unreadable secret → fatal
+(fail fast, no silent blanks).
+
+```yaml
+salesforce:
+  login_url: https://login.salesforce.com      # or test. / My Domain
+  client_id: ${SF_CLIENT_ID}
+  username: svc@example.com
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+  org_id: null                                  # auto-resolved via userinfo if null
+
+sources:
+  pubsub:
+    enabled: true
+    endpoint: api.pubsub.salesforce.com:7443
+    default_num_requested: 100                  # flow-control batch size
+    replay_preset: CUSTOM                        # falls back to LATEST when no stored replay_id
+    topics: ["/event/LoginEventStream", "/event/ApiAnomalyEvent"]
+    include: ["/event/*"]                        # operator inclusion/exclusion globs
+    exclude: []
+  eventlog_objects:
+    enabled: false
+    objects:
+      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
+  eventlogfile: {enabled: false}                 # Phase 3 stub
+
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push   # or http://alloy:3100/loki/api/v1/push
+    tenant_id: "123456"                          # GC user id / X-Scope-OrgID; omit for Alloy
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    encoding: protobuf                           # protobuf (default) | json
+    compression: snappy                          # snappy (protobuf) | gzip (json)
+    batch: {max_entries: 1000, max_bytes: 1048576, flush_interval: 1s}
+    labels: {environment: prod}                  # job + sf_org_id added automatically
+    structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]
+
+state:
+  store: file                                    # file | configmap
+  file: {path: /var/lib/sf2loki/state.json}
+
+service:
+  log_level: info
+  log_format: json
+  metrics_addr: ":9090"
+  health_addr: ":8080"
+  shutdown_grace: 25s
+```
+
+---
+
+## 12. Self-observability
+
+`obs/metrics.py` (`prometheus-client`) on `metrics_addr`:
+
+- `sf2loki_events_ingested_total{source,event_type}`, `sf2loki_decode_errors_total{reason}`
+- `sf2loki_loki_push_total{outcome}`, `sf2loki_loki_push_duration_seconds`, `sf2loki_loki_bytes_pushed_total`
+- `sf2loki_ingest_lag_seconds{event_type}` — `now − EventDate` (the key SLI)
+- `sf2loki_last_replay_commit_timestamp_seconds{topic}`, `sf2loki_pubsub_pending_credits{topic}`,
+  `sf2loki_pubsub_reconnects_total{topic}`
+- `sf2loki_watermark_timestamp_seconds{source,object}` (Phase 2)
+- `sf2loki_auth_refreshes_total`, `sf2loki_auth_errors_total`, `sf2loki_schema_cache_size`,
+  `sf2loki_queue_depth`, `sf2loki_build_info`
+
+`obs/health.py` on `health_addr`: `/healthz` (liveness — event loop responsive) and `/readyz`
+(readiness — auth obtained + ≥1 source connected + sink reachable). `obs/logging.py`: `structlog`,
+JSON or logfmt, level-configurable, instance id in context.
+
+---
+
+## 13. Resilience, lifecycle & HA
+
+- **Retry/backoff** (tenacity, exponential + jitter) for Loki push and the token endpoint.
+- **Token refresh**: proactive before expiry; reactive on 401 (re-mint JWT) → reconnect gRPC.
+- **Reconnect**: gRPC stream errors (UNAVAILABLE etc.) → backoff + reconnect, resume from committed
+  `replay_id`.
+- **Graceful shutdown**: SIGTERM → set `stop` event → stop requesting events → flush in-flight batch
+  → commit checkpoints → close streams, all within `shutdown_grace` (k8s
+  `terminationGracePeriodSeconds` set above it).
+
+**HA / replica model.** The Pub/Sub API delivers events **independently per subscriber connection**
+(no consumer groups) — **two replicas both subscribing double-deliver events.** Therefore the default
+deployment is **`replicas: 1`, `strategy: Recreate`** with `replay_id` checkpointing so a
+restart/reschedule resumes without overlap; the brief restart gap is bounded by Pub/Sub retention and
+backfilled by Phase 2. The `Coordinator` seam (§4) lets active-passive leader election (k8s `Lease`)
+drop in later without reshaping sources or sink. Topic-sharding across replicas is a future scale path.
+
+---
+
+## 14. Packaging & delivery
+
+- **Dockerfile**: multi-stage — `uv`-based builder (deps + already-committed stubs) → slim,
+  non-root runtime (distroless-python or `python:3.12-slim`), `HEALTHCHECK` against `/healthz`.
+- **k8s** (`deploy/k8s/`): `Deployment` (replicas 1 / Recreate), `Secret` (private key + Loki token),
+  `ConfigMap` (config.yaml), `ServiceMonitor` (scrape `/metrics`), `PodDisruptionBudget`. PVC only if
+  `state.store: file`; `configmap` store needs none. Helm chart optional (`deploy/helm/`).
+- **CI** (GitHub Actions): ruff → mypy → pytest → proto-drift check → multi-arch image build (buildx)
+  → gitleaks. Mirrors `genai-otel-bridge`'s green-bar gate.
+- **`justfile`**: `setup`, `proto`, `lint`, `type`, `test`, `gate`, `image`, `run`.
+
+---
+
+## 15. Testing
+
+Network is always mocked. TDD throughout.
+
+- **Avro decode** — fixture schemas + binary payloads; schema-cache hit/miss; malformed payload.
+- **Label/structured-metadata mapping** — allowlist guard rejects stray label keys; promotion list
+  routes high-cardinality fields to structured metadata.
+- **Loki payload shaping** — protobuf+snappy round-trip and JSON shape (incl. structured metadata),
+  batch splitting at `max_bytes`, retry classification (429 vs 400 vs 413).
+- **Watermark/replay** — commit advances per key; restart resumes from last committed; gap recovery
+  on simulated crash mid-window; drop-and-advance on permanent sink error.
+- **Auth** — JWT assertion construction (claims, signing), token cache + reactive refresh on 401.
+- **Pub/Sub flow control** — credit top-up against a fake gRPC servicer / mocked stub.
+
+---
+
+## 16. Salesforce assumptions (flagged, not guessed)
+
+1. org id (`tenantid`) resolved via `/services/oauth2/userinfo` `organization_id`.
+2. Naming: `…EventStream` = streaming RTEM channel; `…Event` / `…EventStore` = stored object.
+   Anomaly events share the base name for the stream channel (`/event/ApiAnomalyEvent`) and the
+   stored BigObject (`ApiAnomalyEventStore`).
+3. Threat-Detection `*EventStore` objects are BigObjects → restrictive SOQL (indexed-field filters,
+   limited ORDER BY).
+4. Pub/Sub replay retention ≈ 24–72 h.
+5. Most RTEM streaming channels and all Threat-Detection anomaly channels require the **Shield Event
+   Monitoring** add-on (+ Threat Detection for anomalies). Topic inclusion/exclusion is operator
+   config; defaults stay conservative.
+6. Loki structured metadata requires schema v13 + TSDB + `allow_structured_metadata: true`; Loki
+   rejects entries older than `reject_old_samples_max_age` (default 1 w) — relevant to backfill.
+
+---
+
+## 17. Phase status
+
+| Phase | Scope                                   | Status        |
+|-------|-----------------------------------------|---------------|
+| 0     | Design (this document)                  | done          |
+| 1     | Pub/Sub streaming → Loki + foundation   | implementing  |
+| 2     | SOQL polling of stored objects → Loki   | seam in place |
+| 3     | EventLogFile ingestion                  | stubbed       |

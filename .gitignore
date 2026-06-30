@@ -1,0 +1,36 @@
+# --- Secrets / local env ---
+*.crt
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+dist/
+build/
+
+# uv: lockfile IS committed (reproducible builds), caches are not
+.uv/
+
+# --- Superpowers scratch: NEVER commit specs/plans (operating-model HARD RULE) ---
+docs/superpowers/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
