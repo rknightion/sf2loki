@@ -6,6 +6,7 @@ Ref: DESIGN.md §7.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import httpx
 
@@ -15,6 +16,27 @@ from sf2loki.config import SalesforceConfig
 
 class SoqlError(Exception):
     """Raised when the Salesforce SOQL query endpoint returns a non-2xx (non-401) response."""
+
+
+def to_soql_datetime_literal(value: str) -> str:
+    """Normalize a datetime string into a SOQL-legal dateTime literal (UTC, ms, ``Z``).
+
+    Salesforce REST serializes datetimes as e.g. ``2026-06-30T01:00:00.000+0000``
+    (no colon in the offset). That is **not** a legal SOQL dateTime literal — SOQL
+    requires a colon offset (``+hh:mm``) or a bare ``Z``. Echoing the raw REST value
+    straight back into a ``WHERE`` clause therefore yields ``MALFORMED_QUERY``, so any
+    persisted watermark/CreatedDate must be reformatted before it is reused in SOQL.
+
+    Unparseable input is returned unchanged (best effort — better a possibly-bad
+    literal than a crash on an unexpected format).
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class SoqlClient:

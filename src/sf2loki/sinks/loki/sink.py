@@ -171,7 +171,10 @@ class LokiSink:
                     await self.push(half)
                 except PermanentSinkError:
                     self._metrics.loki_push.labels(outcome="dropped").inc(len(half.entries))
-                    logger.warning("dropping %d unsplittable Loki entries (413)", len(half.entries))
+                    logger.warning(
+                        "dropping %d undeliverable Loki entries (permanent error during 413 split)",
+                        len(half.entries),
+                    )
             return
 
         if status == 400:

@@ -182,8 +182,10 @@ class Pipeline:
                 backoff = min(backoff * 2, _RETRY_BACKOFF_MAX)
                 continue
             except PermanentSinkError:
-                # Poison batch: drop it, count the gap, and advance past it.
-                self._metrics.loki_push.labels(outcome="dropped").inc()
+                # Poison batch: drop it, count the gap, and advance past it. Count
+                # every dropped entry (a flat 400 on a multi-entry batch drops all
+                # of them), not just one — matches the sink's per-entry drop count.
+                self._metrics.loki_push.labels(outcome="dropped").inc(len(batch.entries))
                 await self._commit(batch)
                 return
             else:

@@ -133,6 +133,23 @@ async def test_permanent_error_drops_and_advances() -> None:
     assert state.committed == {"k": "v"}  # but the checkpoint advanced past the poison batch
 
 
+async def test_permanent_error_counts_all_dropped_entries() -> None:
+    # A flat permanent error (e.g. 400) on a multi-entry batch drops every entry;
+    # the dropped metric must reflect N, not 1.
+    src = FakeSource([_entry("k", "1"), _entry("k", "2"), _entry("k", "3")])
+    sink = FakeSink(permanent=True)
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(
+        sources=[src], sink=sink, state=state, batch=_batch_cfg(max_entries=10), metrics=metrics
+    )
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    dropped = metrics.registry.get_sample_value("sf2loki_loki_push_total", {"outcome": "dropped"})
+    assert dropped == 3.0
+
+
 async def test_retryable_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 0.0)
     src = FakeSource([_entry("k", "v")])

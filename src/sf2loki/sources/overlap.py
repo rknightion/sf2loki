@@ -57,8 +57,12 @@ def category_of_stored_object(name: str) -> str:
 
 
 def category_of_elf(event_type: str) -> str:
-    """Canonical category for an ELF EventType (``Login`` -> ``login``, ``API`` -> ``api``)."""
-    key = event_type.lower()
+    """Canonical category for an ELF EventType (``Login`` -> ``login``, ``API`` -> ``api``).
+
+    Spaces are stripped so a display-style EventType (``"Login As"``) matches the
+    RTEM stem (``LoginAsEventStream`` -> ``loginas``).
+    """
+    key = event_type.lower().replace(" ", "")
     return _ELF_CATEGORY_ALIASES.get(key, key)
 
 

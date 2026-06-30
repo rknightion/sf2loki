@@ -14,7 +14,7 @@ import httpx
 from sf2loki.auth.jwt_auth import TokenProvider
 from sf2loki.config import SalesforceConfig
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.soql_client import SoqlClient
+from sf2loki.salesforce.soql_client import SoqlClient, to_soql_datetime_literal
 
 
 class EventLogFileError(Exception):
@@ -64,15 +64,17 @@ class EventLogFileClient:
     ) -> list[EventLogFileMeta]:
         """List EventLogFile records for *event_type*/*interval* created since *since*.
 
-        *since* is a SOQL datetime literal (e.g. ``"2026-06-30T10:00:00Z"``) and must
-        NOT be quoted in the generated SOQL (CreatedDate is a datetime field, not a
-        string).
+        *since* is a SOQL datetime literal and must NOT be quoted in the generated SOQL
+        (CreatedDate is a datetime field, not a string). It is passed through
+        :func:`to_soql_datetime_literal` so a raw Salesforce CreatedDate echoed back from
+        a checkpoint (``…+0000`` offset) is reformatted into a SOQL-legal ``…Z`` literal.
         """
+        since_literal = to_soql_datetime_literal(since)
         soql = (
             "SELECT Id,EventType,Interval,LogDate,CreatedDate,LogFileLength,Sequence "
             "FROM EventLogFile "
             f"WHERE EventType='{event_type}' AND Interval='{interval}' "
-            f"AND CreatedDate >= {since} "
+            f"AND CreatedDate >= {since_literal} "
             "ORDER BY CreatedDate, Id "
             f"LIMIT {page_size}"
         )

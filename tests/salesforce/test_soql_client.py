@@ -142,3 +142,33 @@ async def test_500_raises_soql_error() -> None:
                 pass
 
     assert "500" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# to_soql_datetime_literal: Salesforce REST returns +0000 offsets, which are
+# NOT legal SOQL dateTime literals (SOQL needs +hh:mm or Z).
+
+
+def test_to_soql_datetime_literal_fixes_nocolon_offset() -> None:
+    from sf2loki.salesforce.soql_client import to_soql_datetime_literal
+
+    # The exact format Salesforce REST serializes CreatedDate/EventDate in.
+    assert to_soql_datetime_literal("2026-06-30T01:00:00.000+0000") == "2026-06-30T01:00:00.000Z"
+
+
+def test_to_soql_datetime_literal_normalizes_offset_to_utc() -> None:
+    from sf2loki.salesforce.soql_client import to_soql_datetime_literal
+
+    assert to_soql_datetime_literal("2026-06-30T03:30:00.000+02:00") == "2026-06-30T01:30:00.000Z"
+
+
+def test_to_soql_datetime_literal_passes_through_z_form() -> None:
+    from sf2loki.salesforce.soql_client import to_soql_datetime_literal
+
+    assert to_soql_datetime_literal("2026-06-30T01:00:00Z") == "2026-06-30T01:00:00.000Z"
+
+
+def test_to_soql_datetime_literal_unparseable_returned_unchanged() -> None:
+    from sf2loki.salesforce.soql_client import to_soql_datetime_literal
+
+    assert to_soql_datetime_literal("not-a-date") == "not-a-date"

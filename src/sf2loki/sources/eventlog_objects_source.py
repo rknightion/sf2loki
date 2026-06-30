@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 
 from sf2loki.config import EventLogObjectsConfig
 from sf2loki.model import CheckpointToken, LogEntry
-from sf2loki.salesforce.soql_client import SoqlClient
+from sf2loki.salesforce.soql_client import SoqlClient, to_soql_datetime_literal
 from sf2loki.shaping import extract_timestamp, route_fields
 from sf2loki.state.base import CheckpointStore
 
@@ -84,6 +84,11 @@ class EventLogObjectsSource:
                     default_wm = datetime.now(UTC) - obj.lookback
                     # Format as SOQL datetime literal: ISO-8601 with Z suffix.
                     watermark = default_wm.strftime("%Y-%m-%dT%H:%M:%SZ")
+                else:
+                    # A stored watermark is the raw EventDate Salesforce returned
+                    # (e.g. "…+0000"), which is NOT a legal SOQL literal — reformat
+                    # before interpolating it into the WHERE clause.
+                    watermark = to_soql_datetime_literal(watermark)
 
                 # --- 2. Build SOQL ---
                 # FIELDS(ALL) is a Salesforce convenience that selects every field;

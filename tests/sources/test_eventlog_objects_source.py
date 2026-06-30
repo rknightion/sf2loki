@@ -153,7 +153,10 @@ async def test_sm_fields_promoted_to_structured_metadata(tmp_path: pytest.TempPa
 async def test_watermark_resume_uses_stored_watermark(tmp_path: pytest.TempPathFactory) -> None:
     """When a watermark is stored, the SOQL WHERE clause uses that watermark."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
-    stored_wm = "2026-06-30T09:00:00Z"
+    # Salesforce REST serializes EventDate with a no-colon offset; the stored
+    # watermark is that raw value, which must be normalized to a SOQL-legal
+    # literal before being interpolated into the WHERE clause.
+    stored_wm = "2026-06-30T09:00:00.000+0000"
     await store.commit("eventlog_objects:LoginEvent", stored_wm)
 
     captured_q: list[str] = []
@@ -179,7 +182,9 @@ async def test_watermark_resume_uses_stored_watermark(tmp_path: pytest.TempPathF
         _ = [e async for e in source.events(store, stop)]
 
     assert len(captured_q) == 1
-    assert stored_wm in captured_q[0]
+    # The raw +0000 watermark is normalized to a SOQL-legal Z literal in the query.
+    assert "2026-06-30T09:00:00.000Z" in captured_q[0]
+    assert "2026-06-30T09:00:00.000+0000" not in captured_q[0]
     # Verify it's in the WHERE clause
     assert "WHERE EventDate >" in captured_q[0]
 

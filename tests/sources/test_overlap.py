@@ -32,6 +32,12 @@ def test_category_of_elf_lowercases() -> None:
     assert category_of_elf("Report") == "report"
 
 
+def test_category_of_elf_strips_spaces() -> None:
+    # A display-style "Login As" must match the RTEM stem loginas.
+    assert category_of_elf("Login As") == "loginas"
+    assert category_of_elf("Login As") == category_of_stored_object("LoginAsEvent")
+
+
 def test_pubsub_and_stored_object_agree_on_category() -> None:
     # The whole point: streaming a category and polling its stored object are
     # the same data -> they must normalise to the same category.

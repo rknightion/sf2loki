@@ -137,9 +137,9 @@ async def test_list_files_builds_correct_soql_and_maps_records() -> None:
     assert "FROM EventLogFile" in q
     assert "EventType='Login'" in q
     assert "Interval='Hourly'" in q
-    # CreatedDate is a SOQL datetime literal -- NO surrounding quotes.
-    assert "CreatedDate >= 2026-06-30T00:00:00Z" in q
-    assert "'2026-06-30T00:00:00Z'" not in q
+    # CreatedDate is a SOQL datetime literal -- NO surrounding quotes, normalized to ms+Z.
+    assert "CreatedDate >= 2026-06-30T00:00:00.000Z" in q
+    assert "'2026-06-30T00:00:00.000Z'" not in q
     assert "LIMIT 1000" in q
 
     assert len(files) == 2
@@ -155,6 +155,33 @@ async def test_list_files_builds_correct_soql_and_maps_records() -> None:
     )
     assert f2.sequence == 0
     assert f2.length == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_files_normalizes_raw_salesforce_since() -> None:
+    """A checkpointed CreatedDate (+0000 offset) is reformatted into a legal SOQL literal."""
+    captured_q: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured_q.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        return httpx.Response(200, json={"records": [], "done": True})
+
+    respx.get(_query_url()).mock(side_effect=capture)
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        await elf_client.list_files(
+            event_type="Login",
+            interval="Hourly",
+            since="2026-06-30T01:00:00.000+0000",  # raw Salesforce REST form
+            page_size=1000,
+        )
+
+    q = captured_q[0]
+    assert "CreatedDate >= 2026-06-30T01:00:00.000Z" in q
+    assert "+0000" not in q  # the malformed-for-SOQL form is gone
 
 
 # ---------------------------------------------------------------------------
