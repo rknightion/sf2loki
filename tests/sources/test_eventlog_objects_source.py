@@ -209,3 +209,37 @@ async def test_stop_event_prevents_yield(tmp_path: pytest.TempPathFactory) -> No
         entries = [e async for e in source.events(store, stop)]
 
     assert entries == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stop_during_inter_cycle_sleep_returns_promptly(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Setting stop during the between-cycles sleep returns promptly, not after poll_interval."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(200, json={"records": [], "done": True})
+    )
+
+    # poll_once=False with a long poll_interval: without stop-awareness in the
+    # inter-cycle sleep, events() would block for the full interval.
+    cfg = make_elo_cfg(poll_interval=timedelta(seconds=60))
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=False)
+        stop = asyncio.Event()
+
+        async def consume() -> None:
+            async for _ in source.events(store, stop):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.05)  # let the first (empty) cycle complete and enter the sleep
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)  # << would be 60s without the fix

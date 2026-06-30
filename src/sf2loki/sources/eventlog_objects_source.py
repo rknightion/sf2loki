@@ -14,6 +14,7 @@ not work. Standard EventLog objects (LoginEvent, etc.) are fine.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
@@ -132,5 +133,9 @@ class EventLogObjectsSource:
 
             # --- 4. Sleep between cycles (per poll_interval of first object for simplicity;
             # a production implementation could track per-object timers independently) ---
-            if self._cfg.objects and not stop.is_set():
-                await asyncio.sleep(self._cfg.objects[0].poll_interval.total_seconds())
+            if self._cfg.objects:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        stop.wait(),
+                        timeout=self._cfg.objects[0].poll_interval.total_seconds(),
+                    )

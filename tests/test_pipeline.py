@@ -220,6 +220,24 @@ async def test_commit_updates_watermark_ts_for_eventlog_objects_key() -> None:
     assert val is not None and abs(val - expected) < 1.0
 
 
+async def test_flush_retry_loop_is_stop_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop fired mid-backoff aborts the retry loop promptly (no full backoff wait)."""
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 5.0)
+    src = FakeSource([_entry("k", "v")])
+    sink = FakeSink(fail_times=10**6)  # always retryable-fails
+    state = FakeState()
+    pipe = _pipeline(src, sink, state)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(pipe.run(stop))
+    await asyncio.sleep(0.05)  # let the first push attempt fail and enter backoff
+    stop.set()
+    await asyncio.wait_for(task, timeout=0.5)  # would be ~5s without the fix
+
+    # Batch was abandoned uncommitted (not dropped) — it will be retried after restart.
+    assert state.committed == {}
+
+
 async def test_commit_watermark_falls_back_to_now_on_unparseable_value() -> None:
     """A checkpoint value that isn't a parseable timestamp doesn't crash the pipeline."""
     src = FakeSource([_entry("eventlog_objects:LoginEvent", "not-a-timestamp")])

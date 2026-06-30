@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
-from sf2loki.app import App
+from sf2loki.app import App, _drain_with_grace
 from sf2loki.config import Config
 from sf2loki.sinks.loki.labels import LabelGuardError
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
@@ -79,3 +80,61 @@ def test_build_rejects_disallowed_label() -> None:
     cfg = _cfg(sink={"loki": {"url": "http://x/loki/api/v1/push", "labels": {"user_id": "bad"}}})
     with pytest.raises(LabelGuardError):
         App.build(cfg)
+
+
+# ---------------------------------------------------------------------------
+# _drain_with_grace: bounds how long shutdown waits after `stop` fires
+# ---------------------------------------------------------------------------
+
+
+async def test_drain_with_grace_returns_once_coro_finishes_on_its_own() -> None:
+    """A coroutine that finishes before stop is ever set returns immediately."""
+
+    async def quick() -> None:
+        return None
+
+    stop = asyncio.Event()
+    await asyncio.wait_for(_drain_with_grace(quick(), stop, grace=10.0), timeout=1.0)
+
+
+async def test_drain_with_grace_lets_a_stop_aware_coro_finish_within_grace() -> None:
+    """A coroutine that notices stop and exits quickly returns well before grace expires."""
+
+    async def stop_aware() -> None:
+        await stop.wait()
+
+    stop = asyncio.Event()
+
+    async def trigger_stop() -> None:
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    trigger_task = asyncio.create_task(trigger_stop())
+    try:
+        await asyncio.wait_for(_drain_with_grace(stop_aware(), stop, grace=10.0), timeout=1.0)
+    finally:
+        await trigger_task
+
+
+async def test_drain_with_grace_force_cancels_after_grace_expires() -> None:
+    """A coroutine that ignores stop is force-cancelled once grace elapses."""
+
+    async def ignores_stop() -> None:
+        await asyncio.sleep(1000)
+
+    stop = asyncio.Event()
+    stop.set()  # already "shutting down"
+
+    # grace=0.1s: must return promptly (force-cancelled), not hang for 1000s.
+    await asyncio.wait_for(_drain_with_grace(ignores_stop(), stop, grace=0.1), timeout=1.0)
+
+
+async def test_drain_with_grace_propagates_exception_from_finished_task() -> None:
+    """A real exception raised before stop fires propagates, not swallowed."""
+
+    async def fails() -> None:
+        raise ValueError("boom")
+
+    stop = asyncio.Event()
+    with pytest.raises(ValueError, match="boom"):
+        await asyncio.wait_for(_drain_with_grace(fails(), stop, grace=10.0), timeout=1.0)

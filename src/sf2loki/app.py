@@ -47,6 +47,11 @@ _SENTINEL: object = object()
 _RETRY_BACKOFF_BASE = 1.0
 _RETRY_BACKOFF_MAX = 30.0
 
+# Fixed budget for closing resources (http/grpc clients) during shutdown — kept
+# short and separate from shutdown_grace (which bounds the pipeline drain) so
+# the two don't stack past k8s's terminationGracePeriodSeconds.
+_CLOSE_TIMEOUT: float = 5.0
+
 
 class Pipeline:
     """Drain sources into batches and push them to the sink, committing on success.
@@ -85,7 +90,7 @@ class Pipeline:
             return
         queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
         producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
-        consumer = asyncio.create_task(self._consume(queue, len(producers)))
+        consumer = asyncio.create_task(self._consume(queue, len(producers), stop))
         try:
             await asyncio.gather(*producers)
             # Producers each enqueue a sentinel in their finally; the consumer
@@ -113,7 +118,9 @@ class Pipeline:
         finally:
             await queue.put(_SENTINEL)
 
-    async def _consume(self, queue: asyncio.Queue[LogEntry | object], n_producers: int) -> None:
+    async def _consume(
+        self, queue: asyncio.Queue[LogEntry | object], n_producers: int, stop: asyncio.Event
+    ) -> None:
         flush_interval = self._batch.flush_interval.total_seconds()
         loop = asyncio.get_running_loop()
         active = n_producers
@@ -129,7 +136,7 @@ class Pipeline:
                     timeout = max(0.0, deadline - loop.time())
                     item = await asyncio.wait_for(queue.get(), timeout)
             except TimeoutError:
-                await self._flush(batch)
+                await self._flush(batch, stop)
                 batch, approx_bytes, deadline = [], 0, None
                 continue
 
@@ -138,7 +145,7 @@ class Pipeline:
             if item is _SENTINEL:
                 active -= 1
                 if active == 0:
-                    await self._flush(batch)
+                    await self._flush(batch, stop)
                     return
                 continue
 
@@ -148,10 +155,10 @@ class Pipeline:
             if deadline is None:
                 deadline = loop.time() + flush_interval
             if len(batch) >= self._batch.max_entries or approx_bytes >= self._batch.max_bytes:
-                await self._flush(batch)
+                await self._flush(batch, stop)
                 batch, approx_bytes, deadline = [], 0, None
 
-    async def _flush(self, entries: list[LogEntry]) -> None:
+    async def _flush(self, entries: list[LogEntry], stop: asyncio.Event) -> None:
         if not entries:
             return
         batch = Batch(entries=list(entries))
@@ -162,7 +169,14 @@ class Pipeline:
                 await self._sink.push(batch)
             except RetryableSinkError:
                 self._metrics.loki_push.labels(outcome="retried").inc()
-                await asyncio.sleep(backoff)
+                if stop.is_set():
+                    # Shutting down: abandon this batch uncommitted rather than
+                    # hammering a failing sink past the grace period — it will
+                    # be retried in full after restart (checkpoint never advanced).
+                    return
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=backoff)
+                    return  # stop fired during backoff
                 backoff = min(backoff * 2, _RETRY_BACKOFF_MAX)
                 continue
             except PermanentSinkError:
@@ -208,6 +222,36 @@ def _parse_watermark_seconds(value: str) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return datetime.now(UTC).timestamp()
+
+
+async def _drain_with_grace(awaitable: Awaitable[None], stop: asyncio.Event, grace: float) -> None:
+    """Run *awaitable* to completion, but bound how long it may run after ``stop`` fires.
+
+    Every producer/consumer loop in this codebase is expected to notice ``stop``
+    and exit on its own (the normal, fast path). This is the backstop: if
+    something doesn't — a stuck call, a bug — the drain is force-cancelled
+    *grace* seconds after shutdown was requested, so the process still exits
+    within roughly ``shutdown_grace`` instead of hanging indefinitely.
+    """
+    task: asyncio.Task[None] = asyncio.ensure_future(awaitable)
+    stop_waiter = asyncio.ensure_future(stop.wait())
+    try:
+        done, _ = await asyncio.wait({task, stop_waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task  # propagate any exception; no-op if it finished cleanly
+            return
+        try:
+            await asyncio.wait_for(task, timeout=grace)
+        except TimeoutError:
+            log.warning("pipeline did not drain within shutdown_grace; cancelling")
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    finally:
+        if not stop_waiter.done():
+            stop_waiter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop_waiter
 
 
 def _build_state(cfg: Config) -> CheckpointStore:
@@ -318,10 +362,11 @@ class App:
         )
 
         coordinator = NoopCoordinator()
+        grace = self._cfg.service.shutdown_grace.total_seconds()
 
         async def on_acquire() -> None:
             self._health.set_ready()
-            await self._pipeline.run(stop)
+            await _drain_with_grace(self._pipeline.run(stop), stop, grace)
 
         async def on_lose() -> None:
             self._health.set_not_ready()
@@ -329,9 +374,8 @@ class App:
         try:
             await coordinator.run(on_acquire=on_acquire, on_lose=on_lose, stop=stop)
         finally:
-            grace = self._cfg.service.shutdown_grace.total_seconds()
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._shutdown(), timeout=grace)
+                await asyncio.wait_for(self._shutdown(), timeout=_CLOSE_TIMEOUT)
             self._health.set_not_ready()
             await self._health.stop()
             metrics_server[0].shutdown()
