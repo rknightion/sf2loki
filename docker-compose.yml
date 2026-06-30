@@ -1,0 +1,20 @@
+# Local Docker run for sf2loki (the primary run target alongside ECS).
+#
+#   docker compose --env-file .env.dev up --build
+#
+# Secrets are mounted read-only from ./secrets (gitignored); non-secret config
+# values are interpolated from the env_file. config.docker.yaml carries no secrets.
+services:
+  sf2loki:
+    build: .
+    image: sf2loki:dev
+    env_file:
+      - .env.dev
+    volumes:
+      - ./config.docker.yaml:/etc/sf2loki/config.yaml:ro
+      - ./secrets:/etc/sf2loki/secrets:ro
+    command: ["--config", "/etc/sf2loki/config.yaml"]
+    ports:
+      - "9090:9090"   # Prometheus /metrics
+      - "8080:8080"   # /healthz, /readyz
+    restart: unless-stopped

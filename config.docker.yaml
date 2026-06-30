@@ -1,0 +1,56 @@
+# sf2loki config for local Docker / docker-compose runs.
+# Non-secret values come from the environment (${VAR}, supplied via .env.dev or
+# the compose env_file); secrets come from files mounted at /etc/sf2loki/secrets.
+# Contains NO secrets itself, so it is safe to commit.
+
+salesforce:
+  login_url: ${SF_LOGIN_URL}                     # e.g. your My Domain URL (custom-URL path)
+  client_id: ${SF_CLIENT_ID}                     # External Client App consumer key
+  username: ${SF_USERNAME}                        # integration user (JWT `sub`); pre-authorised on the app
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+  # org_id omitted -> auto-resolved via /userinfo (needs the `openid` scope on the app).
+  # Set SF_ORG_ID and add `org_id: ${SF_ORG_ID}` here to keep the app on `api` alone.
+
+sources:
+  # Disjoint categories so the either/or overlap guard is satisfied: Login via
+  # streaming, Report via EventLogFile. Toggle per what you want to exercise.
+  pubsub:
+    enabled: true
+    topics: ["/event/LoginEventStream"]
+    include: ["/event/*"]
+  eventlog_objects:
+    enabled: false
+    objects:
+      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
+  eventlogfile:
+    enabled: true
+    interval: Hourly
+    event_types:
+      - Report
+      - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
+    poll_interval: 10m
+    lookback: 24h
+
+sink:
+  type: loki
+  loki:
+    url: ${GC_LOKI}                                # https://logs-prod-035.grafana.net/loki/api/v1/push
+    tenant_id: ${GC_LOKI_USER}                     # 1644459
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    encoding: protobuf
+    compression: snappy
+    batch: {max_entries: 1000, max_bytes: 1048576, flush_interval: 1s, max_line_bytes: 262144}
+    labels: {environment: dev}                      # job + sf_org_id added automatically
+    structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]
+
+state:
+  store: file
+  file:
+    path: /tmp/sf2loki/state.json                   # writable by the non-root container user
+
+service:
+  log_level: info
+  log_format: json
+  metrics_addr: ":9090"
+  health_addr: ":8080"

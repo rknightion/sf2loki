@@ -38,8 +38,12 @@ USER sf2loki
 # metrics (9090) and health (8080)
 EXPOSE 9090 8080
 
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=2).status==200 else 1)"]
+# Use /readyz (readiness), not /healthz (liveness): Docker/ECS collapse health
+# into a single signal, and for that signal we want "actually serving" — i.e.
+# Salesforce auth resolved and the pipeline running. start-period covers the
+# normal startup window during which /readyz is legitimately 503.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/readyz', timeout=2).status==200 else 1)"]
 
 ENTRYPOINT ["python", "-m", "sf2loki"]
 CMD ["--config", "/etc/sf2loki/config.yaml"]

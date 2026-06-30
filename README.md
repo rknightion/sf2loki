@@ -150,6 +150,33 @@ annotated schema.
 uv run python -m sf2loki --config config.example.yaml
 ```
 
+## Run with Docker / docker-compose
+
+The container is the primary run target (alongside ECS). The image is slim, runs as a non-root user,
+and exposes `:9090` (`/metrics`) and `:8080` (`/healthz`, `/readyz`).
+
+```bash
+# build
+docker build -t sf2loki:dev .
+
+# run via compose — non-secret values from .env.dev, secrets mounted from ./secrets
+docker compose --env-file .env.dev up --build
+```
+
+[`docker-compose.yml`](docker-compose.yml) mounts [`config.docker.yaml`](config.docker.yaml) (no
+secrets — env-driven via `${VAR}` + `*_file`) at `/etc/sf2loki/config.yaml` and `./secrets` (the
+private key + Loki token) read-only at `/etc/sf2loki/secrets`. Create `.env.dev` from the values in
+the config (Salesforce login URL / consumer key / username, Loki URL + tenant); `.env*`, `*.key`,
+`*.crt`, and `secrets/` are gitignored.
+
+**Health check target — use `/readyz`, not `/healthz`.** `/healthz` is *liveness* (200 whenever the
+process is up, even mid-startup before Salesforce auth); `/readyz` is *readiness* (200 only once auth
+resolved and the pipeline is running). Docker/ECS collapse container health into a single signal, so
+they should probe `/readyz` — the Dockerfile `HEALTHCHECK` already does. For **ECS**, set the task
+definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || exit 1` with a
+`startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a fast-fail
+(e.g. bad Salesforce credentials → process exits) restarts the task.
+
 ## Kubernetes deployment
 
 Manifests live in [`deploy/k8s/`](deploy/k8s/): `Deployment` (replicas 1 / `Recreate`), `Service`,
