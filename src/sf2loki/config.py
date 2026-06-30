@@ -116,8 +116,8 @@ class SalesforceConfig(BaseModel):
     login_url: str = ""
     environment: Literal["production", "sandbox"] = "production"
     # OAuth flow: ``jwt_bearer`` (asymmetric key + cert, no shared secret) or
-    # ``client_credentials`` (consumer key + secret — mirrors the Datadog
-    # managed-collector setup). Defaults to jwt_bearer for backward compat.
+    # ``client_credentials`` (consumer key + secret, no keypair/cert/pre-auth).
+    # Defaults to jwt_bearer for backward compatibility.
     auth_mode: Literal["jwt_bearer", "client_credentials"] = "jwt_bearer"
     client_id: str
     # client_credentials flow secret (injectable from file/env like the key).

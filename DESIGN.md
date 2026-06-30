@@ -36,7 +36,8 @@ Kubernetes; the container is optimised first.
   (`httpx`), and SOQL polling are all I/O-bound — one event loop, `uvloop`, no thread/GIL contention.
 - **uv** (deps + lockfile), **ruff**, **mypy --strict**, **pytest** + **pytest-asyncio**, **just**.
 - Runtime deps: `grpcio` / `grpcio-tools`, `fastavro`, `httpx`, `pydantic` + `pydantic-settings`,
-  `pyjwt[crypto]`, `cryptography`, `protobuf`, `cramjam` (snappy), `prometheus-client`, `structlog`,
+  `pyjwt[crypto]`, `cryptography`, `protobuf`, `cramjam` (snappy), `opentelemetry-sdk` +
+  `opentelemetry-exporter-otlp-proto-http`, `structlog`,
   `tenacity`, `uvloop`.
 
 Why Python over Go (the `genai-otel-bridge` reference is Go): the workload is modest-volume and
@@ -146,9 +147,20 @@ implementation can be added later for active-passive failover with **zero** chan
 
 ---
 
-## 5. Salesforce auth — OAuth 2.0 JWT bearer
+## 5. Salesforce auth — OAuth (JWT bearer or client credentials)
 
-`auth/jwt_auth.py`, server-to-server, no interactive login.
+`auth/jwt_auth.py`, server-to-server, no interactive login. Two flows, selected by
+`salesforce.auth_mode`:
+
+- **`jwt_bearer`** (default) — private-key-signed assertion (steps below). Most secure: no shared
+  secret leaves the secret store.
+- **`client_credentials`** — consumer key + `client_secret` (no keypair, cert, or user
+  pre-authorisation); the External Client App's **Run As** user supplies identity + permissions. The
+  grant body is `grant_type=client_credentials` with `client_id`/`client_secret`; no JWT is minted.
+  Same `TokenProvider`, same downstream access token (works unchanged for Pub/Sub, REST/SOQL, ELF).
+
+`salesforce.environment` (`production`|`sandbox`) derives the login URL; an explicit `login_url`
+(custom My Domain) overrides it. JWT bearer flow:
 
 1. Mint an RS256 JWT: `iss`=External-Client-App consumer key, `sub`=integration username,
    `aud`=login URL (`https://login.salesforce.com`, `test.salesforce.com`, or the My Domain URL),
@@ -413,16 +425,22 @@ state:
 service:
   log_level: info
   log_format: json
-  metrics_addr: ":9090"
   health_addr: ":8080"
   shutdown_grace: 25s
+  telemetry:                                     # OTLP metrics egress (push; no scrape endpoint)
+    enabled: false
+    endpoint: ""                                 # GC OTLP gateway .../otlp/v1/metrics, or http://alloy:4318/v1/metrics
+    auth: basic                                  # basic (defaults to Loki tenant_id/token) | none
 ```
 
 ---
 
 ## 12. Self-observability
 
-`obs/metrics.py` (`prometheus-client`) on `metrics_addr`:
+`obs/metrics.py` defines all metrics on an OpenTelemetry `Meter`, pushed via **OTLP/HTTP**
+(`service.telemetry`, gated on `enabled`) — OTel-native, no Prometheus scrape endpoint. Basic auth
+defaults to the Loki sink credentials (Grafana Cloud shares one stack credential for Loki and OTLP).
+Names map to the usual Prometheus exposition names (counters gain `_total`):
 
 - `sf2loki_events_ingested_total{source,event_type}`, `sf2loki_decode_errors_total{reason}`
 - `sf2loki_loki_push_total{outcome}`, `sf2loki_loki_push_duration_seconds`, `sf2loki_loki_bytes_pushed_total`
@@ -430,8 +448,12 @@ service:
 - `sf2loki_last_replay_commit_timestamp_seconds{topic}`, `sf2loki_pubsub_pending_credits{topic}`,
   `sf2loki_pubsub_reconnects_total{topic}`
 - `sf2loki_watermark_timestamp_seconds{source,object}` (Phase 2)
+- `sf2loki_salesforce_limit_max{limit_name}`, `sf2loki_salesforce_limit_remaining{limit_name}`,
+  `sf2loki_salesforce_limits_poll_errors_total` — org limits (`salesforce.limits`, via `obs/limits_poller.py`)
 - `sf2loki_auth_refreshes_total`, `sf2loki_auth_errors_total`, `sf2loki_schema_cache_size`,
   `sf2loki_queue_depth`, `sf2loki_build_info`
+
+A Grafana dashboard for these lives in `deploy/grafana/`.
 
 `obs/health.py` on `health_addr`: `/healthz` (liveness — event loop responsive) and `/readyz`
 (readiness — auth obtained + ≥1 source connected + sink reachable). `obs/logging.py`: `structlog`,
@@ -463,7 +485,7 @@ drop in later without reshaping sources or sink. Topic-sharding across replicas 
 - **Dockerfile**: multi-stage — `uv`-based builder (deps + already-committed stubs) → slim,
   non-root runtime (distroless-python or `python:3.12-slim`), `HEALTHCHECK` against `/healthz`.
 - **k8s** (`deploy/k8s/`): `Deployment` (replicas 1 / Recreate), `Secret` (private key + Loki token),
-  `ConfigMap` (config.yaml), `ServiceMonitor` (scrape `/metrics`), `PodDisruptionBudget`. PVC only if
+  `ConfigMap` (config.yaml), `PodDisruptionBudget`. PVC only if
   `state.store: file`; `configmap` store needs none. Helm chart optional (`deploy/helm/`).
 - **CI** (GitHub Actions): ruff → mypy → pytest → proto-drift check → multi-arch image build (buildx)
   → gitleaks. Mirrors `genai-otel-bridge`'s green-bar gate.

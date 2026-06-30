@@ -273,7 +273,7 @@ def test_sources_config_allow_overlap_default_false() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auth mode + environment toggle (Datadog-parity)
+# Auth mode + environment toggle
 
 
 def test_environment_sandbox_derives_login_url() -> None:

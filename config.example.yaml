@@ -7,14 +7,22 @@
 # blanks, in either case).
 
 salesforce:
-  login_url: https://login.salesforce.com      # or https://test.salesforce.com / your My Domain
+  environment: production                       # production | sandbox — derives login_url; an explicit login_url below overrides it
+  login_url: https://login.salesforce.com      # optional: derived from environment when omitted; set to a custom My Domain to override
+  auth_mode: jwt_bearer                          # jwt_bearer (private key + cert) | client_credentials (consumer key + secret)
   client_id: ${SF_CLIENT_ID}                    # External Client App consumer key
+  # client_secret_file: /etc/sf2loki/secrets/client-secret  # required when auth_mode: client_credentials
   username: svc@example.com                      # integration user (pre-authorised on the app's Policies tab)
+                                                 # not needed when auth_mode: client_credentials
   private_key_file: /etc/sf2loki/secrets/server.key
+                                                 # not needed when auth_mode: client_credentials
   api_version: "60.0"
   org_id: null                                   # set this to keep the app on the `api` scope alone;
                                                  # left null it is auto-resolved via /services/oauth2/userinfo
                                                  # (which then needs the `openid` scope)
+  limits:
+    enabled: false   # poll /services/data/vXX.0/limits → org-limit gauges (API usage, storage, streaming events, ...)
+    poll_interval: 5m
 
 sources:
   # Either/or per event category: ingest each category (Login, API, Report, ...)
@@ -102,6 +110,16 @@ state:
 service:
   log_level: info
   log_format: json
-  metrics_addr: ":9090"
   health_addr: ":8080"
   shutdown_grace: 25s
+  telemetry:
+    enabled: false                         # push all metrics via OTLP/HTTP
+    endpoint: ""                           # e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics  (Grafana Cloud) or http://alloy:4318/v1/metrics
+    auth: basic                            # basic | none
+    # Basic-auth creds default to the Loki sink tenant_id/auth_token when blank
+    # (Grafana Cloud uses one stack credential for Loki and OTLP). Override here if needed:
+    basic_auth_user: ""
+    # basic_auth_token_file: /etc/sf2loki/secrets/otlp-token
+    headers: {}                            # extra headers merged on top
+    export_interval: 60s
+    resource_attributes: {}                # extra OTel resource attrs merged onto service.name/service.version

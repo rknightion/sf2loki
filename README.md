@@ -27,14 +27,22 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   can't get its whole batch rejected.
 - **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a file or a k8s
   ConfigMap; at-least-once delivery, structural backpressure (no silent drops).
-- **Self-observable**: Prometheus `/metrics`, `/healthz`, `/readyz`, structured logs, graceful
-  shutdown.
+- **Self-observable (OTel-native)**: all metrics — connector self-observability **and** Salesforce org
+  limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
+  Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
 
-## Salesforce setup (OAuth 2.0 JWT bearer)
+## Salesforce setup (OAuth)
 
-The service authenticates server-to-server with the **OAuth 2.0 JWT bearer flow** — a private key
-signs a short-lived JWT assertion, Salesforce returns an access token. No interactive login, no
-browser, no refresh token (the service re-mints a JWT on expiry / 401).
+The service authenticates server-to-server, no interactive login. Pick one flow via
+`salesforce.auth_mode`:
+
+- **`jwt_bearer`** (default) — a private key signs a short-lived JWT assertion, Salesforce returns an
+  access token. Most secure: no shared secret ever leaves your secret store. Setup is steps 1–5 below.
+- **`client_credentials`** — a consumer key + secret; simplest to set up (no keypair, certificate, or
+  user pre-authorisation). See [Client Credentials flow](#alternative-client-credentials-flow).
+
+Both reuse the same External Client App shell and the same integration-user permissions (step 4); the
+JWT bearer walkthrough follows.
 
 ### 1. Generate the keypair and certificate
 
@@ -135,13 +143,33 @@ holds. Optional hardening: add a **login-IP restriction** here if your pod egres
 
 ### 5. Point the service at your org
 
-Set `salesforce.login_url` to `https://login.salesforce.com`, `https://test.salesforce.com` (sandbox),
-or your My Domain URL; `salesforce.username` to the integration user; `salesforce.client_id` to the
-Consumer Key; and the private key via `salesforce.private_key_file`.
+Set `salesforce.environment` to `production` or `sandbox` (this derives the login URL), or set
+`salesforce.login_url` explicitly to a custom My Domain URL (it takes precedence over `environment`).
+Then set `salesforce.client_id` to the Consumer Key, `salesforce.username` to the integration user
+(jwt_bearer only), and the private key via `salesforce.private_key_file`.
 
 > Topic availability depends on your Shield/Threat-Detection entitlements. Topic inclusion/exclusion
 > is operator config (`sources.pubsub.topics` + `include`/`exclude` globs); defaults stay
 > conservative.
+
+### Alternative: Client Credentials flow
+
+Simpler than JWT bearer — no keypair, certificate, or user pre-authorisation. Set
+`salesforce.auth_mode: client_credentials` and supply a consumer **secret** instead of a private key.
+
+1. **External Client App** — created as above, but under **Flow Enablement** tick **Enable Client
+   Credentials Flow** (instead of JWT Bearer Flow). No certificate upload is needed.
+2. **Run As user** — on the app's **Policies** tab → OAuth Policies, set the **Run As** user to your
+   integration user; its permissions (step 4) determine what is collected. (Client credentials has no
+   `sub` claim and no per-user pre-authorisation — the Run-As user replaces both.)
+3. **Scope** — `Manage user data via APIs (api)`; `refresh_token` is **not** required for this flow.
+4. **Config** — `salesforce.auth_mode: client_credentials`, `salesforce.client_id` = Consumer Key, and
+   the Consumer Secret via `salesforce.client_secret_file` (or `client_secret`). `username` and the
+   private key are unused in this mode.
+
+> Trade-off: client credentials transmits a shared secret (symmetric); JWT bearer never sends a secret
+> over the wire (asymmetric key). Both yield an access token that works identically for the Pub/Sub,
+> REST/SOQL, and EventLogFile paths.
 
 ## Configuration
 
@@ -153,12 +181,31 @@ annotated schema.
 ```bash
 # run locally against a config file
 uv run python -m sf2loki --config config.example.yaml
+
+# validate config + wiring (secrets, label allowlist, source-overlap guard) without
+# any network calls — exits 0 (ok) or 1 (invalid)
+uv run python -m sf2loki --config config.example.yaml --check
 ```
+
+### Source recipes
+
+See [`docs/configuring-sources.md`](docs/configuring-sources.md) for recipes — polling arbitrary
+custom objects, ingesting login history / setup audit trail, and the either/or-per-category rule.
+
+### Metrics (OTLP)
+
+All metrics push via OTLP/HTTP. Set `service.telemetry.enabled: true` and `service.telemetry.endpoint`
+(a Grafana Cloud OTLP gateway, e.g. `https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics`, or a
+local Alloy `http://alloy:4318/v1/metrics`). Basic auth defaults to the Loki sink's
+`tenant_id`/`auth_token` (Grafana Cloud uses one stack credential for Loki and OTLP); use
+`service.telemetry.auth: none` for an unauthenticated in-cluster Alloy. Enable Salesforce org-limit
+metrics (API usage, storage, streaming events, …) with `salesforce.limits.enabled: true`. A ready-made
+Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/).
 
 ## Run with Docker / docker-compose
 
 The container is the primary run target (alongside ECS). The image is slim, runs as a non-root user,
-and exposes `:9090` (`/metrics`) and `:8080` (`/healthz`, `/readyz`).
+and exposes `:8080` (`/healthz`, `/readyz`). Metrics are pushed via OTLP, so there is no scrape port.
 
 ```bash
 # build
@@ -185,9 +232,9 @@ definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || e
 ## Kubernetes deployment
 
 Manifests live in [`deploy/k8s/`](deploy/k8s/): `Deployment` (replicas 1 / `Recreate`), `Service`,
-`ServiceMonitor`, `PodDisruptionBudget`, RBAC + `ServiceAccount`, `ConfigMap` (config + state), and
-`Secret`. The default uses the **ConfigMap checkpoint store** (no PVC; survives reschedules); switch
-to `state.store: file` with a PVC if you prefer.
+`PodDisruptionBudget`, RBAC + `ServiceAccount`, `ConfigMap` (config + state), and `Secret`. The default
+uses the **ConfigMap checkpoint store** (no PVC; survives reschedules); switch to `state.store: file`
+with a PVC if you prefer. (Metrics push via OTLP, so there is no `ServiceMonitor`.)
 
 ```bash
 # edit deploy/k8s/secret.yaml + configmap.yaml first (private key, Loki token, URLs)

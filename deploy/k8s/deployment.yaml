@@ -39,7 +39,6 @@ spec:
             - secretRef:
                 name: sf2loki-env
           ports:
-            - {name: metrics, containerPort: 9090}
             - {name: health, containerPort: 8080}
           livenessProbe:
             httpGet: {path: /healthz, port: health}
@@ -78,5 +77,4 @@ spec:
   selector:
     app.kubernetes.io/name: sf2loki
   ports:
-    - {name: metrics, port: 9090, targetPort: metrics}
     - {name: health, port: 8080, targetPort: health}
