@@ -32,48 +32,107 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 
 ## Salesforce setup (OAuth 2.0 JWT bearer)
 
-The service authenticates server-to-server with the JWT bearer flow — no interactive login, no
-refresh token (it re-mints a JWT on expiry / 401).
+The service authenticates server-to-server with the **OAuth 2.0 JWT bearer flow** — a private key
+signs a short-lived JWT assertion, Salesforce returns an access token. No interactive login, no
+browser, no refresh token (the service re-mints a JWT on expiry / 401).
 
-1. **Generate an RSA keypair and self-signed cert** (the cert goes on the External Client App; the
-   private key is mounted into the pod):
-   ```bash
-   openssl genrsa -out server.key 2048
-   openssl req -new -x509 -key server.key -out server.crt -days 3650 \
-     -subj "/CN=sf2loki"
-   ```
-2. **Create an External Client App** (Setup → External Client App Manager → New — the path Salesforce
-   recommends, and now requires for new apps in place of Connected Apps):
-   - Enable OAuth. Callback URL is a required field but is never invoked by JWT bearer (no redirect) —
-     a placeholder like `https://login.salesforce.com/services/oauth2/callback` is fine.
-   - **OAuth scope: `api` only** — it covers REST/SOQL, the EventLogFile `/LogFile` download, and the
-     Pub/Sub API (no scope of its own; it just needs a valid access token). `refresh_token`/
-     `offline_access` is **not** required (JWT bearer issues no refresh token). Add `openid` **only if**
-     you leave `salesforce.org_id` unset (it permits the `/userinfo` org-id lookup) — otherwise set
-     `org_id` in config and keep `api` alone. Leave all other scopes off.
-   - **Flow Enablement: tick *Enable JWT Bearer Flow* only.** Leaving the other flows
-     (Client-Credentials, Auth-Code, Device, Token-Exchange) off means the app can only be used our one
-     way — pure attack-surface reduction.
-   - **Security:** the three default toggles (require secret for web-server / refresh-token flows,
-     require PKCE) govern flows we don't use — harmless, leave them ticked. The refresh-token controls
-     are moot (no refresh token). Leave *Issue JWT-based access tokens for named users* off (it changes
-     the access-token format and is unrelated to JWT bearer auth).
-   - **OAuth Settings → JWT Bearer Flow → upload `server.crt`** (the ECA equivalent of "use digital
-     signatures").
-   - Save; copy the **Consumer Key** (App Settings) → this is `salesforce.client_id`.
-3. **Pre-authorise the integration user** (Policies tab — admin-owned): *Permitted Users: Admin
-   approved users are pre-authorized* (mandatory for JWT bearer), then assign the app to a Permission
-   Set the integration user holds. Add a login-IP restriction here if your egress IPs are stable.
-4. **Permission sets / licences** for the integration user:
-   - **Shield Event Monitoring** add-on (for most RTEM streaming channels) and **Threat Detection**
-     (for anomaly channels such as `ApiAnomalyEvent`).
-   - **View Real-Time Event Monitoring Data** (to subscribe to RTEM streams / query stored event
-     objects — Phase 1 & Phase 2).
-   - **View Event Log Files** (for the Phase 3 EventLogFile path). EventLogFile retention is 1 day
-     without Shield, 30 days (up to 365) with the Event Monitoring add-on.
-   - **API Enabled** generally, for the Pub/Sub and REST APIs.
-5. Set `salesforce.login_url` to `https://login.salesforce.com`, `https://test.salesforce.com`
-   (sandbox), or your My Domain URL.
+### 1. Generate the keypair and certificate
+
+JWT bearer uses an asymmetric keypair. You upload the **public certificate** to Salesforce (it uses it
+to verify your signed assertions); the **private key** is mounted into the pod (it signs them). The
+private key never leaves your secret store; the certificate is not secret.
+
+```bash
+# 2048-bit RSA private key  -> stays in your secret store, mounted at salesforce.private_key_file
+openssl genrsa -out server.key 2048
+
+# self-signed X.509 public cert (valid 10y) -> uploaded to Salesforce, never deployed
+openssl req -new -x509 -key server.key -out server.crt -days 3650 -subj "/CN=sf2loki"
+```
+
+| File | Secret? | Where it goes |
+|------|---------|---------------|
+| `server.key` | **yes** | k8s `Secret` → mounted into the pod → `salesforce.private_key_file` (or `salesforce.private_key`). Never upload it. |
+| `server.crt` | no | uploaded to the External Client App (OAuth Settings → JWT Bearer Flow). Not deployed with the service. |
+
+The cert is self-signed on purpose — Salesforce only needs the public key to verify signatures; there's
+no chain/CA validation in this flow. Rotate by generating a new keypair and uploading the new cert.
+
+### 2. Create the External Client App
+
+Setup → **External Client App Manager** → **New External Client App**. (External Client Apps are the
+path Salesforce recommends and, from Spring '26, requires for new apps in place of Connected Apps.)
+Field by field:
+
+**Basic Information**
+- **External Client App Name** — e.g. `sf2loki`. **API Name** auto-fills; leave it.
+- **Contact Email** — your address.
+- **Distribution State** — **Local** (this org only; "Packaged" is only for distributing the app).
+- **Contact Phone / Info URL / Logo Image URL / Icon URL / Description** — optional, leave blank.
+
+**API (Enable OAuth Settings)**
+- **Enable OAuth** — **✅ tick** (turns on everything below).
+
+**App Settings**
+- **Callback URL** — required field, but JWT bearer performs no redirect, so it's stored and never
+  invoked. Use a placeholder: `https://login.salesforce.com/services/oauth2/callback`.
+- **OAuth Scopes** — move **only** `Manage user data via APIs (api)` into *Selected*. That one scope
+  covers REST/SOQL, the EventLogFile `/LogFile` download, and the Pub/Sub API (which has no scope of
+  its own — it just needs a valid access token). Leave **everything else** in *Available*:
+  `Access the identity URL service (id…)`, `web`, `Full access (full)`, `chatter_api`, `visualforce`,
+  and all Data Cloud / platform scopes (`cdp_segment_api`, `cdp_identityresolution_api`,
+  `cdp_calculated_insight_api`, `sfap_api`, `interaction_api`, `cdp_api`).
+  - `refresh_token`/`offline_access` is **not** required — JWT bearer issues no refresh token.
+  - `openid` is needed **only if** you leave `salesforce.org_id` unset (it authorises the `/userinfo`
+    org-id lookup). **Recommended: set `org_id` in config and keep `api` alone.**
+- **Introspect all Tokens** — ❌ leave unticked (authorises introspecting *every* token in the org; the
+  app can already introspect its own).
+- **Configure ID token** — ❌ leave unticked (only relevant when `openid` is requested and an ID token
+  is consumed; the connector does neither).
+
+**Flow Enablement** — tick exactly one:
+- **Enable JWT Bearer Flow** — **✅ tick**.
+- **Enable Client Credentials Flow** — ❌. **Enable Authorization Code and Credentials Flow** — ❌.
+  **Enable Device Flow** — ❌. **Enable Token Exchange Flow** — ❌.
+  (Each disabled flow is one fewer way to mint a token from this app — least privilege.)
+
+**Security**
+- **Require secret for Web Server Flow** — leave **ticked** (default; guards an unused flow, harmless).
+- **Require secret for Refresh Token Flow** — leave **ticked** (default; unused flow, harmless).
+- **Require PKCE for Supported Authorization Flows** — leave **ticked** (default; applies to auth-code
+  flows we don't use).
+- **Enable Refresh Token Rotation** — ❌ (no refresh tokens in JWT bearer).
+- **Issue JSON Web Token (JWT)-based access tokens for named users** — ❌. *Not* JWT bearer auth despite
+  the name — it changes the issued access-token *format* to stateless JWTs. Opaque tokens are preferable
+  here (server-side revocable; the service re-mints on 401 anyway).
+- **Limit Idle Refresh Token TTL to 30 Days** — ❌ (no refresh tokens). **Enforce Refresh Token IP
+  Allowlist** — ❌ (no refresh tokens).
+
+Then: **OAuth Settings → JWT Bearer Flow → upload `server.crt`**, **Save**, and copy the **Consumer
+Key** (App Settings) → this is `salesforce.client_id`.
+
+### 3. Pre-authorise the integration user (mandatory)
+
+JWT bearer has no interactive consent, so the user named in the `sub` claim must be pre-authorised.
+On the app's **Policies** tab (admin-owned) → OAuth Policies → **Permitted Users = "Admin approved
+users are pre-authorized"**, then assign the app to a **Permission Set** that the integration user
+holds. Optional hardening: add a **login-IP restriction** here if your pod egress IPs are stable.
+
+### 4. Licences / permissions for the integration user
+
+- **Shield Event Monitoring** add-on (most RTEM streaming channels) and **Threat Detection** (anomaly
+  channels such as `ApiAnomalyEvent`).
+- **View Real-Time Event Monitoring Data** — subscribe to RTEM streams / query stored event objects
+  (Phase 1 & 2).
+- **View Event Log Files** — the EventLogFile path (Phase 3). ELF retention is 1 day without Shield,
+  30 days (up to 365) with the Event Monitoring add-on.
+- **API Enabled** — for the Pub/Sub and REST APIs.
+
+### 5. Point the service at your org
+
+Set `salesforce.login_url` to `https://login.salesforce.com`, `https://test.salesforce.com` (sandbox),
+or your My Domain URL; `salesforce.username` to the integration user; `salesforce.client_id` to the
+Consumer Key; and the private key via `salesforce.private_key_file`.
 
 > Topic availability depends on your Shield/Threat-Detection entitlements. Topic inclusion/exclusion
 > is operator config (`sources.pubsub.topics` + `include`/`exclude` globs); defaults stay
