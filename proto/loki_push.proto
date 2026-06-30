@@ -1,0 +1,31 @@
+// Minimal, wire-compatible subset of Grafana Loki's logproto push API.
+// Field numbers match github.com/grafana/loki/pkg/push exactly so the
+// serialized bytes are accepted by Loki's /loki/api/v1/push (protobuf).
+// The gogoproto annotations in the upstream file are codegen hints only and
+// do not affect the wire format, so they are intentionally omitted here.
+syntax = "proto3";
+
+package logproto;
+
+import "google/protobuf/timestamp.proto";
+
+message PushRequest {
+  repeated StreamAdapter streams = 1;
+}
+
+message StreamAdapter {
+  string labels = 1;
+  repeated EntryAdapter entries = 2;
+  uint64 hash = 3;
+}
+
+message EntryAdapter {
+  google.protobuf.Timestamp timestamp = 1;
+  string line = 2;
+  repeated LabelPairAdapter structuredMetadata = 3;
+}
+
+message LabelPairAdapter {
+  string name = 1;
+  string value = 2;
+}
