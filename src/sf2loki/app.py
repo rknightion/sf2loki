@@ -345,7 +345,17 @@ class App:
             stored_objects = [o.name for o in cfg.sources.eventlog_objects.objects]
 
         if cfg.sources.eventlogfile.enabled:
-            sources.append(EventLogFileSource(cfg.sources.eventlogfile))
+            from sf2loki.salesforce.eventlogfile_client import EventLogFileClient
+
+            elf_client = EventLogFileClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
+            sources.append(
+                EventLogFileSource(
+                    cfg.sources.eventlogfile,
+                    elf_client,
+                    sm_fields=sm_fields,
+                    metrics=metrics,
+                )
+            )
             elf_event_types = list(cfg.sources.eventlogfile.event_types)
 
         # Fail fast if one event category is fed by more than one source (which

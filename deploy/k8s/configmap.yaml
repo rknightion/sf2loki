@@ -15,12 +15,22 @@ data:
       private_key_file: /etc/sf2loki/secrets/server.key
       api_version: "60.0"
     sources:
+      # Either/or per category: ingest each category from ONE source only.
+      # A fail-fast guard rejects overlaps; allow_overlap bypasses it.
+      allow_overlap: false
       pubsub:
         enabled: true
         topics:
           - /event/LoginEventStream
           - /event/ApiAnomalyEvent
         include: ["/event/*"]
+      # EventLogFile (CSV) ingestion — alternative channel for ELF-only categories.
+      # eventlogfile:
+      #   enabled: true
+      #   interval: Hourly        # Hourly | Daily (pick one)
+      #   event_types: [Report, ApexExecution, URI]
+      #   poll_interval: 1h
+      #   lookback: 24h
     sink:
       type: loki
       loki:

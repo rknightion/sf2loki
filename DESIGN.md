@@ -13,7 +13,9 @@ Kubernetes; the container is optimised first.
 
 **Goals**
 - Stream Salesforce RTEM events via the Pub/Sub API (gRPC + Avro) into Loki, resumably.
-- Poll stored event objects via SOQL as a backfill/catch-up path that complements streaming.
+- Poll stored event objects via SOQL and ingest EventLogFile (CSV) as **alternative**
+  per-category channels — each event category is ingested from exactly ONE source
+  (either/or), never streamed-and-polled, so events are not double-counted.
 - Push to Loki with a small, fixed, low-cardinality label set; everything high-cardinality goes
   in the JSON log line and/or **structured metadata** — never labels.
 - Be a well-behaved, self-observable, containerised service: `/metrics`, `/healthz`, `/readyz`,
@@ -186,8 +188,10 @@ class AccessToken: value: str; instance_url: str; expires_at: datetime
   committed independently. Queue-full → topic tasks pause → fewer credits topped up → Salesforce
   backpressure.
 - **Resume**: `replay_id` per topic persisted on checkpoint commit. Restart →
-  `replay_preset=CUSTOM` from the stored id; if none, fall back to `LATEST` (configurable). Gaps
-  beyond Pub/Sub retention (≈24–72 h) are covered by the Phase 2 SOQL backfill.
+  `replay_preset=CUSTOM` from the stored id; if none, fall back to `LATEST` (configurable). A restart
+  gap longer than Pub/Sub retention (≈24–72 h) loses the in-between events for that topic (counted via
+  the replay-commit-age metric); the streaming channel is not back-filled from SOQL/ELF, since those
+  are alternative per-category channels, not catch-up paths (§7, §10).
 
 ---
 
@@ -198,8 +202,13 @@ class AccessToken: value: str; instance_url: str; expires_at: datetime
 Per configured object: poll `SELECT <fields> FROM <obj> WHERE <ts_field> > :watermark
 ORDER BY <ts_field>` on a cadence; emit `LogEntry`s; advance the watermark to the max timestamp
 **only after the window is fully pushed** (crash → re-query from the last committed watermark =
-gap recovery). Complements Phase 1 as the catch-up/backfill path when the streaming replay window is
-exceeded.
+gap recovery).
+
+**This is an alternative to streaming, not a catch-up for it.** A stored event object (e.g.
+`LoginEvent`) is the *persisted form of the same records* streamed on `/event/LoginEventStream`,
+so ingesting both double-counts. Pick one channel per category (operator config); the overlap
+guard (§10) enforces it. Use polling for categories you'd rather poll than stream, or that have
+no streaming channel.
 
 **Caveat (flagged):** Threat-Detection `*EventStore` objects are **BigObjects** with restrictive
 SOQL — you may filter only on indexed fields (in index order) and ORDER BY is limited. Handled
@@ -208,12 +217,32 @@ not a generic query builder.
 
 ---
 
-## 8. Phase 3 — EventLogFile (stubbed, designed-in)
+## 8. Phase 3 — EventLogFile (CSV ingestion)
 
-`sources/eventlogfile_source.py` ships as a skeleton implementing `Source` but raising
-`NotImplementedError`, with the path documented: query `EventLogFile` rows (daily/hourly) → download
-the base64 `LogFile` CSV → parse per-`EventType` column schemas → emit `LogEntry`s. Because it is
-just another `Source`, landing it needs **no** changes to the pipeline, sink, state, or config loader.
+`salesforce/eventlogfile_client.py`, `sources/eventlogfile_source.py`. Shares auth (SoqlClient for
+listing), sink, state, labels, shaping.
+
+Per configured `EventType`: list new `EventLogFile` records via SOQL
+(`WHERE EventType=… AND Interval=… AND CreatedDate >= :since ORDER BY CreatedDate, Id`), download each
+`LogFile` blob (`GET …/sobjects/EventLogFile/{id}/LogFile`, CSV), parse it **schema-agnostically**
+(columns vary per type and API version — read the CSV header / `LogFileFieldNames`, never hardcode the
+~70 type schemas), and emit one `LogEntry` per row. Per-row timestamp = `TIMESTAMP_DERIVED`.
+
+- **One interval only.** Hourly and Daily files are redundant copies of the same events; ingesting
+  both double-counts. `interval` config selects one (default `Hourly`, ~3–6h fresh; `Daily` is ≥1 day
+  and gets wholesale-replaced through the day). This is the "from now" path; backfill is not a goal
+  (and Loki rejects entries older than ~1 week — §10).
+- **Checkpoint = file-level + Loki native dedup.** State key `eventlogfile:<EventType>`, value
+  `{"last_created", "ids"}` — the `CreatedDate` high-water plus a rolling set of recently-processed
+  `EventLogFile.Id`s (late hourly files are additive, so the id-set prevents re-ingest while
+  `CreatedDate >=` still catches them). The advanced checkpoint is carried only by a file's **last**
+  row, so a mid-file batch flush never commits past a partially-sent file (crash → re-process the
+  whole file; Loki collapses byte-identical rows). No connector-side row hashing.
+- **Rate limits:** ELF rides the standard daily API pool (no separate Event-Monitoring allocation);
+  hourly polling is a negligible fraction of even a Developer-edition budget.
+
+Like the other sources it plugs into the same pipeline/sink/state with no core changes; it is subject
+to the same either/or overlap guard (§10) as Phase 2.
 
 ---
 
@@ -270,9 +299,17 @@ delivers the same filterability *without* the cardinality — exactly its design
 enforces a **startup allowlist guard**: any label key not in the permitted set fails fast (mirrors
 `genai-otel-bridge`'s governance guard).
 
+**Overlap guard (`sources/overlap.py`).** A second startup guard enforces the either/or model: it
+normalises every enabled source's identifiers (Pub/Sub topics, stored object names, ELF event types)
+to a canonical *category* and fails fast if one category is fed by more than one source — because
+`/event/LoginEventStream`, `LoginEvent`, and the `Login` EventLogFile are the same underlying events.
+Bypass with `sources.allow_overlap: true` (then Loki's byte-identical-entry rejection is the only,
+best-effort, dedup).
+
 > **Backfill caveat (flagged)**: Loki rejects entries older than `reject_old_samples_max_age`
-> (default 1 week). Phase 2/3 backfill of older events needs that limit raised, or ingest-time
-> stamping for the over-age tail (counted, not silent).
+> (default 1 week). The Phase 3 ELF source is "from now" by design; backfill of older events (or
+> recovery after >1 week of downtime) needs that limit raised, or ingest-time stamping for the
+> over-age tail (counted, not silent).
 
 ---
 
@@ -421,6 +458,9 @@ Network is always mocked. TDD throughout.
 | Phase | Scope                                   | Status        |
 |-------|-----------------------------------------|---------------|
 | 0     | Design (this document)                  | done          |
-| 1     | Pub/Sub streaming → Loki + foundation   | implementing  |
-| 2     | SOQL polling of stored objects → Loki   | seam in place |
-| 3     | EventLogFile ingestion                  | stubbed       |
+| 1     | Pub/Sub streaming → Loki + foundation   | done          |
+| 2     | SOQL polling of stored objects → Loki   | done          |
+| 3     | EventLogFile ingestion                  | done          |
+
+Phases 2 and 3 are **alternative per-category channels**, not catch-up paths for Phase 1; the
+overlap guard (§10) enforces one source per event category.

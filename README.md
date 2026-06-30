@@ -12,7 +12,9 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 ## Highlights
 
 - **Pluggable sources** behind one async-iterator seam: Pub/Sub streaming (Phase 1), SOQL polling of
-  stored objects (Phase 2), EventLogFile (Phase 3, stubbed).
+  stored objects (Phase 2), EventLogFile CSV ingestion (Phase 3). These are **alternative per-category
+  channels** — ingest each event category (Login, API, Report, …) from exactly one source; a fail-fast
+  overlap guard refuses to start if a category is enabled on more than one (bypass: `allow_overlap`).
 - **Loki sink**: protobuf + snappy by default (canonical push wire format), JSON + gzip as a debug
   encoding. Both carry structured metadata.
 - **Cardinality discipline**: a fixed label allowlist (`job`, `source`, `event_type`, `sf_org_id`,
@@ -47,8 +49,10 @@ refresh token (it re-mints a JWT on expiry / 401).
 4. **Permission sets / licences** for the integration user:
    - **Shield Event Monitoring** add-on (for most RTEM streaming channels) and **Threat Detection**
      (for anomaly channels such as `ApiAnomalyEvent`).
-   - **View Real-Time Event Monitoring Data** (to subscribe to RTEM streams / query `*EventStore`).
-   - **View Event Log Files** + **API Enabled** (for the Phase 2/3 EventLogFile path).
+   - **View Real-Time Event Monitoring Data** (to subscribe to RTEM streams / query stored event
+     objects — Phase 1 & Phase 2).
+   - **View Event Log Files** (for the Phase 3 EventLogFile path). EventLogFile retention is 1 day
+     without Shield, 30 days (up to 365) with the Event Monitoring add-on.
    - **API Enabled** generally, for the Pub/Sub and REST APIs.
 5. Set `salesforce.login_url` to `https://login.salesforce.com`, `https://test.salesforce.com`
    (sandbox), or your My Domain URL.

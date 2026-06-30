@@ -15,6 +15,13 @@ salesforce:
   org_id: null                                   # auto-resolved via /services/oauth2/userinfo when null
 
 sources:
+  # Either/or per event category: ingest each category (Login, API, Report, ...)
+  # from exactly ONE source. Streaming /event/LoginEventStream AND polling
+  # LoginEvent AND pulling the "Login" EventLogFile are the SAME data — enabling
+  # more than one for a category double-counts. A fail-fast guard refuses to
+  # start on an overlap; set allow_overlap: true to ingest anyway (Loki then
+  # drops byte-identical duplicates, best-effort).
+  allow_overlap: false
   pubsub:
     enabled: true
     endpoint: api.pubsub.salesforce.com:7443
@@ -26,12 +33,24 @@ sources:
     include: ["/event/*"]                          # operator inclusion/exclusion globs
     exclude: []
   eventlog_objects:
+    # Poll stored event objects via SOQL. Use for categories you'd rather poll
+    # than stream (or that have no stream). Do NOT also stream the same category.
     enabled: false
     objects:
       # durations accept shorthand (5m, 1h30m), ISO-8601 (PT5M), or plain seconds
       - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
   eventlogfile:
-    enabled: false                                # Phase 3 stub
+    # EventLogFile (CSV) ingestion. ~70 event types; schema is read per-file.
+    enabled: false
+    interval: Hourly                              # Hourly (3-6h fresh) | Daily (>=1d) — pick ONE
+    event_types:                                  # ELF EventType values to ingest (required when enabled)
+      - Login
+      - API
+      - Report
+    poll_interval: 1h                             # how often to list new files
+    lookback: 24h                                 # initial window on first run (no checkpoint = "from now")
+    timestamp_column: TIMESTAMP_DERIVED           # per-row event time column
+    page_size: 1000                              # SOQL LIMIT for the file-listing query
 
 sink:
   type: loki
