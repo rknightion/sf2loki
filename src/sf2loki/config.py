@@ -7,12 +7,14 @@ missing/unreadable secret file is fatal at load time (no silent blanks).
 
 from __future__ import annotations
 
+import os
+import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, ValidationError
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, ValidationError
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -22,6 +24,70 @@ from pydantic_settings import (
 
 class ConfigError(Exception):
     """Raised for any invalid or unreadable configuration."""
+
+
+# ---------------------------------------------------------------------------
+# Duration shorthand: "5m", "1h30m", "25s", "500ms" (DESIGN.md §11), in
+# addition to pydantic's own timedelta/ISO-8601/numeric-seconds parsing.
+
+_DURATION_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h|d|w)")
+_DURATION_UNIT_SECONDS: dict[str, float] = {
+    "ms": 0.001,
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 604800,
+}
+
+
+def _parse_duration(value: object) -> object:
+    """Accept Go-style shorthand strings; pass everything else through unchanged.
+
+    Non-strings (timedelta, int, float) and strings that don't look like
+    shorthand (ISO-8601 "PT5M", plain numeric "30") fall through to pydantic's
+    own timedelta parsing.
+    """
+    if not isinstance(value, str):
+        return value
+    tokens = list(_DURATION_TOKEN_RE.finditer(value))
+    if not tokens or sum(len(t.group(0)) for t in tokens) != len(value):
+        return value
+    total_seconds = sum(float(t.group(1)) * _DURATION_UNIT_SECONDS[t.group(2)] for t in tokens)
+    return timedelta(seconds=total_seconds)
+
+
+Duration = Annotated[timedelta, BeforeValidator(_parse_duration)]
+
+
+# ---------------------------------------------------------------------------
+# ${VAR} interpolation in YAML-sourced values (DESIGN.md §11): a referenced
+# environment variable that is unset is fatal at load time (fail fast, no
+# silent blanks — same policy as *_file secrets below).
+
+_ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _interpolate_env(value: Any) -> Any:
+    if isinstance(value, str):
+        if not _ENV_VAR_RE.search(value):
+            return value
+
+        def _sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            try:
+                return os.environ[name]
+            except KeyError:
+                raise ConfigError(
+                    f"config references undefined environment variable ${{{name}}}"
+                ) from None
+
+        return _ENV_VAR_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _interpolate_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_env(v) for v in value]
+    return value
 
 
 class SalesforceConfig(BaseModel):
@@ -47,8 +113,8 @@ class PubSubConfig(BaseModel):
 class EventLogObjectConfig(BaseModel):
     name: str
     timestamp_field: str = "EventDate"
-    poll_interval: timedelta = timedelta(minutes=5)
-    lookback: timedelta = timedelta(hours=1)
+    poll_interval: Duration = timedelta(minutes=5)
+    lookback: Duration = timedelta(hours=1)
 
 
 class EventLogObjectsConfig(BaseModel):
@@ -69,7 +135,7 @@ class SourcesConfig(BaseModel):
 class LokiBatchConfig(BaseModel):
     max_entries: int = 1000
     max_bytes: int = 1_048_576
-    flush_interval: timedelta = timedelta(seconds=1)
+    flush_interval: Duration = timedelta(seconds=1)
 
 
 class LokiConfig(BaseModel):
@@ -105,7 +171,7 @@ class ServiceConfig(BaseModel):
     log_format: Literal["json", "logfmt"] = "json"
     metrics_addr: str = ":9090"
     health_addr: str = ":8080"
-    shutdown_grace: timedelta = timedelta(seconds=25)
+    shutdown_grace: Duration = timedelta(seconds=25)
 
 
 class Config(BaseSettings):
@@ -175,7 +241,7 @@ def load(path: Path | None = None) -> Config:
         loaded = yaml.safe_load(raw) or {}
         if not isinstance(loaded, dict):
             raise ConfigError(f"config file {path} must be a YAML mapping")
-        data = loaded
+        data = _interpolate_env(loaded)
     try:
         cfg = Config(**data)
     except ValidationError as exc:

@@ -1,12 +1,14 @@
 # sf2loki example configuration.
 #
 # Precedence (highest first): env (SF2LOKI_* with __ nesting) > this file > defaults.
-# Secrets are injected from *_file paths (k8s Secret mounts); a missing/unreadable
-# secret file is fatal at startup (no silent blanks).
+# ${VAR} placeholders below are interpolated from the environment at load time
+# (missing var = fatal). Secrets are injected from *_file paths (k8s Secret
+# mounts); a missing/unreadable secret file is fatal at startup too (no silent
+# blanks, in either case).
 
 salesforce:
   login_url: https://login.salesforce.com      # or https://test.salesforce.com / your My Domain
-  client_id: REPLACE_ME                          # Connected App consumer key; override via SF2LOKI_SALESFORCE__CLIENT_ID
+  client_id: ${SF_CLIENT_ID}                    # Connected App consumer key
   username: svc@example.com                      # integration user (pre-authorised on the Connected App)
   private_key_file: /etc/sf2loki/secrets/server.key
   api_version: "60.0"
@@ -26,8 +28,8 @@ sources:
   eventlog_objects:
     enabled: false
     objects:
-      # durations are ISO-8601 (PT5M = 5 min) or plain seconds — not "5m"
-      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: PT5M, lookback: PT1H}
+      # durations accept shorthand (5m, 1h30m), ISO-8601 (PT5M), or plain seconds
+      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
   eventlogfile:
     enabled: false                                # Phase 3 stub
 
@@ -45,7 +47,7 @@ sink:
     batch:
       max_entries: 1000
       max_bytes: 1048576
-      flush_interval: PT1S                       # ISO-8601 duration (or seconds as a number)
+      flush_interval: 1s
     labels:
       environment: prod                           # job + sf_org_id are added automatically
     structured_metadata_fields:
@@ -69,4 +71,4 @@ service:
   log_format: json
   metrics_addr: ":9090"
   health_addr: ":8080"
-  shutdown_grace: PT25S                           # ISO-8601 duration (or seconds as a number)
+  shutdown_grace: 25s

@@ -9,7 +9,8 @@ data:
   config.yaml: |
     salesforce:
       login_url: https://login.salesforce.com
-      # client_id is supplied via env (SF2LOKI_SALESFORCE__CLIENT_ID) from the sf2loki-env Secret.
+      # ${SF_CLIENT_ID} is interpolated from the pod env (sf2loki-env Secret) at load time.
+      client_id: ${SF_CLIENT_ID}
       username: svc@example.com
       private_key_file: /etc/sf2loki/secrets/server.key
       api_version: "60.0"
@@ -39,7 +40,7 @@ data:
       log_format: json
       metrics_addr: ":9090"
       health_addr: ":8080"
-      shutdown_grace: PT25S
+      shutdown_grace: 25s
 ---
 # Pre-created (empty) ConfigMap holding resume state; the service RMWs it.
 # Must exist before the pod starts (the store does not create it).
