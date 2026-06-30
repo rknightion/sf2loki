@@ -117,6 +117,44 @@ async def test_no_stored_watermark_yields_log_entries(tmp_path: pytest.TempPathF
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_entry_timestamp_uses_configured_timestamp_field(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """The LogEntry timestamp comes from the configured timestamp_field, not ingest time.
+
+    Regression: a record whose time column is neither EventDate nor CreatedDate
+    (e.g. LoginHistory.LoginTime) must still get its event time as the entry
+    timestamp, not now().
+    """
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    login_time = "2026-06-30T10:00:00Z"
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={"records": [{"LoginTime": login_time, "UserId": "005xx"}], "done": True},
+        )
+    )
+
+    cfg = make_elo_cfg(name="LoginHistory")
+    cfg.objects[0].timestamp_field = "LoginTime"
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        stop = asyncio.Event()
+        entries = [e async for e in source.events(store, stop)]
+
+    assert len(entries) == 1
+    assert entries[0].timestamp == datetime(2026, 6, 30, 10, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_sm_fields_promoted_to_structured_metadata(tmp_path: pytest.TempPathFactory) -> None:
     """UserId in sm_fields appears in structured_metadata, not in labels."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]

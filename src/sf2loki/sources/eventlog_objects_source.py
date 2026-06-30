@@ -107,7 +107,12 @@ class EventLogObjectsSource:
                     if stop.is_set():
                         return
 
-                    ts = extract_timestamp(record)
+                    # Prefer the configured timestamp field (e.g. LoginTime) so the
+                    # entry time is the event time, not ingest time; fall back to the
+                    # generic EventDate/CreatedDate names for objects without it.
+                    ts = extract_timestamp(
+                        record, field_names=(obj.timestamp_field, "EventDate", "CreatedDate")
+                    )
                     line, sm = route_fields(record, self._sm_fields)
 
                     # labels: source and event_type only — job/sf_org_id/environment
