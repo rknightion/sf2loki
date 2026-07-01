@@ -17,6 +17,21 @@ from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.soql_client import SoqlClient, to_soql_datetime_literal
 
 
+def _as_int(value: object) -> int:
+    """Coerce a Salesforce numeric field to int, tolerating floats / float-strings.
+
+    Salesforce serialises ``Sequence``/``LogFileLength`` as JSON numbers that decode
+    to floats (e.g. ``12899.0``), so a naive ``int(str(v))`` raises on the ``.0``.
+    Missing/unparseable values map to 0.
+    """
+    if value is None:
+        return 0
+    try:
+        return int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 class EventLogFileError(Exception):
     """Raised when the EventLogFile LogFile download endpoint returns a non-2xx response."""
 
@@ -80,8 +95,6 @@ class EventLogFileClient:
         )
         files: list[EventLogFileMeta] = []
         async for record in self._soql.query(soql):
-            sequence_raw = record.get("Sequence")
-            length_raw = record.get("LogFileLength")
             files.append(
                 EventLogFileMeta(
                     id=str(record["Id"]),
@@ -89,8 +102,11 @@ class EventLogFileClient:
                     interval=str(record.get("Interval", interval)),
                     log_date=str(record.get("LogDate", "")),
                     created_date=str(record.get("CreatedDate", "")),
-                    sequence=int(str(sequence_raw)) if sequence_raw is not None else 0,
-                    length=int(str(length_raw)) if length_raw is not None else 0,
+                    # Salesforce returns Sequence/LogFileLength as JSON numbers that
+                    # decode to floats (e.g. 12899.0); go via float() so int() doesn't
+                    # choke on the ".0" (int("12899.0") raises).
+                    sequence=_as_int(record.get("Sequence")),
+                    length=_as_int(record.get("LogFileLength")),
                 )
             )
         return files

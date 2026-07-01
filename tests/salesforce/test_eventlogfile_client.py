@@ -159,6 +159,43 @@ async def test_list_files_builds_correct_soql_and_maps_records() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_list_files_handles_float_formatted_length_and_sequence() -> None:
+    """Real Salesforce returns LogFileLength (and sometimes Sequence) as JSON numbers
+    that decode to floats (e.g. 12899.0); mapping must not choke on ``int('12899.0')``."""
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {
+                        "Id": "0ATxx0000000009",
+                        "EventType": "Login",
+                        "Interval": "Daily",
+                        "LogDate": "2026-07-01T00:00:00.000+0000",
+                        "CreatedDate": "2026-07-01T00:47:20.000+0000",
+                        "LogFileLength": 12899.0,
+                        "Sequence": 0.0,
+                    },
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        files = await elf_client.list_files(
+            event_type="Login", interval="Daily", since="2026-07-01T00:00:00Z", page_size=1000
+        )
+
+    assert len(files) == 1
+    assert files[0].length == 12899
+    assert files[0].sequence == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_list_files_normalizes_raw_salesforce_since() -> None:
     """A checkpointed CreatedDate (+0000 offset) is reformatted into a legal SOQL literal."""
     captured_q: list[str] = []
