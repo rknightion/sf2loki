@@ -33,6 +33,11 @@ gen-config:
     uv run python -m sf2loki config example > config.example.yaml
     uv run python -m sf2loki config reference > docs/config-reference.md
 
+# regenerate the committed Grafana dashboard + alert-rule pack
+gen-grafana:
+    uv run python deploy/grafana/gen_dashboard.py
+    uv run python deploy/grafana/gen_alerts.py
+
 # run the service locally (needs a config file)
 run config="config.yaml":
     uv run python -m sf2loki --config {{config}}

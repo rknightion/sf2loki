@@ -62,7 +62,7 @@
   "id": null,
   "uid": "sf2loki-overview",
   "title": "sf2loki \u2014 Salesforce \u2192 Loki",
-  "description": "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion volume/lag, Salesforce org API limits, the Loki sink (incl. last successful push age), and the connector's own self-observability (auth, internal queue, Pub/Sub stream health, SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark staleness, build info).",
+  "description": "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion volume/lag (p50/p95), Salesforce org API limits, the Loki sink (incl. last successful push age), the connector's own self-observability (auth, internal queue, Pub/Sub stream health, SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark staleness), egress controls (daily byte budget, sampling, filtering) and HA leadership, and build info.",
   "tags": [
     "sf2loki",
     "salesforce",
@@ -281,8 +281,8 @@
     },
     {
       "id": 4,
-      "title": "Ingest lag (SLI) by event type",
-      "description": "Difference between ingest time and the event's Salesforce EventDate, per event_type \u2014 the primary SLI for pipeline freshness. Sustained growth means the connector is falling behind the Salesforce event stream.",
+      "title": "Ingest lag (SLI) p50/p95 by event type",
+      "description": "Difference between ingest time and the event's Salesforce EventDate, per event_type \u2014 the primary SLI for pipeline freshness, as p50/p95 quantiles over sf2loki_ingest_lag_seconds (a histogram, buckets 1s-24h so it can carry the wide real-time-vs-EventLogFile range). Sustained growth means the connector is falling behind the Salesforce event stream.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -300,10 +300,21 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "max by (event_type) (sf2loki_ingest_lag_seconds{job=~\"$job\"})",
+          "expr": "histogram_quantile(0.50, sum by (le, event_type) (rate(sf2loki_ingest_lag_seconds_bucket{job=~\"$job\"}[5m])))",
           "refId": "A",
           "format": "time_series",
-          "legendFormat": "{{event_type}}",
+          "legendFormat": "p50 \u00b7 {{event_type}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, event_type) (rate(sf2loki_ingest_lag_seconds_bucket{job=~\"$job\"}[5m])))",
+          "refId": "B",
+          "format": "time_series",
+          "legendFormat": "p95 \u00b7 {{event_type}}",
           "range": true
         }
       ],
@@ -318,11 +329,11 @@
                 "color": "green"
               },
               {
-                "value": 60,
+                "value": 3600,
                 "color": "yellow"
               },
               {
-                "value": 300,
+                "value": 21600,
                 "color": "red"
               }
             ]
@@ -338,7 +349,25 @@
             "spanNulls": false
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "p95.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1789,6 +1818,363 @@
     },
     {
       "id": 27,
+      "title": "Egress controls & leadership",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 88,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 28,
+      "title": "Egress budget used bytes",
+      "description": "Pre-compression bytes counted against the daily egress byte budget for the current UTC day. Climbs through the day and resets to ~0 at UTC midnight. There is no separate 'budget configured' metric to compare against \u2014 check the panel to the right (Egress paused) and config for the configured limit.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 89,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sf2loki_egress_budget_used_bytes{job=~\"$job\"}",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "used",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "title": "Egress paused",
+      "description": "1 while pushes are paused because the daily egress byte budget has been exhausted, else 0. While paused, no new data ships to Loki until the budget resets at the next UTC day.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 89,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sf2loki_egress_paused{job=~\"$job\"}",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "paused",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "flowing",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "paused",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 30,
+      "title": "Leader",
+      "description": "1 while this instance holds leadership (or runs standalone), else 0. In an HA deployment exactly one instance should show 'leader' at a time \u2014 0 instances or 2+ both indicate a leadership problem.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 89,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sf2loki_leader{job=~\"$job\"}",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "leader",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "standby",
+                  "color": "blue",
+                  "index": 0
+                },
+                "1": {
+                  "text": "leader",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              },
+              {
+                "value": 1,
+                "color": "green"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 31,
+      "title": "Entries sampled out rate by source/event type",
+      "description": "Rows/events dropped by deterministic per-type sampling, per source and event_type. Expected to be non-zero whenever a sample_rate < 1.0 is configured for that type \u2014 this is intentional volume reduction, not data loss.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 97,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source, event_type) (rate(sf2loki_entries_sampled_out_total{job=~\"$job\"}[5m]))",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{source}}/{{event_type}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "title": "Rows filtered rate by rule",
+      "description": "Rows dropped by configured transform drop_row rules, per source and rule name. Expected to track however aggressively drop_row rules are configured \u2014 a sudden change in rate for a given rule is worth checking against recent config or data-shape changes.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 97,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source, rule) (rate(sf2loki_rows_filtered_total{job=~\"$job\"}[5m]))",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{source}}/{{rule}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
       "title": "Build info",
       "description": "Connector build/version metadata per running instance (sf2loki_build_info, value always 1). Use to confirm which version is deployed and that all instances agree.",
       "type": "table",
@@ -1798,7 +2184,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 88,
+        "y": 105,
         "w": 24,
         "h": 5
       },

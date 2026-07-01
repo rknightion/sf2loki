@@ -6,8 +6,8 @@ EventLogFile batch rows) into Grafana Loki, and pushes its own metrics via
 OTLP for connector self-observability. This dashboard covers Salesforce
 Event Monitoring (ingestion volume, org API limits) PLUS the connector's
 own health (auth, queue, Pub/Sub, decode errors, replay/watermark
-staleness) — visualising the agent shipping the data itself, not just the
-data it ships.
+staleness, egress guardrails, HA leadership) — visualising the agent
+shipping the data itself, not just the data it ships.
 
 Schema: classic Grafana dashboard JSON (schemaVersion 39), NOT the newer
 v2 manifest/grafana-foundation-sdk schema used by some other repos in this
@@ -243,18 +243,38 @@ y += 8
 
 panels.append(
     panel(
-        "Ingest lag (SLI) by event type",
+        "Ingest lag (SLI) p50/p95 by event type",
         "timeseries",
-        [target(f"max by (event_type) (sf2loki_ingest_lag_seconds{JOB})", legend="{{event_type}}")],
+        [
+            target(
+                f"histogram_quantile(0.50, sum by (le, event_type) "
+                f"(rate(sf2loki_ingest_lag_seconds_bucket{JOB}[5m])))",
+                ref="A",
+                legend="p50 · {{event_type}}",
+            ),
+            target(
+                f"histogram_quantile(0.95, sum by (le, event_type) "
+                f"(rate(sf2loki_ingest_lag_seconds_bucket{JOB}[5m])))",
+                ref="B",
+                legend="p95 · {{event_type}}",
+            ),
+        ],
         x=0,
         y=y,
         w=12,
         h=8,
         unit="s",
         desc="Difference between ingest time and the event's Salesforce EventDate, per event_type — the "
-        "primary SLI for pipeline freshness. Sustained growth means the connector is falling behind "
-        "the Salesforce event stream.",
-        thresholds=thr([(None, "green"), (60, "yellow"), (300, "red")]),
+        "primary SLI for pipeline freshness, as p50/p95 quantiles over sf2loki_ingest_lag_seconds "
+        "(a histogram, buckets 1s-24h so it can carry the wide real-time-vs-EventLogFile range). "
+        "Sustained growth means the connector is falling behind the Salesforce event stream.",
+        thresholds=thr([(None, "green"), (3600, "yellow"), (21600, "red")]),
+        overrides=[
+            {
+                "matcher": {"id": "byRegexp", "options": "p95.*"},
+                "properties": [{"id": "custom.lineStyle", "value": {"dash": [6, 4]}}],
+            },
+        ],
     )
 )
 panels.append(
@@ -704,6 +724,123 @@ panels.append(
 )
 y += 8
 
+
+# =============================================================================
+# ROW 5 — Egress controls & leadership
+# =============================================================================
+panels.append(row("Egress controls & leadership", y))
+y += 1
+
+panels.append(
+    panel(
+        "Egress budget used bytes",
+        "timeseries",
+        [target(f"sf2loki_egress_budget_used_bytes{JOB}", legend="used")],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="bytes",
+        desc="Pre-compression bytes counted against the daily egress byte budget for the current "
+        "UTC day. Climbs through the day and resets to ~0 at UTC midnight. There is no separate "
+        "'budget configured' metric to compare against — check the panel to the right (Egress "
+        "paused) and config for the configured limit.",
+    )
+)
+panels.append(
+    panel(
+        "Egress paused",
+        "stat",
+        [target(f"sf2loki_egress_paused{JOB}", legend="paused", instant=True)],
+        x=12,
+        y=y,
+        w=6,
+        h=8,
+        unit="short",
+        desc="1 while pushes are paused because the daily egress byte budget has been exhausted, "
+        "else 0. While paused, no new data ships to Loki until the budget resets at the next "
+        "UTC day.",
+        thresholds=thr([(None, "green"), (1, "red")]),
+        mappings=[
+            {
+                "type": "value",
+                "options": {
+                    "0": {"text": "flowing", "color": "green", "index": 0},
+                    "1": {"text": "paused", "color": "red", "index": 1},
+                },
+            }
+        ],
+    )
+)
+panels.append(
+    panel(
+        "Leader",
+        "stat",
+        [target(f"sf2loki_leader{JOB}", legend="leader", instant=True)],
+        x=18,
+        y=y,
+        w=6,
+        h=8,
+        unit="short",
+        desc="1 while this instance holds leadership (or runs standalone), else 0. In an HA "
+        "deployment exactly one instance should show 'leader' at a time — 0 instances or 2+ "
+        "both indicate a leadership problem.",
+        thresholds=thr([(None, "blue"), (1, "green")]),
+        mappings=[
+            {
+                "type": "value",
+                "options": {
+                    "0": {"text": "standby", "color": "blue", "index": 0},
+                    "1": {"text": "leader", "color": "green", "index": 1},
+                },
+            }
+        ],
+    )
+)
+y += 8
+
+panels.append(
+    panel(
+        "Entries sampled out rate by source/event type",
+        "timeseries",
+        [
+            target(
+                f"sum by (source, event_type) (rate(sf2loki_entries_sampled_out_total{JOB}[5m]))",
+                legend="{{source}}/{{event_type}}",
+            )
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Rows/events dropped by deterministic per-type sampling, per source and event_type. "
+        "Expected to be non-zero whenever a sample_rate < 1.0 is configured for that type — "
+        "this is intentional volume reduction, not data loss.",
+    )
+)
+panels.append(
+    panel(
+        "Rows filtered rate by rule",
+        "timeseries",
+        [
+            target(
+                f"sum by (source, rule) (rate(sf2loki_rows_filtered_total{JOB}[5m]))",
+                legend="{{source}}/{{rule}}",
+            )
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Rows dropped by configured transform drop_row rules, per source and rule name. "
+        "Expected to track however aggressively drop_row rules are configured — a sudden change "
+        "in rate for a given rule is worth checking against recent config or data-shape changes.",
+    )
+)
+y += 8
+
 panels.append(
     panel(
         "Build info",
@@ -784,10 +921,11 @@ dashboard = {
     "title": "sf2loki — Salesforce → Loki",
     "description": (
         "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion "
-        "volume/lag, Salesforce org API limits, the Loki sink (incl. last successful push age), "
-        "and the connector's own self-observability (auth, internal queue, Pub/Sub stream health, "
-        "SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark staleness, "
-        "build info)."
+        "volume/lag (p50/p95), Salesforce org API limits, the Loki sink (incl. last successful "
+        "push age), the connector's own self-observability (auth, internal queue, Pub/Sub stream "
+        "health, SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark "
+        "staleness), egress controls (daily byte budget, sampling, filtering) and HA leadership, "
+        "and build info."
     ),
     "tags": ["sf2loki", "salesforce", "loki"],
     "timezone": "browser",
