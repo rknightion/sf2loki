@@ -25,12 +25,15 @@ salesforce:
     poll_interval: 5m
 
 sources:
-  # Either/or per event category: ingest each category (Login, API, Report, ...)
-  # from exactly ONE source. Streaming /event/LoginEventStream AND polling
-  # LoginEvent AND pulling the "Login" EventLogFile are the SAME data — enabling
-  # more than one for a category double-counts. A fail-fast guard refuses to
-  # start on an overlap; set allow_overlap: true to ingest anyway (Loki then
-  # drops byte-identical duplicates, best-effort).
+  # Either/or per event category: by default ingest each category (Login, API,
+  # Report, ...) from exactly ONE source. Streaming /event/LoginEventStream AND
+  # polling LoginEvent AND pulling the "Login" EventLogFile are the SAME activity
+  # via different channels. A fail-fast guard refuses to start on an EXPLICIT
+  # overlap, and the ELF "*" wildcard auto-excludes categories a stream/object
+  # source already owns. Set allow_overlap: true to ingest a category via MULTIPLE
+  # sources on purpose — e.g. the real-time-but-lean stream AND the slower-but-
+  # richer EventLogFile rows for the same category (they are NOT byte-identical,
+  # so both flow — build dashboards on whichever fits).
   allow_overlap: false
   pubsub:
     enabled: true
@@ -38,6 +41,9 @@ sources:
     default_num_requested: 100                   # flow-control batch size
     replay_preset: CUSTOM                         # falls back to LATEST when no stored replay_id
     topics:
+      # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the
+      # org exposes (the *EventStream channels), re-filtered by include/exclude.
+      #   topics: ["*"]
       - /event/LoginEventStream
       - /event/ApiAnomalyEvent
     include: ["/event/*"]                          # operator inclusion/exclusion globs

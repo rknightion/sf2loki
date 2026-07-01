@@ -13,7 +13,7 @@ import base64
 import fnmatch
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from sf2loki.config import PubSubConfig
 from sf2loki.model import CheckpointToken, LogEntry
@@ -26,6 +26,16 @@ if TYPE_CHECKING:
     from sf2loki.state.base import CheckpointStore
 
 log = get_logger(__name__)
+
+# Topic wildcard: discover and subscribe to every RTEM streaming channel the org
+# exposes (still subject to the include/exclude globs).
+TOPIC_WILDCARD = "*"
+
+
+class _StreamDiscovererLike(Protocol):
+    """Structural seam for RTEM stream discovery (satisfied by MetadataClient)."""
+
+    async def list_event_stream_topics(self) -> list[str]: ...
 
 
 class PubSubSource:
@@ -63,6 +73,7 @@ class PubSubSource:
         reconnect_backoff: float = 1.0,
         max_backoff: float = 30.0,
         metrics: Metrics | None = None,
+        topic_discoverer: _StreamDiscovererLike | None = None,
     ) -> None:
         self._cfg = cfg
         self._client = client
@@ -71,32 +82,55 @@ class PubSubSource:
         self._reconnect_backoff = reconnect_backoff
         self._max_backoff = max_backoff
         self._metrics = metrics if metrics is not None else Metrics()
+        self._topic_discoverer = topic_discoverer
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def resolve_topics(self) -> list[str]:
-        """Return the de-duped, filtered list of topics to subscribe to.
+    def _filter(self, topics: Sequence[str]) -> list[str]:
+        """De-dupe *topics* and apply include/exclude globs, preserving order.
 
-        Applies include/exclude glob filters (fnmatch.fnmatchcase).  A topic
-        is kept only if it matches at least one include glob AND matches no
-        exclude glob.  Order is preserved.
+        A topic is kept only if it matches at least one include glob AND matches
+        no exclude glob. The ``"*"`` discovery marker is never a literal topic.
         """
         seen: set[str] = set()
         result: list[str] = []
-        for topic in self._cfg.topics:
-            if topic in seen:
+        for topic in topics:
+            if topic == TOPIC_WILDCARD or topic in seen:
                 continue
             seen.add(topic)
-            # Must match at least one include pattern
             if not any(fnmatch.fnmatchcase(topic, pat) for pat in self._cfg.include):
                 continue
-            # Must not match any exclude pattern
             if any(fnmatch.fnmatchcase(topic, pat) for pat in self._cfg.exclude):
                 continue
             result.append(topic)
         return result
+
+    def resolve_topics(self) -> list[str]:
+        """The explicitly-configured topics (filtered). Excludes the ``"*"`` marker.
+
+        Used at startup for the overlap guard; discovered topics (from ``"*"``)
+        are resolved later in :meth:`events`, so they aren't reflected here.
+        """
+        return self._filter(self._cfg.topics)
+
+    async def _resolve_topics(self) -> list[str]:
+        """Topics to subscribe to this run, expanding the ``"*"`` wildcard.
+
+        When ``"*"`` is present and a discoverer is wired, discover every RTEM
+        stream and merge it with any explicit topics. A discovery failure is
+        non-fatal — fall back to the explicit topics.
+        """
+        topics = list(self._cfg.topics)
+        if TOPIC_WILDCARD in topics and self._topic_discoverer is not None:
+            try:
+                discovered = await self._topic_discoverer.list_event_stream_topics()
+                topics += [t for t in discovered if t not in topics]
+            except Exception as exc:
+                # Discovery must never crash the source — fall back to explicit topics.
+                log.warning("pubsub: stream discovery failed; using explicit topics only: %s", exc)
+        return self._filter(topics)
 
     async def events(self, state: CheckpointStore, stop: asyncio.Event) -> AsyncIterator[LogEntry]:
         """Yield decoded log entries from all resolved topics.
@@ -109,7 +143,7 @@ class PubSubSource:
         Each task puts exactly one ``None`` sentinel on the queue when it
         finishes (normal or error), enabling deterministic termination.
         """
-        topics = self.resolve_topics()
+        topics = await self._resolve_topics()
         if not topics:
             return
 

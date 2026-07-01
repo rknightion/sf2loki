@@ -13,13 +13,16 @@ salesforce:
   # Set SF_ORG_ID and add `org_id: ${SF_ORG_ID}` here to keep the app on `api` alone.
 
 sources:
-  # Login streams in real time via Pub/Sub; the whole rest of the mix comes from
-  # the Hourly EventLogFile CSVs. Categories are kept disjoint (no "Login" in the
-  # ELF list) so the either/or overlap guard is satisfied.
+  # This dev org ingests BOTH ways for maximum dashboard material: every RTEM
+  # stream in real time via Pub/Sub AND every EventType via the (richer, slower)
+  # Hourly EventLogFile. allow_overlap: true is what lets the same category flow
+  # through both — the real-time-lean stream and the detailed ELF rows.
+  allow_overlap: true
   pubsub:
     enabled: true
-    topics: ["/event/LoginEventStream"]
-    include: ["/event/*"]
+    topics: ["*"]                                   # "*" = discover & subscribe to every RTEM stream
+    include: ["/event/*"]                           # (still filtered by these include/exclude globs)
+    exclude: []
   eventlog_objects:
     # Left off: the stored RTEM *Event objects (ApiEvent, ReportEvent, ...) are
     # Salesforce big objects — they reject ORDER BY ASC / FIELDS(ALL), which is
@@ -34,16 +37,15 @@ sources:
                                                     # hourly is enabled). Hourly lands ~20-30 min after the
                                                     # hour closes — far fresher than Daily's ~24h+.
     # "*" = discover and ingest EVERY EventType the org produces for this interval,
-    # re-checked each poll so newly-enabled types appear with no restart. The explicit
-    # ReportExport entry supplies per-type overrides (kept even if not yet discovered).
+    # re-checked each poll so newly-enabled types appear with no restart. With
+    # allow_overlap: true above, categories that also stream via Pub/Sub are NOT
+    # auto-excluded here — we deliberately ingest both. The explicit ReportExport
+    # entry supplies per-type overrides (kept even if not yet discovered).
     event_types:
       - "*"
       - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
-    exclude:
-      - Login                                        # served in real time by Pub/Sub above — exclude from
-                                                     # the wildcard to avoid double-ingesting the login category
-      # ApexCallout / NamedCredential dominate volume (multi-MB hourly files);
-      # add them here if dev-stack ingest cost becomes a concern.
+    # exclude: [ApexCallout, NamedCredential]        # these dominate volume (multi-MB hourly
+                                                     # files) — uncomment if ingest cost bites.
     poll_interval: 10m                              # hourly files appear ~hourly; 10m keeps pickup latency low
     lookback: 24h                                   # first run (no checkpoint): the org retains ~1.5 days of
                                                     # hourly files; 24h backfills the recent ones

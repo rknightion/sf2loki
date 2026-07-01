@@ -591,3 +591,61 @@ async def test_stream_error_is_logged() -> None:
     errors = [e for e in captured if e["event"] == "pubsub stream error"]
     assert errors, "subscribe failure was not logged"
     assert "boom-subscribe" in errors[0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Topic discovery / "*" wildcard
+
+
+class FakeStreamDiscoverer:
+    def __init__(self, topics: list[str], *, error: bool = False) -> None:
+        self.topics = topics
+        self.error = error
+        self.calls = 0
+
+    async def list_event_stream_topics(self) -> list[str]:
+        self.calls += 1
+        if self.error:
+            raise RuntimeError("discovery down")
+        return list(self.topics)
+
+
+def _resolver_src(topics, *, include=None, exclude=None, discoverer=None) -> PubSubSource:
+    cfg = PubSubConfig(topics=topics, include=include or ["/event/*"], exclude=exclude or [])
+    return PubSubSource(cfg, object(), sm_fields=[], topic_discoverer=discoverer)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_wildcard_discovers_and_merges_topics() -> None:
+    disc = FakeStreamDiscoverer(["/event/ApiEventStream", "/event/LoginEventStream"])
+    src = _resolver_src(["*", "/event/LoginEventStream"], discoverer=disc)
+    topics = await src._resolve_topics()
+    assert disc.calls == 1
+    assert sorted(topics) == ["/event/ApiEventStream", "/event/LoginEventStream"]
+
+
+@pytest.mark.asyncio
+async def test_wildcard_respects_exclude_globs() -> None:
+    disc = FakeStreamDiscoverer(["/event/ApiEventStream", "/event/LoginEventStream"])
+    src = _resolver_src(["*"], exclude=["*ApiEventStream"], discoverer=disc)
+    assert await src._resolve_topics() == ["/event/LoginEventStream"]
+
+
+@pytest.mark.asyncio
+async def test_no_wildcard_skips_discovery() -> None:
+    disc = FakeStreamDiscoverer(["/event/ApiEventStream"])
+    src = _resolver_src(["/event/LoginEventStream"], discoverer=disc)
+    assert await src._resolve_topics() == ["/event/LoginEventStream"]
+    assert disc.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_falls_back_to_explicit() -> None:
+    disc = FakeStreamDiscoverer([], error=True)
+    src = _resolver_src(["*", "/event/LoginEventStream"], discoverer=disc)
+    assert await src._resolve_topics() == ["/event/LoginEventStream"]
+
+
+def test_resolve_topics_sync_excludes_wildcard_marker() -> None:
+    src = _resolver_src(["*", "/event/LoginEventStream"])
+    assert src.resolve_topics() == ["/event/LoginEventStream"]

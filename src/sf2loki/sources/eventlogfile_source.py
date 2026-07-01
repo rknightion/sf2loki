@@ -44,6 +44,7 @@ from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.eventlogfile_client import EventLogFileError, EventLogFileMeta
 from sf2loki.shaping import extract_timestamp, promote_labels, route_fields
+from sf2loki.sources.overlap import category_of_elf
 from sf2loki.state.base import CheckpointStore
 
 _MAX_CARRIED_IDS = 200
@@ -94,12 +95,19 @@ class EventLogFileSource:
         sm_fields: Sequence[str],
         metrics: Metrics | None = None,
         poll_once: bool = False,
+        exclude_categories: frozenset[str] = frozenset(),
     ) -> None:
         self._cfg = cfg
         self._client = client
         self._sm_fields = sm_fields
         self._metrics = metrics if metrics is not None else Metrics()
         self._poll_once = poll_once
+        # Categories already owned by a higher-priority source (a Pub/Sub stream or
+        # a stored-event poll). Discovered wildcard types in these categories are
+        # skipped so the same events aren't ingested twice — unless the operator set
+        # sources.allow_overlap, in which case app wiring passes an empty set here
+        # (keep both the real-time-lean stream and the richer ELF rows).
+        self._exclude_categories = exclude_categories
 
     async def events(
         self,
@@ -156,6 +164,10 @@ class EventLogFileSource:
         names = {t.name for t in explicit}
         for name in discovered:
             if name in names or name in exclude:
+                continue
+            # Skip a discovered type whose category another source already owns
+            # (unless allow_overlap emptied this set — then ingest it too).
+            if category_of_elf(name) in self._exclude_categories:
                 continue
             names.add(name)
             resolved.append(EventLogFileTypeConfig(name=name))

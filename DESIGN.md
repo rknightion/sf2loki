@@ -378,8 +378,18 @@ streams by that column.
 normalises every enabled source's identifiers (Pub/Sub topics, stored object names, ELF event types)
 to a canonical *category* and fails fast if one category is fed by more than one source — because
 `/event/LoginEventStream`, `LoginEvent`, and the `Login` EventLogFile are the same underlying events.
-Bypass with `sources.allow_overlap: true` (then Loki's byte-identical-entry rejection is the only,
-best-effort, dedup).
+Two layers cooperate: the guard catches *explicit* collisions at startup, and the ELF `"*"` wildcard
+*auto-excludes* categories a higher-priority source (a stream/object) already owns (app wiring passes
+those categories to the ELF source). Bypass both with `sources.allow_overlap: true` — then the guard
+is a no-op and the wildcard stops auto-excluding, so a category can flow via multiple sources on
+purpose (e.g. the real-time-lean stream *and* the richer EventLogFile rows; they are not
+byte-identical, so Loki won't collapse them — this is the intended "both" mode).
+
+**Pub/Sub topic discovery.** `pubsub.topics: ["*"]` discovers every RTEM streaming channel via
+describeGlobal (`MetadataClient`, the `*EventStream` sObjects → `/event/<Name>`), merges any explicit
+topics, and applies the include/exclude globs — so new streams are subscribed without a config change.
+Discovery failure is non-fatal (falls back to explicit topics); the startup overlap guard sees only
+explicit topics (discovered ones aren't known then), mirroring the ELF wildcard.
 
 > **Backfill caveat (flagged)**: Loki rejects entries older than `reject_old_samples_max_age`
 > (default 1 week). The Phase 3 ELF source is "from now" by design; backfill of older events (or

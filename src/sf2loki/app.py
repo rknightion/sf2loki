@@ -369,11 +369,16 @@ class App:
         elf_event_types: list[str] = []
 
         if cfg.sources.pubsub.enabled:
+            from sf2loki.salesforce.metadata_client import MetadataClient
             from sf2loki.salesforce.pubsub_client import PubSubClient
 
             pubsub_client = PubSubClient(cfg.sources.pubsub, tokens, metrics=metrics)
             pubsub_src = PubSubSource(
-                cfg.sources.pubsub, pubsub_client, sm_fields=sm_fields, metrics=metrics
+                cfg.sources.pubsub,
+                pubsub_client,
+                sm_fields=sm_fields,
+                metrics=metrics,
+                topic_discoverer=MetadataClient(cfg.salesforce, tokens, sf_http),
             )
             sources.append(pubsub_src)
             pubsub_topics = pubsub_src.resolve_topics()
@@ -390,6 +395,19 @@ class App:
 
         if cfg.sources.eventlogfile.enabled:
             from sf2loki.salesforce.eventlogfile_client import EventLogFileClient
+            from sf2loki.sources.overlap import category_of_pubsub, category_of_stored_object
+
+            # Categories a higher-priority source already owns. The ELF wildcard
+            # auto-excludes these discovered types so the same events aren't
+            # ingested twice — unless allow_overlap, where the operator wants both
+            # the real-time-lean stream and the richer ELF rows (pass empty set).
+            if cfg.sources.allow_overlap:
+                owned_categories: frozenset[str] = frozenset()
+            else:
+                owned_categories = frozenset(
+                    [category_of_pubsub(t) for t in pubsub_topics]
+                    + [category_of_stored_object(o) for o in stored_objects]
+                )
 
             elf_client = EventLogFileClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
             sources.append(
@@ -398,6 +416,7 @@ class App:
                     elf_client,
                     sm_fields=sm_fields,
                     metrics=metrics,
+                    exclude_categories=owned_categories,
                 )
             )
             # The wildcard expands at poll time, so its discovered types aren't
