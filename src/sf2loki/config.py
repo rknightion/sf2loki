@@ -18,6 +18,7 @@ import yaml
 from pydantic import (
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     SecretStr,
     ValidationError,
@@ -32,6 +33,17 @@ from pydantic_settings import (
 
 class ConfigError(Exception):
     """Raised for any invalid or unreadable configuration."""
+
+
+class StrictModel(BaseModel):
+    """Base for all config models: unknown keys are fatal, not ignored.
+
+    A typo'd key (e.g. ``event_type:`` for ``event_types:``) must fail loudly
+    at load time rather than silently disabling the feature it was meant to
+    configure (``--check`` would otherwise pass).
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +110,7 @@ def _interpolate_env(value: Any) -> Any:
     return value
 
 
-class SalesforceLimitsConfig(BaseModel):
+class SalesforceLimitsConfig(StrictModel):
     """Org-limits metric poller.
 
     Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
@@ -118,7 +130,7 @@ class SalesforceLimitsConfig(BaseModel):
     )
 
 
-class SalesforceConfig(BaseModel):
+class SalesforceConfig(StrictModel):
     """Salesforce org connection and authentication.
 
     Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
@@ -149,7 +161,9 @@ class SalesforceConfig(BaseModel):
         ),
     )
     client_id: str = Field(
-        description="External Client App consumer key.", examples=["${SF_CLIENT_ID}"]
+        min_length=1,
+        description="External Client App consumer key.",
+        examples=["${SF_CLIENT_ID}"],
     )
     client_secret: SecretStr | None = Field(
         default=None,
@@ -196,6 +210,15 @@ class SalesforceConfig(BaseModel):
             "auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope)."
         ),
     )
+    token_ttl: Duration = Field(
+        default=timedelta(hours=1),
+        description=(
+            "Assumed access-token lifetime (Salesforce returns no expires_in for "
+            "these flows; the real lifetime is the org's session timeout, which "
+            "can be as short as 15m). Refresh is also reactive on 401, so this "
+            "only tunes proactive re-mint cadence."
+        ),
+    )
     limits: SalesforceLimitsConfig = Field(
         default_factory=SalesforceLimitsConfig, description="Org-limits metric poller settings."
     )
@@ -214,17 +237,37 @@ class SalesforceConfig(BaseModel):
         # runs as the External Client App's "Run As" user and needs none.
         if self.auth_mode == "jwt_bearer" and not self.username:
             raise ValueError("salesforce.username is required when auth_mode is 'jwt_bearer'")
+        # Salesforce rejects the client_credentials grant at the generic
+        # login/test hosts — only the org's My Domain token endpoint works.
+        if self.auth_mode == "client_credentials" and self.login_url in (
+            "https://login.salesforce.com",
+            "https://test.salesforce.com",
+        ):
+            raise ValueError(
+                "auth_mode 'client_credentials' requires the org's My Domain token "
+                f"endpoint; Salesforce rejects this grant at {self.login_url}. Set "
+                "salesforce.login_url to your My Domain URL, e.g. "
+                "https://yourorg.my.salesforce.com"
+            )
         return self
 
 
-class PubSubConfig(BaseModel):
+class PubSubConfig(StrictModel):
     """Salesforce Pub/Sub API (real-time event streaming) source."""
 
     enabled: bool = Field(default=True, description="Enable the Pub/Sub streaming source.")
     endpoint: str = Field(
         default="api.pubsub.salesforce.com:7443", description="Pub/Sub API gRPC endpoint."
     )
-    default_num_requested: int = Field(default=100, description="Flow-control batch size.")
+    default_num_requested: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description=(
+            "Flow-control batch size (1-100; Salesforce clamps at 100 and returns "
+            "INVALID_ARGUMENT when over-asked)."
+        ),
+    )
     replay_preset: Literal["LATEST", "EARLIEST", "CUSTOM"] = Field(
         default="CUSTOM",
         description="Replay position; falls back to LATEST when no stored replay_id.",
@@ -247,12 +290,25 @@ class PubSubConfig(BaseModel):
     )
 
 
-class EventLogObjectConfig(BaseModel):
+# SOQL identifier safety: object/field/EventType names are interpolated into
+# SOQL query strings, so restrict them to bare identifiers — a stray quote
+# would otherwise surface as a runtime MALFORMED_QUERY crash mid-poll.
+_SOQL_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_]+$"
+_SOQL_IDENTIFIER_RE = re.compile(_SOQL_IDENTIFIER_PATTERN)
+
+
+class EventLogObjectConfig(StrictModel):
     """A single Salesforce event object polled via SOQL."""
 
-    name: str = Field(description="The event object API name to poll (e.g. LoginEvent).")
+    name: str = Field(
+        min_length=1,
+        pattern=_SOQL_IDENTIFIER_PATTERN,
+        description="The event object API name to poll (e.g. LoginEvent).",
+    )
     timestamp_field: str = Field(
         default="EventDate",
+        min_length=1,
+        pattern=_SOQL_IDENTIFIER_PATTERN,
         description="The field used as the per-row event time for polling/checkpointing.",
     )
     poll_interval: Duration = Field(
@@ -264,7 +320,7 @@ class EventLogObjectConfig(BaseModel):
     )
 
 
-class EventLogObjectsConfig(BaseModel):
+class EventLogObjectsConfig(StrictModel):
     """Poll stored event objects via SOQL.
 
     Use for categories you'd rather poll than stream (or that have no stream).
@@ -291,7 +347,7 @@ _LABEL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 EVENT_TYPE_WILDCARD = "*"
 
 
-class EventLogFileTypeConfig(BaseModel):
+class EventLogFileTypeConfig(StrictModel):
     """Per-event-type ELF ingestion config.
 
     A bare string in ``eventlogfile.event_types`` coerces to ``{name: <string>}``
@@ -301,7 +357,13 @@ class EventLogFileTypeConfig(BaseModel):
     columns promoted to stream labels — keep these LOW cardinality.
     """
 
-    name: str = Field(description="The ELF EventType this override applies to (e.g. ReportExport).")
+    name: str = Field(
+        min_length=1,
+        description=(
+            'The ELF EventType this override applies to (e.g. ReportExport), or "*" '
+            "to discover all types."
+        ),
+    )
     structured_metadata_fields: list[str] | None = Field(
         default=None,
         description=(
@@ -321,6 +383,14 @@ class EventLogFileTypeConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_labels(self) -> EventLogFileTypeConfig:
+        # EventType names are interpolated into the SOQL file-listing query; a
+        # non-identifier (stray quote, semicolon, ...) would crash at poll time
+        # with MALFORMED_QUERY. "*" is the discovery wildcard, allowed as-is.
+        if self.name != EVENT_TYPE_WILDCARD and not _SOQL_IDENTIFIER_RE.match(self.name):
+            raise ValueError(
+                f"eventlogfile event type {self.name!r} is not a valid EventType name "
+                '(must match [A-Za-z0-9_]+ or be the discovery wildcard "*")'
+            )
         for label in self.labels:
             if label in _RESERVED_LABEL_KEYS:
                 raise ValueError(
@@ -348,7 +418,7 @@ def _coerce_event_types(value: object) -> object:
     return value
 
 
-class EventLogFileConfig(BaseModel):
+class EventLogFileConfig(StrictModel):
     """EventLogFile (CSV) ingestion.
 
     Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
@@ -450,7 +520,7 @@ class EventLogFileConfig(BaseModel):
         return self
 
 
-class SourcesConfig(BaseModel):
+class SourcesConfig(StrictModel):
     """Event source selection: Pub/Sub streaming, event-object polling, and EventLogFile.
 
     Either/or per event category: by default ingest each category (Login,
@@ -483,7 +553,7 @@ class SourcesConfig(BaseModel):
     )
 
 
-class LokiBatchConfig(BaseModel):
+class LokiBatchConfig(StrictModel):
     """Loki push batching."""
 
     max_entries: int = Field(
@@ -504,7 +574,7 @@ class LokiBatchConfig(BaseModel):
     )
 
 
-class LokiConfig(BaseModel):
+class LokiConfig(StrictModel):
     """Loki push-API sink.
 
     Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+ tenant_id + auth_token).
@@ -512,7 +582,7 @@ class LokiConfig(BaseModel):
     Local Alloy: http://alloy:3100/loki/api/v1/push (no auth).
     """
 
-    url: str = Field(description="Loki push API URL.", examples=["${GC_LOKI}"])
+    url: str = Field(min_length=1, description="Loki push API URL.", examples=["${GC_LOKI}"])
     tenant_id: str | None = Field(
         default=None,
         description=(
@@ -561,21 +631,21 @@ class LokiConfig(BaseModel):
     )
 
 
-class SinkConfig(BaseModel):
+class SinkConfig(StrictModel):
     type: Literal["loki"] = Field(
         default="loki", description="Sink backend (only loki is supported)."
     )
     loki: LokiConfig = Field(description="Loki sink settings.")
 
 
-class FileStateConfig(BaseModel):
+class FileStateConfig(StrictModel):
     path: Path = Field(
         default=Path("/var/lib/sf2loki/state.json"),
         description="Checkpoint file path; persist on a mounted volume for durable resume.",
     )
 
 
-class StateConfig(BaseModel):
+class StateConfig(StrictModel):
     store: Literal["file"] = Field(
         default="file", description="State backend (local JSON file is the only backend)."
     )
@@ -584,7 +654,7 @@ class StateConfig(BaseModel):
     )
 
 
-class TelemetryConfig(BaseModel):
+class TelemetryConfig(StrictModel):
     """OTLP metrics egress (self-observability + Salesforce product metrics).
 
     When ``enabled`` is false, metrics are still recorded in-process (cheap, used
@@ -642,8 +712,20 @@ class TelemetryConfig(BaseModel):
     )
 
 
-class ServiceConfig(BaseModel):
-    log_level: str = Field(default="info", description="Application log level.")
+def _lowercase_str(value: object) -> object:
+    return value.lower() if isinstance(value, str) else value
+
+
+LogLevel = Literal["debug", "info", "warning", "warn", "error", "critical"]
+
+
+class ServiceConfig(StrictModel):
+    log_level: Annotated[LogLevel, BeforeValidator(_lowercase_str)] = Field(
+        default="info",
+        description=(
+            "Application log level: debug | info | warning | error | critical (case-insensitive)."
+        ),
+    )
     log_format: Literal["json", "logfmt"] = Field(
         default="json", description="Application log output format."
     )
@@ -663,7 +745,7 @@ class Config(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SF2LOKI_",
         env_nested_delimiter="__",
-        extra="ignore",
+        extra="forbid",
     )
 
     salesforce: SalesforceConfig = Field(
@@ -702,6 +784,14 @@ def _resolve_secret_file(
         return None
     try:
         return SecretStr(file.read_text().strip())
+    except PermissionError as exc:
+        raise ConfigError(
+            f"cannot read {what} from {file}: permission denied. The service runs "
+            "as uid 10001 in the container, so host-side secret files must be "
+            "readable by it — e.g. `chmod 640` + `chown` the file to a group the "
+            "container user is in, or mount the secrets group-readable "
+            "(chmod 0600 root-owned files crash-loop the container)."
+        ) from exc
     except OSError as exc:
         raise ConfigError(f"cannot read {what} from {file}: {exc}") from exc
 
@@ -743,6 +833,19 @@ def resolve_secrets(cfg: Config) -> Config:
         cfg.service.telemetry.basic_auth_token,
         "telemetry basic auth token",
     )
+    # Telemetry auth="basic" with no resolvable credentials would silently
+    # export unauthenticated OTLP (the gateway 401s every batch) — fail fast.
+    telemetry = cfg.service.telemetry
+    if telemetry.enabled and telemetry.auth == "basic":
+        user = telemetry.basic_auth_user or (cfg.sink.loki.tenant_id or "")
+        token = telemetry.basic_auth_token or cfg.sink.loki.auth_token
+        if not (user and token):
+            raise ConfigError(
+                "service.telemetry.auth is 'basic' but no credentials resolve: set "
+                "basic_auth_user + basic_auth_token(_file), or set the Loki sink's "
+                "tenant_id + auth_token(_file) (the telemetry defaults), or use "
+                "service.telemetry.auth: none for an unauthenticated endpoint"
+            )
     return cfg
 
 
@@ -782,5 +885,25 @@ def load(path: Path | None = None) -> Config:
     try:
         cfg = Config(**data)
     except ValidationError as exc:
-        raise ConfigError(f"invalid configuration: {exc}") from exc
+        raise ConfigError(f"invalid configuration:\n{_format_validation_error(exc)}") from exc
     return resolve_secrets(cfg)
+
+
+def _format_validation_error(exc: ValidationError) -> str:
+    """Render a pydantic ValidationError as one readable line per problem.
+
+    Unknown keys (``extra_forbidden``) get a dedicated message — they are the
+    most common operator mistake (a typo'd key silently disabling a feature)
+    and pydantic's default wording doesn't say "unknown key".
+    """
+    lines: list[str] = []
+    for err in exc.errors():
+        path = ".".join(str(part) for part in err["loc"]) or "<root>"
+        if err["type"] == "extra_forbidden":
+            lines.append(
+                f"  {path}: unknown configuration key (check for typos; "
+                "see docs/config-reference.md for valid keys)"
+            )
+        else:
+            lines.append(f"  {path}: {err['msg']}")
+    return "\n".join(lines)

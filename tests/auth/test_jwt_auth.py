@@ -61,8 +61,10 @@ def sf_config_with_org_id(private_key_pem: str) -> SalesforceConfig:
 
 @pytest.fixture()
 def cc_config() -> SalesforceConfig:
+    # client_credentials requires the org's My Domain token endpoint (the
+    # generic login/test hosts reject the grant, enforced at config time).
     return SalesforceConfig(
-        login_url="https://login.salesforce.com",
+        login_url="https://myorg.my.salesforce.com",
         auth_mode="client_credentials",
         client_id="myclientid",
         client_secret=SecretStr("mysecret"),
@@ -70,6 +72,7 @@ def cc_config() -> SalesforceConfig:
 
 
 TOKEN_ENDPOINT = "https://login.salesforce.com/services/oauth2/token"
+CC_TOKEN_ENDPOINT = "https://myorg.my.salesforce.com/services/oauth2/token"
 INSTANCE_URL = "https://myorg.my.salesforce.com"
 ACCESS_TOKEN_VALUE = "dummy_access_token_12345"
 
@@ -139,7 +142,7 @@ async def test_client_credentials_posts_client_credentials_grant(
     cc_config: SalesforceConfig,
 ) -> None:
     """client_credentials mode POSTs a client_credentials grant (no JWT assertion)."""
-    route = respx.post(TOKEN_ENDPOINT).mock(
+    route = respx.post(CC_TOKEN_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_token_response())
     )
 
@@ -161,7 +164,7 @@ async def test_client_credentials_posts_client_credentials_grant(
 @respx.mock
 async def test_client_credentials_caches_and_refreshes(cc_config: SalesforceConfig) -> None:
     """client_credentials reuses the shared cache/invalidate path."""
-    route = respx.post(TOKEN_ENDPOINT).mock(
+    route = respx.post(CC_TOKEN_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_token_response())
     )
 
@@ -426,3 +429,92 @@ async def test_metrics_defaults_to_a_private_registry_when_omitted(
         token = await provider.token()
 
     assert token.value == ACCESS_TOKEN_VALUE
+
+
+# ---------------------------------------------------------------------------
+# Configurable token TTL (D7a): assumed expiry = salesforce.token_ttl
+
+
+@respx.mock
+async def test_token_ttl_from_config_drives_expiry(private_key_pem: str) -> None:
+    """expires_at honours salesforce.token_ttl (org session timeout can be 15m)."""
+    cfg = SalesforceConfig(
+        login_url="https://login.salesforce.com",
+        client_id="myclientid",
+        username="svc@example.com",
+        private_key=SecretStr(private_key_pem),
+        token_ttl=timedelta(minutes=15),
+    )
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+
+    before = datetime.now(UTC)
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(cfg, client)
+        token = await provider.token()
+    after = datetime.now(UTC)
+
+    assert before + timedelta(minutes=14) < token.expires_at <= after + timedelta(minutes=15)
+
+
+# ---------------------------------------------------------------------------
+# userinfo retry policy (D7b): transient 5xx retried, 4xx fail fast
+
+
+@respx.mock
+async def test_org_id_userinfo_retries_on_500_then_succeeds(
+    sf_config: SalesforceConfig,
+) -> None:
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+    userinfo_url = f"{INSTANCE_URL}/services/oauth2/userinfo"
+    userinfo_route = respx.get(userinfo_url).mock(
+        side_effect=[
+            httpx.Response(500, text="Server Error"),
+            httpx.Response(200, json={"organization_id": "00Dabc000000def"}),
+        ]
+    )
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client)
+        org_id = await provider.org_id()
+
+    assert org_id == "00Dabc000000def"
+    assert userinfo_route.call_count == 2
+
+
+@respx.mock
+async def test_org_id_userinfo_retries_on_transport_error(
+    sf_config: SalesforceConfig,
+) -> None:
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+    userinfo_url = f"{INSTANCE_URL}/services/oauth2/userinfo"
+    userinfo_route = respx.get(userinfo_url).mock(
+        side_effect=[
+            httpx.ConnectError("boom"),
+            httpx.Response(200, json={"organization_id": "00Dabc000000def"}),
+        ]
+    )
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client)
+        org_id = await provider.org_id()
+
+    assert org_id == "00Dabc000000def"
+    assert userinfo_route.call_count == 2
+
+
+@respx.mock
+async def test_org_id_userinfo_403_fails_fast_as_auth_error(
+    sf_config: SalesforceConfig,
+) -> None:
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=_token_response()))
+    userinfo_url = f"{INSTANCE_URL}/services/oauth2/userinfo"
+    userinfo_route = respx.get(userinfo_url).mock(
+        return_value=httpx.Response(403, json={"error": "forbidden"})
+    )
+
+    async with httpx.AsyncClient() as client:
+        provider = TokenProvider(sf_config, client)
+        with pytest.raises(AuthError):
+            await provider.org_id()
+
+    assert userinfo_route.call_count == 1  # 4xx: no retry

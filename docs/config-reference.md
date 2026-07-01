@@ -25,6 +25,7 @@
 | `private_key` | `SecretStr` | *(secret)* | no | jwt_bearer private key, inline (alternative to private_key_file). |
 | `api_version` | `str` | "60.0" | no | Salesforce REST/SOAP API version to target. |
 | `org_id` | `str` | null | no | Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope). |
+| `token_ttl` | `Duration` | 1h | no | Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence. |
 | `limits` | `SalesforceLimitsConfig` |  | no | Org-limits metric poller settings. |
 
 ## SalesforceLimitsConfig
@@ -49,7 +50,7 @@
 | --- | --- | --- | --- | --- |
 | `enabled` | `bool` | true | no | Enable the Pub/Sub streaming source. |
 | `endpoint` | `str` | api.pubsub.salesforce.com:7443 | no | Pub/Sub API gRPC endpoint. |
-| `default_num_requested` | `int` | 100 | no | Flow-control batch size. |
+| `default_num_requested` | `int` | 100 | no | Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked). |
 | `replay_preset` | `Literal['LATEST', 'EARLIEST', 'CUSTOM']` | CUSTOM | no | Replay position; falls back to LATEST when no stored replay_id. |
 | `topics` | `list[str]` | [/event/LoginEventStream, /event/ApiAnomalyEvent] | no | Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude. |
 | `include` | `list[str]` | ["*"] | no | Operator inclusion globs applied to discovered/explicit topics. |
@@ -90,7 +91,7 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `name` | `str` | "" | yes | The ELF EventType this override applies to (e.g. ReportExport). |
+| `name` | `str` | "" | yes | The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. |
 | `structured_metadata_fields` | `list[str]` | [REPORT_ID, OWNER_ID] | no | Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it. |
 | `labels` | `list[str]` | [DELEGATED_USER] | no | Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream. |
 
@@ -141,7 +142,7 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `log_level` | `str` | info | no | Application log level. |
+| `log_level` | `Literal['debug', 'info', 'warning', 'warn', 'error', 'critical']` | info | no | Application log level: debug \| info \| warning \| error \| critical (case-insensitive). |
 | `log_format` | `Literal['json', 'logfmt']` | json | no | Application log output format. |
 | `health_addr` | `str` | ":8080" | no | Address to bind the health-check HTTP server. |
 | `shutdown_grace` | `Duration` | 25s | no | Grace period allowed for in-flight work to finish on shutdown. |

@@ -22,6 +22,7 @@ salesforce:  # Salesforce org connection and authentication.
   # private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
   api_version: "60.0"  # Salesforce REST/SOAP API version to target.
   org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
+  token_ttl: 1h  # Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence.
   # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
   # limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...).
   # Cheap (one REST call per interval) and useful product telemetry.
@@ -41,7 +42,7 @@ sources:  # Event source selection and settings.
   pubsub:  # Pub/Sub API streaming source.
     enabled: true  # Enable the Pub/Sub streaming source.
     endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.
-    default_num_requested: 100  # Flow-control batch size.
+    default_num_requested: 100  # Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked).
     replay_preset: CUSTOM  # Replay position; falls back to LATEST when no stored replay_id.
     topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
     include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
@@ -85,7 +86,7 @@ sources:  # Event source selection and settings.
     # ``[]``) to override per type. ``labels`` lists columns promoted to stream
     # labels — keep these LOW cardinality.
     event_types:  # ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.
-      - name: ""  # The ELF EventType this override applies to (e.g. ReportExport). (required)
+      - name: ""  # The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. (required)
         structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
         labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
     exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
@@ -121,7 +122,7 @@ state:  # Checkpoint/state store settings.
   file:  # File-backed state store settings.
     path: /var/lib/sf2loki/state.json  # Checkpoint file path; persist on a mounted volume for durable resume.
 service:  # Application-level service settings.
-  log_level: info  # Application log level.
+  log_level: info  # Application log level: debug | info | warning | error | critical (case-insensitive).
   log_format: json  # Application log output format.
   health_addr: ":8080"  # Address to bind the health-check HTTP server.
   shutdown_grace: 25s  # Grace period allowed for in-flight work to finish on shutdown.

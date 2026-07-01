@@ -11,7 +11,7 @@ import uvloop
 
 from sf2loki import configdoc
 from sf2loki.app import App
-from sf2loki.config import load
+from sf2loki.config import ConfigError, load
 
 _CONFIGDOC_RENDERERS = {
     "example": configdoc.example_yaml,
@@ -62,7 +62,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("config check OK")
         return 0
 
-    cfg = load(args.config)
-    app = App.build(cfg)
+    try:
+        cfg = load(args.config)
+        app = App.build(cfg)
+    except ConfigError as exc:
+        # Operator-facing config problems get a clean message, not a traceback
+        # (same failure surface --check reports; exit 2 = bad configuration).
+        print(f"sf2loki: {exc}", file=sys.stderr)
+        return 2
     uvloop.run(app.run())
     return 0

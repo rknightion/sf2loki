@@ -22,12 +22,25 @@ def decide(path: str, *, ready: bool) -> tuple[int, str]:
     return 404, "not found"
 
 
-class Health:
-    """Minimal asyncio HTTP health server."""
+_REASON_PHRASES: dict[int, str] = {
+    200: "OK",
+    404: "Not Found",
+    503: "Service Unavailable",
+}
 
-    def __init__(self) -> None:
+
+class Health:
+    """Minimal asyncio HTTP health server.
+
+    ``read_timeout`` bounds how long a connected client may take to send its
+    request; a client that connects and never sends would otherwise hold a
+    coroutine + fd forever.
+    """
+
+    def __init__(self, *, read_timeout: float = 5.0) -> None:
         self._ready: bool = False
         self._server: asyncio.Server | None = None
+        self._read_timeout: float = read_timeout
         self.port: int = 0  # set after start(); reflects actual bound port
 
     @property
@@ -68,21 +81,27 @@ class Health:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            request_line = await reader.readline()
-            # Drain remaining headers until blank line
-            while True:
-                line = await reader.readline()
-                if line in (b"\r\n", b"\n", b""):
-                    break
+            try:
+                async with asyncio.timeout(self._read_timeout):
+                    request_line = await reader.readline()
+                    # Drain remaining headers until blank line
+                    while True:
+                        line = await reader.readline()
+                        if line in (b"\r\n", b"\n", b""):
+                            break
+            except TimeoutError:
+                # Slow/silent client: drop the connection, free the coroutine/fd.
+                return
 
             # Parse: b"GET /path HTTP/1.1\r\n"
             parts = request_line.split()
             path = parts[1].decode("utf-8", errors="replace") if len(parts) >= 2 else "/"
 
             status, body = decide(path, ready=self._ready)
+            reason = _REASON_PHRASES.get(status, "")
             body_bytes = body.encode()
             response = (
-                f"HTTP/1.1 {status} \r\n"
+                f"HTTP/1.1 {status} {reason}\r\n"
                 f"Content-Length: {len(body_bytes)}\r\n"
                 f"Connection: close\r\n"
                 f"\r\n"

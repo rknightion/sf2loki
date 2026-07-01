@@ -1,8 +1,12 @@
 """Structured logging configuration for sf2loki.
 
 Configures structlog with either JSON or logfmt rendering, a timestamp, and
-level-based filtering.  Call configure_logging() once at startup; subsequent
-calls re-configure in place (idempotent-safe for tests).
+level-based filtering, AND wires the stdlib ``logging`` root logger through
+the same renderer (several modules — the Loki sink, the EventLogFile source —
+log via stdlib ``logging``; without a handler their warnings would fall out
+unformatted via ``lastResort`` and DEBUG lines would vanish).  Call
+configure_logging() once at startup; subsequent calls re-configure in place
+(idempotent-safe for tests).
 """
 
 from __future__ import annotations
@@ -56,6 +60,27 @@ def configure_logging(
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,
     )
+
+    # Route stdlib logging through the SAME renderer/level so every logger in
+    # the process (structlog or stdlib) emits one consistent format. Replacing
+    # the handler list wholesale keeps repeat calls idempotent.
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                renderer,
+            ],
+            foreign_pre_chain=[
+                structlog.stdlib.add_log_level,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.format_exc_info,
+            ],
+        )
+    )
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level_int)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

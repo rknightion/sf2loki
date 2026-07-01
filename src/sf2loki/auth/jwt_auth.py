@@ -19,11 +19,6 @@ from sf2loki.obs.metrics import Metrics
 # JWT assertion lifetime — Salesforce rejects exp > 3 minutes in the future.
 _JWT_LIFETIME: timedelta = timedelta(seconds=180)
 
-# Conservative access-token TTL — the JWT flow returns no expires_in, so we
-# choose a safe 1-hour window.  Refresh is primarily reactive (invalidate() on
-# a downstream 401) plus proactive when within _REFRESH_SKEW of expiry.
-TOKEN_TTL: timedelta = timedelta(hours=1)
-
 # Proactive refresh skew: re-mint when less than this time remains on the token.
 _REFRESH_SKEW: timedelta = timedelta(seconds=60)
 
@@ -42,10 +37,10 @@ def _should_retry(exc: BaseException) -> bool:
 
 
 class _TokenEndpointError(Exception):
-    """Internal: wraps an HTTP error response from the token endpoint."""
+    """Internal: wraps an HTTP error response from a Salesforce OAuth endpoint."""
 
-    def __init__(self, status_code: int, body: str) -> None:
-        super().__init__(f"token endpoint HTTP {status_code}: {body}")
+    def __init__(self, status_code: int, body: str, what: str = "token endpoint") -> None:
+        super().__init__(f"{what} HTTP {status_code}: {body}")
         self.status_code = status_code
 
 
@@ -120,13 +115,34 @@ class TokenProvider:
 
         tok = await self.token()
         userinfo_url = f"{tok.instance_url}/services/oauth2/userinfo"
-        response = await self._client.get(
-            userinfo_url,
-            headers={"Authorization": f"Bearer {tok.value}"},
-        )
-        response.raise_for_status()
-        self._org_id_cached = response.json()["organization_id"]
-        return self._org_id_cached
+
+        async def _fetch() -> str:
+            response = await self._client.get(
+                userinfo_url,
+                headers={"Authorization": f"Bearer {tok.value}"},
+            )
+            if not response.is_success:
+                raise _TokenEndpointError(response.status_code, response.text, "userinfo endpoint")
+            organization_id: str = response.json()["organization_id"]
+            return organization_id
+
+        # Same policy as token minting: transient 5xx/transport blips at
+        # startup are retried; 4xx fails fast (a network hiccup here used to
+        # crash the whole process).
+        try:
+            async for attempt in self._retry_policy():
+                with attempt:
+                    self._org_id_cached = await _fetch()
+                    return self._org_id_cached
+        except tenacity.RetryError as exc:
+            cause = exc.last_attempt.exception()
+            raise AuthError(f"userinfo endpoint unreachable after retries: {cause}") from cause
+        except _TokenEndpointError as exc:
+            # 4xx: not retried; surface immediately.
+            raise AuthError(str(exc)) from exc
+
+        # This line is unreachable but satisfies mypy's exhaustiveness check.
+        raise AuthError("userinfo fetch failed unexpectedly")  # pragma: no cover
 
     def invalidate(self) -> None:
         """Clear the cached token (call when a downstream caller receives a 401)."""
@@ -179,10 +195,24 @@ class TokenProvider:
             raise _TokenEndpointError(response.status_code, response.text)
 
         body = response.json()
+        # Neither the JWT bearer nor the client_credentials response carries
+        # expires_in — the real lifetime is the org's session timeout, so we
+        # assume the configured salesforce.token_ttl (default 1h) and rely on
+        # reactive invalidate()-on-401 for orgs with shorter timeouts.
         return AccessToken(
             value=body["access_token"],
             instance_url=body["instance_url"],
-            expires_at=datetime.now(UTC) + TOKEN_TTL,
+            expires_at=datetime.now(UTC) + self._cfg.token_ttl,
+        )
+
+    @staticmethod
+    def _retry_policy() -> tenacity.AsyncRetrying:
+        """Shared retry policy: 5xx/transport errors retried, 4xx fail fast."""
+        return tenacity.AsyncRetrying(
+            retry=tenacity.retry_if_exception(_should_retry),
+            stop=tenacity.stop_after_attempt(4),
+            wait=tenacity.wait_exponential_jitter(initial=0.5, max=10.0),
+            reraise=False,
         )
 
     async def _mint_token(self) -> AccessToken:
@@ -191,14 +221,8 @@ class TokenProvider:
         A 4xx response is immediately re-raised as :class:`AuthError` without
         any retry.
         """
-        retry = tenacity.AsyncRetrying(
-            retry=tenacity.retry_if_exception(_should_retry),
-            stop=tenacity.stop_after_attempt(4),
-            wait=tenacity.wait_exponential_jitter(initial=0.5, max=10.0),
-            reraise=False,
-        )
         try:
-            async for attempt in retry:
+            async for attempt in self._retry_policy():
                 with attempt:
                     token = await self._request_token()
                     self._metrics.auth_refreshes.inc()

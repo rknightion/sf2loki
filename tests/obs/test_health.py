@@ -114,3 +114,40 @@ def test_ready_property() -> None:
     assert h.ready is True
     h.set_not_ready()
     assert h.ready is False
+
+
+# --- hardening (D9): status reason phrase + read timeout ---
+
+
+@pytest.mark.asyncio
+async def test_health_response_has_reason_phrase() -> None:
+    h = Health()
+    await h.start(":0")
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{h.port}/healthz")
+        assert r.reason_phrase == "OK"
+        h.set_not_ready()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{h.port}/readyz")
+        assert r.reason_phrase == "Service Unavailable"
+    finally:
+        await h.stop()
+
+
+@pytest.mark.asyncio
+async def test_health_read_timeout_closes_idle_connection() -> None:
+    """A client that connects and never sends must not hold the fd forever."""
+    import asyncio
+
+    h = Health(read_timeout=0.2)
+    await h.start(":0")
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", h.port)
+        # Send nothing; the server must close the connection after read_timeout.
+        data = await asyncio.wait_for(reader.read(), timeout=2.0)
+        assert data == b""  # EOF, no response bytes
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await h.stop()

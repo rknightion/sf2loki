@@ -92,3 +92,26 @@ def test_config_schema_subcommand_prints_json(capsys):
     rc = main(["config", "schema"])
     out = capsys.readouterr().out
     assert rc == 0 and '"title": "Config"' in out
+
+
+def test_run_path_config_error_prints_message_and_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The normal run path must not dump a traceback on bad config (D6a)."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(
+        """
+salesforce:
+  client_id: cid
+  username: svc@example.com
+  private_key_file: /does/not/exist.pem
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+""".lstrip()
+    )
+    rc = main(["--config", str(p)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "cannot read" in err
+    assert "Traceback" not in err

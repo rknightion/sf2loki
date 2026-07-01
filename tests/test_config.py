@@ -350,7 +350,11 @@ def test_jwt_bearer_requires_username() -> None:
 
 
 def test_client_credentials_does_not_require_username() -> None:
-    cfg = SalesforceConfig(client_id="cid", auth_mode="client_credentials")
+    cfg = SalesforceConfig(
+        client_id="cid",
+        auth_mode="client_credentials",
+        login_url="https://acme.my.salesforce.com",
+    )
     assert cfg.username == ""
     assert cfg.auth_mode == "client_credentials"
 
@@ -362,6 +366,7 @@ def _write_cc_config(tmp_path: Path, secret_file: Path) -> Path:
 salesforce:
   auth_mode: client_credentials
   client_id: cid
+  login_url: https://acme.my.salesforce.com
   client_secret_file: {secret_file}
 sink:
   loki:
@@ -440,3 +445,243 @@ def test_eventlogfile_no_wildcard_discover_false() -> None:
     cfg = EventLogFileConfig(enabled=True, event_types=["Login", "API"])
     assert cfg.discover is False
     assert cfg.exclude == []
+
+
+# ---------------------------------------------------------------------------
+# extra="forbid": unknown/typo'd keys must fail loudly, not silently no-op
+
+
+def test_unknown_top_level_key_is_config_error(tmp_path: Path) -> None:
+    key = tmp_path / "k.pem"
+    key.write_text("PK")
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        f"""
+salesforce:
+  client_id: cid
+  username: svc@example.com
+  private_key_file: {key}
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+sourcess:
+  pubsub:
+    enabled: false
+""".lstrip()
+    )
+    with pytest.raises(ConfigError, match="sourcess"):
+        load(p)
+
+
+def test_typoed_nested_key_fails_with_path_and_hint(tmp_path: Path) -> None:
+    """The exact real-world trap: `event_type:` (singular) used to be silently
+    ignored, disabling ELF ingestion while --check passed."""
+    key = tmp_path / "k.pem"
+    key.write_text("PK")
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        f"""
+salesforce:
+  client_id: cid
+  username: svc@example.com
+  private_key_file: {key}
+sources:
+  eventlogfile:
+    enabled: true
+    event_type: ["Login"]
+    event_types: ["Login"]
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+""".lstrip()
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load(p)
+    msg = str(excinfo.value)
+    assert "sources.eventlogfile.event_type" in msg
+    assert "unknown" in msg.lower()
+
+
+def test_every_config_model_forbids_extras() -> None:
+    for model in _all_config_models():
+        assert model.model_config.get("extra") == "forbid", (
+            f"{model.__name__} must set extra='forbid'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# client_credentials requires a My Domain token endpoint (Salesforce rejects
+# the grant at login.salesforce.com / test.salesforce.com)
+
+
+def test_client_credentials_rejects_generic_login_url() -> None:
+    with pytest.raises(ValidationError, match=r"my\.salesforce\.com"):
+        SalesforceConfig(
+            client_id="cid",
+            auth_mode="client_credentials",
+            login_url="https://login.salesforce.com",
+        )
+
+
+def test_client_credentials_rejects_derived_generic_login_url() -> None:
+    # No explicit login_url -> derived https://login.salesforce.com -> must fail.
+    with pytest.raises(ValidationError, match="login_url"):
+        SalesforceConfig(client_id="cid", auth_mode="client_credentials")
+
+
+def test_client_credentials_rejects_sandbox_generic_login_url() -> None:
+    with pytest.raises(ValidationError):
+        SalesforceConfig(client_id="cid", auth_mode="client_credentials", environment="sandbox")
+
+
+def test_client_credentials_accepts_my_domain_login_url() -> None:
+    cfg = SalesforceConfig(
+        client_id="cid",
+        auth_mode="client_credentials",
+        login_url="https://acme.my.salesforce.com",
+    )
+    assert cfg.login_url == "https://acme.my.salesforce.com"
+
+
+# ---------------------------------------------------------------------------
+# Validation hardening: identifiers, bounds, enums
+
+
+def test_client_id_must_be_non_empty() -> None:
+    with pytest.raises(ValidationError):
+        SalesforceConfig(client_id="", username="svc@example.com")
+
+
+def test_loki_url_must_be_non_empty() -> None:
+    with pytest.raises(ValidationError):
+        LokiConfig(url="")
+
+
+def test_eventlog_object_name_must_be_soql_identifier() -> None:
+    with pytest.raises(ValidationError):
+        EventLogObjectConfig(name="Login'Event")
+    with pytest.raises(ValidationError):
+        EventLogObjectConfig(name="")
+
+
+def test_eventlog_object_custom_object_name_is_valid() -> None:
+    assert EventLogObjectConfig(name="MyAudit__c").name == "MyAudit__c"
+
+
+def test_eventlog_object_timestamp_field_must_be_soql_identifier() -> None:
+    with pytest.raises(ValidationError):
+        EventLogObjectConfig(name="LoginEvent", timestamp_field="EventDate;DROP")
+
+
+def test_eventlogfile_event_type_must_be_soql_identifier_or_wildcard() -> None:
+    with pytest.raises(ValidationError):
+        EventLogFileTypeConfig(name="Login'")
+    with pytest.raises(ValidationError):
+        EventLogFileTypeConfig(name="")
+    assert EventLogFileTypeConfig(name="*").name == "*"
+    assert EventLogFileTypeConfig(name="ReportExport").name == "ReportExport"
+
+
+def test_pubsub_default_num_requested_bounds() -> None:
+    from sf2loki.config import PubSubConfig
+
+    with pytest.raises(ValidationError):
+        PubSubConfig(default_num_requested=0)
+    with pytest.raises(ValidationError):
+        PubSubConfig(default_num_requested=101)  # Salesforce clamps at 100
+    assert PubSubConfig(default_num_requested=100).default_num_requested == 100
+    assert PubSubConfig(default_num_requested=1).default_num_requested == 1
+
+
+def test_log_level_rejects_typo() -> None:
+    with pytest.raises(ValidationError):
+        ServiceConfig(log_level="inof")  # used to silently fall back to INFO
+
+
+def test_log_level_is_case_insensitive() -> None:
+    assert ServiceConfig(log_level="INFO").log_level == "info"
+    assert ServiceConfig(log_level="Debug").log_level == "debug"
+
+
+# ---------------------------------------------------------------------------
+# Telemetry basic-auth credentials must resolve at load time (no silent
+# unauthenticated OTLP)
+
+
+def _write_telemetry_config(tmp_path: Path, *, with_loki_creds: bool) -> Path:
+    key = tmp_path / "k.pem"
+    key.write_text("PK")
+    loki_creds = ""
+    if with_loki_creds:
+        tok = tmp_path / "loki-token"
+        tok.write_text("glc_tok")
+        loki_creds = f"    tenant_id: '12345'\n    auth_token_file: {tok}\n"
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        f"""
+salesforce:
+  client_id: cid
+  username: svc@example.com
+  private_key_file: {key}
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+{loki_creds}service:
+  telemetry:
+    enabled: true
+    endpoint: https://otlp-gateway-prod-eu-west-2.grafana.net/otlp/v1/metrics
+    auth: basic
+""".lstrip()
+    )
+    return p
+
+
+def test_telemetry_basic_auth_unresolvable_is_fatal_at_load(tmp_path: Path) -> None:
+    p = _write_telemetry_config(tmp_path, with_loki_creds=False)
+    with pytest.raises(ConfigError, match="telemetry"):
+        load(p)
+
+
+def test_telemetry_basic_auth_falls_back_to_loki_creds_ok(tmp_path: Path) -> None:
+    p = _write_telemetry_config(tmp_path, with_loki_creds=True)
+    cfg = load(p)
+    assert telemetry_headers(cfg.service.telemetry, cfg.sink.loki)["Authorization"].startswith(
+        "Basic "
+    )
+
+
+# ---------------------------------------------------------------------------
+# Secret file permission errors must be actionable (uid-10001 crash-loop trap)
+
+
+def test_secret_file_permission_error_is_actionable(tmp_path: Path) -> None:
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("running as root; permission bits are not enforced")
+    key = tmp_path / "k.pem"
+    key.write_text("PK")
+    key.chmod(0o000)
+    try:
+        cfg_path = _write_config(tmp_path, key)
+        with pytest.raises(ConfigError) as excinfo:
+            load(cfg_path)
+        msg = str(excinfo.value)
+        assert "chmod 640" in msg
+        assert "10001" in msg
+    finally:
+        key.chmod(0o600)
+
+
+# ---------------------------------------------------------------------------
+# Configurable assumed token TTL (real expiry = org session timeout)
+
+
+def test_salesforce_token_ttl_defaults_to_one_hour() -> None:
+    cfg = SalesforceConfig(client_id="cid", username="svc@example.com")
+    assert cfg.token_ttl == timedelta(hours=1)
+
+
+def test_salesforce_token_ttl_accepts_shorthand() -> None:
+    cfg = SalesforceConfig(client_id="cid", username="svc@example.com", token_ttl="15m")  # type: ignore[arg-type]
+    assert cfg.token_ttl == timedelta(minutes=15)
