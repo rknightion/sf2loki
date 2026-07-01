@@ -59,11 +59,17 @@ sources:
                                                   # Event Monitoring hourly opt-in in Setup) — pick ONE.
                                                   # Many orgs generate ONLY Daily files; check before Hourly.
     event_types:                                  # ELF EventTypes to ingest (required when enabled).
-      # A rich mix that demonstrates the breadth an active org produces. NOTE:
-      # "Login" is intentionally NOT here — it's covered by /event/LoginEventStream
-      # above, and listing it in both would trip the overlap guard. Each item is a
-      # bare string (uses the global structured_metadata_fields, promotes no labels)
-      # OR a per-type object (below).
+      # Use "*" to DISCOVER and ingest every EventType the org produces for this
+      # interval (re-checked each poll, so newly-enabled types appear with no
+      # restart) — then use `exclude:` below to drop categories owned by another
+      # source or high-volume types you don't want:
+      #   event_types: ["*"]
+      #   exclude: [Login, ApexCallout]
+      # Or list types explicitly, as below. NOTE: "Login" is intentionally NOT here
+      # — it's covered by /event/LoginEventStream above, and listing it in both
+      # trips the overlap guard (with "*", exclude it instead). Each item is a bare
+      # string (uses the global structured_metadata_fields, promotes no labels) OR a
+      # per-type object (below). Explicit entries always win over discovered ones.
       - API                                       # REST/SOAP/Bulk API calls, SOQL
       - RestApi
       - BulkApi

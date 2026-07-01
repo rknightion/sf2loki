@@ -111,6 +111,21 @@ class EventLogFileClient:
             )
         return files
 
+    async def list_event_types(self, interval: str) -> list[str]:
+        """Discover the distinct ELF EventTypes the org currently produces for *interval*.
+
+        Uses a *filtered* ``GROUP BY`` — an unfiltered ``COUNT()``/``GROUP BY`` on
+        EventLogFile under-reports (a Salesforce aggregate quirk), but
+        ``WHERE Interval=... GROUP BY EventType`` reliably returns the full set.
+        """
+        soql = f"SELECT EventType FROM EventLogFile WHERE Interval='{interval}' GROUP BY EventType"
+        types: set[str] = set()
+        async for record in self._soql.query(soql):
+            value = record.get("EventType")
+            if value:
+                types.add(str(value))
+        return sorted(types)
+
     async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]:
         """Download and parse the CSV body for *file_meta*.
 

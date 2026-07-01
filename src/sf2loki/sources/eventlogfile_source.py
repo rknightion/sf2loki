@@ -39,7 +39,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
+from sf2loki.config import EVENT_TYPE_WILDCARD, EventLogFileConfig, EventLogFileTypeConfig
 from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.eventlogfile_client import EventLogFileError, EventLogFileMeta
@@ -72,6 +72,8 @@ class _EventLogFileClientLike(Protocol):
     async def list_files(
         self, event_type: str, interval: str, since: str, page_size: int
     ) -> list[EventLogFileMeta]: ...
+
+    async def list_event_types(self, interval: str) -> list[str]: ...
 
     async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]: ...
 
@@ -108,7 +110,7 @@ class EventLogFileSource:
             if stop.is_set():
                 return
 
-            for type_cfg in self._cfg.event_types:
+            for type_cfg in await self._resolve_event_types():
                 if stop.is_set():
                     return
 
@@ -123,6 +125,41 @@ class EventLogFileSource:
                     stop.wait(),
                     timeout=self._cfg.poll_interval.total_seconds(),
                 )
+
+    async def _resolve_event_types(self) -> list[EventLogFileTypeConfig]:
+        """The EventTypes to ingest this cycle.
+
+        Without the ``"*"`` wildcard this is just the explicitly-configured types.
+        With it, discover every EventType the org currently produces for the
+        interval, drop any in ``exclude``, and fold in the explicit per-type
+        entries (which always win, so their structured-metadata / label overrides
+        apply). Re-run each cycle, so newly-enabled EventTypes are picked up
+        without a restart. A discovery failure is non-fatal: fall back to the
+        explicit types so a transient error can't stop ingestion.
+        """
+        explicit = [t for t in self._cfg.event_types if t.name != EVENT_TYPE_WILDCARD]
+        if not self._cfg.discover:
+            return explicit
+
+        try:
+            discovered = await self._client.list_event_types(self._cfg.interval)
+        except EventLogFileError as exc:
+            _log.warning(
+                "eventlogfile: EventType discovery failed; using %d explicit type(s) only: %s",
+                len(explicit),
+                exc,
+            )
+            return explicit
+
+        exclude = set(self._cfg.exclude)
+        resolved = list(explicit)
+        names = {t.name for t in explicit}
+        for name in discovered:
+            if name in names or name in exclude:
+                continue
+            names.add(name)
+            resolved.append(EventLogFileTypeConfig(name=name))
+        return resolved
 
     async def _process_event_type(
         self,

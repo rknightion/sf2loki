@@ -179,6 +179,11 @@ _RESERVED_LABEL_KEYS: frozenset[str] = frozenset(
 _LABEL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+# Wildcard event-type: expands (at poll time) to every EventType the org
+# currently produces for the configured interval — see EventLogFileSource.
+EVENT_TYPE_WILDCARD = "*"
+
+
 class EventLogFileTypeConfig(BaseModel):
     """Per-event-type ELF ingestion config.
 
@@ -234,6 +239,9 @@ class EventLogFileConfig(BaseModel):
     event_types: Annotated[list[EventLogFileTypeConfig], BeforeValidator(_coerce_event_types)] = (
         Field(default_factory=list)
     )
+    # EventTypes to skip when the wildcard "*" is used (e.g. a category served by
+    # another source, or a high-volume type you don't want). Ignored otherwise.
+    exclude: list[str] = Field(default_factory=list)
     poll_interval: Duration = timedelta(hours=1)  # how often to list new files
     lookback: Duration = timedelta(hours=24)  # initial window when no checkpoint
     timestamp_column: str = "TIMESTAMP_DERIVED"  # per-row timestamp column
@@ -247,12 +255,18 @@ class EventLogFileConfig(BaseModel):
     # file can't wedge the watermark forever. Files younger than this are retried.
     download_max_age: Duration = timedelta(hours=24)
 
+    @property
+    def discover(self) -> bool:
+        """True when the wildcard "*" is present — ingest all discovered EventTypes."""
+        return any(t.name == EVENT_TYPE_WILDCARD for t in self.event_types)
+
     @model_validator(mode="after")
     def _require_event_types_when_enabled(self) -> EventLogFileConfig:
         if self.enabled and not self.event_types:
             raise ValueError(
                 "eventlogfile.enabled is true but event_types is empty; "
-                "list the ELF EventType values to ingest (e.g. [Login, API])"
+                'list the ELF EventType values to ingest (e.g. [Login, API]) or "*" to '
+                "discover and ingest all types the org produces"
             )
         return self
 

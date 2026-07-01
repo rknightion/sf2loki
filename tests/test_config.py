@@ -395,3 +395,20 @@ def test_telemetry_headers_explicit_headers_merge() -> None:
     t = TelemetryConfig(enabled=True, auth="none", headers={"X-Scope-OrgID": "7"})
     headers = telemetry_headers(t, LokiConfig(url="http://loki/push"))
     assert headers["X-Scope-OrgID"] == "7"
+
+
+def test_eventlogfile_wildcard_and_exclude() -> None:
+    from sf2loki.config import EventLogFileConfig
+
+    cfg = EventLogFileConfig(enabled=True, event_types=["*"], exclude=["ApexCallout", "Login"])
+    assert cfg.discover is True
+    assert cfg.exclude == ["ApexCallout", "Login"]
+    assert any(t.name == "*" for t in cfg.event_types)
+
+
+def test_eventlogfile_no_wildcard_discover_false() -> None:
+    from sf2loki.config import EventLogFileConfig
+
+    cfg = EventLogFileConfig(enabled=True, event_types=["Login", "API"])
+    assert cfg.discover is False
+    assert cfg.exclude == []

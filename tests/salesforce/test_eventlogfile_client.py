@@ -322,3 +322,33 @@ async def test_download_non_2xx_raises_and_increments_error_metric() -> None:
         "sf2loki_eventlogfile_download_errors_total", {"reason": "HTTP 500"}
     )
     assert err_val == 1.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_event_types_builds_grouped_soql_and_dedupes() -> None:
+    """Discovery uses a filtered GROUP BY and returns a sorted, deduped set."""
+    captured_q: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured_q.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        return httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"EventType": "RestApi"},
+                    {"EventType": "API"},
+                    {"EventType": "RestApi"},  # dupe collapses
+                    {"EventType": None},  # ignored
+                ],
+                "done": True,
+            },
+        )
+
+    respx.get(_query_url()).mock(side_effect=capture)
+    client = EventLogFileClient(make_sf_cfg(), FakeTokenProvider(), httpx.AsyncClient())
+    types = await client.list_event_types("Hourly")
+
+    assert types == ["API", "RestApi"]
+    assert "GROUP BY EventType" in captured_q[0]
+    assert "Interval='Hourly'" in captured_q[0]

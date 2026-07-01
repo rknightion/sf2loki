@@ -21,7 +21,12 @@ from typing import TYPE_CHECKING
 import httpx
 
 from sf2loki.auth.jwt_auth import TokenProvider
-from sf2loki.config import Config, LokiBatchConfig, telemetry_headers
+from sf2loki.config import (
+    EVENT_TYPE_WILDCARD,
+    Config,
+    LokiBatchConfig,
+    telemetry_headers,
+)
 from sf2loki.coordinate.base import NoopCoordinator
 from sf2loki.model import Batch, LogEntry
 from sf2loki.obs.health import Health
@@ -395,7 +400,14 @@ class App:
                     metrics=metrics,
                 )
             )
-            elf_event_types = [t.name for t in cfg.sources.eventlogfile.event_types]
+            # The wildcard expands at poll time, so its discovered types aren't
+            # known here; the guard sees only the explicit types (use exclude to
+            # keep a discovered category off ELF when another source owns it).
+            elf_event_types = [
+                t.name
+                for t in cfg.sources.eventlogfile.event_types
+                if t.name != EVENT_TYPE_WILDCARD
+            ]
 
         # Fail fast if one event category is fed by more than one source (which
         # would ingest duplicate events). Bypass with sources.allow_overlap.

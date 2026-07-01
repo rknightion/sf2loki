@@ -35,14 +35,23 @@ class FakeEventLogFileClient:
     files: list[EventLogFileMeta]
     rows_by_id: dict[str, list[dict[str, str]]]
     errors: set[str] = field(default_factory=set)
+    discovered_types: list[str] = field(default_factory=list)
+    discover_error: bool = False
     list_calls: list[tuple[str, str, str, int]] = field(default_factory=list)
     download_calls: list[str] = field(default_factory=list)
+    discover_calls: list[str] = field(default_factory=list)
 
     async def list_files(
         self, event_type: str, interval: str, since: str, page_size: int
     ) -> list[EventLogFileMeta]:
         self.list_calls.append((event_type, interval, since, page_size))
         return list(self.files)
+
+    async def list_event_types(self, interval: str) -> list[str]:
+        self.discover_calls.append(interval)
+        if self.discover_error:
+            raise EventLogFileError("discovery failed")
+        return list(self.discovered_types)
 
     async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]:
         self.download_calls.append(file_meta.id)
@@ -537,3 +546,107 @@ async def test_settle_window_skips_too_fresh_files(
     final = json.loads(entries[-1].checkpoint.value)
     assert final["ids"] == ["f_old"]
     assert "f_fresh" not in final["ids"]
+
+
+# ---------------------------------------------------------------------------
+# EventType discovery / wildcard
+
+
+def _wildcard_cfg(*, exclude: list[str] | None = None, extra: list[object] | None = None):
+    from sf2loki.config import EventLogFileConfig
+
+    return EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=["*", *(extra or [])],
+        exclude=exclude or [],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+
+
+@pytest.mark.asyncio
+async def test_wildcard_discovers_and_processes_all_types(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(
+        files=[], rows_by_id={}, discovered_types=["API", "Report", "Search"]
+    )
+    source = EventLogFileSource(_wildcard_cfg(), client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    _ = [e async for e in source.events(store, asyncio.Event())]
+    assert client.discover_calls == ["Hourly"]
+    assert sorted({c[0] for c in client.list_calls}) == ["API", "Report", "Search"]
+
+
+@pytest.mark.asyncio
+async def test_wildcard_exclude_drops_types(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(
+        files=[], rows_by_id={}, discovered_types=["API", "ApexCallout", "Report"]
+    )
+    source = EventLogFileSource(
+        _wildcard_cfg(exclude=["ApexCallout"]),
+        client,
+        sm_fields=[],
+        poll_once=True,  # type: ignore[arg-type]
+    )
+    _ = [e async for e in source.events(store, asyncio.Event())]
+    assert sorted({c[0] for c in client.list_calls}) == ["API", "Report"]
+
+
+@pytest.mark.asyncio
+async def test_wildcard_includes_explicit_not_discovered(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(files=[], rows_by_id={}, discovered_types=["API"])
+    source = EventLogFileSource(
+        _wildcard_cfg(extra=["Report"]),
+        client,
+        sm_fields=[],
+        poll_once=True,  # type: ignore[arg-type]
+    )
+    _ = [e async for e in source.events(store, asyncio.Event())]
+    assert sorted({c[0] for c in client.list_calls}) == ["API", "Report"]
+
+
+@pytest.mark.asyncio
+async def test_wildcard_explicit_override_wins(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(
+        files=[make_file_meta(id="f1", event_type="Report")],
+        rows_by_id={
+            "f1": [{"TIMESTAMP_DERIVED": "2026-06-30T01:00:00.000Z", "RPT": "r1", "OTHER": "o"}]
+        },
+        discovered_types=["Report"],
+    )
+    cfg = _wildcard_cfg(extra=[{"name": "Report", "structured_metadata_fields": ["RPT"]}])
+    source = EventLogFileSource(cfg, client, sm_fields=["OTHER"], poll_once=True)  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+    assert len(entries) == 1
+    # per-type override promotes RPT (not the global OTHER); level always injected
+    assert entries[0].structured_metadata == {"RPT": "r1", "level": "info"}
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_falls_back_to_explicit(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(files=[], rows_by_id={}, discover_error=True)
+    source = EventLogFileSource(
+        _wildcard_cfg(extra=["API"]),
+        client,
+        sm_fields=[],
+        poll_once=True,  # type: ignore[arg-type]
+    )
+    _ = [e async for e in source.events(store, asyncio.Event())]  # must not raise
+    assert client.discover_calls == ["Hourly"]
+    assert sorted({c[0] for c in client.list_calls}) == ["API"]
+
+
+@pytest.mark.asyncio
+async def test_no_wildcard_skips_discovery(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(files=[], rows_by_id={}, discovered_types=["API"])
+    source = EventLogFileSource(
+        make_elf_cfg(event_types=["Login"]), client, sm_fields=[], poll_once=True
+    )  # type: ignore[arg-type]
+    _ = [e async for e in source.events(store, asyncio.Event())]
+    assert client.discover_calls == []
+    assert sorted({c[0] for c in client.list_calls}) == ["Login"]

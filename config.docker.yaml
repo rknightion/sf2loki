@@ -33,50 +33,17 @@ sources:
     interval: Hourly                                # this org generates Hourly files (Event Monitoring
                                                     # hourly is enabled). Hourly lands ~20-30 min after the
                                                     # hour closes — far fresher than Daily's ~24h+.
-    # Broad mix for dashboard-building — everything the activity generator + normal
-    # usage emit into hourly files. "Login" is deliberately absent (it arrives in
-    # real time via Pub/Sub above; listing it here would trip the overlap guard).
-    # ApexCallout / NamedCredential dominate volume (multi-MB files); drop them if
-    # dev-stack ingest cost matters.
+    # "*" = discover and ingest EVERY EventType the org produces for this interval,
+    # re-checked each poll so newly-enabled types appear with no restart. The explicit
+    # ReportExport entry supplies per-type overrides (kept even if not yet discovered).
     event_types:
-      - API
-      - ApexCallout
-      - ApexExecution
-      - ApiTotalUsage
-      - AsyncReportRun
-      - AuraRequest
-      - BulkApi
-      - BulkApi2
-      - CompositeApi
-      - CompositeApiSubrequest
-      - ContentDistribution
-      - ContentDocumentLink
-      - ContentTransfer
-      - CSPViolation
-      - DatabaseSave
-      - DocumentAttachmentDownloads
-      - ExternalODataCallout
-      - LightningInteraction
-      - LightningPageView
-      - LightningPerformance
-      - Logout
-      - MetadataApiOperation
-      - NamedCredential
-      - OneCommerceUsage
-      - PackageInstall
-      - PermissionUpdate
-      - Report
+      - "*"
       - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
-      - RestApi
-      - Search
-      - UiTelemetryNavigationTiming
-      - UiTelemetryResourceTiming
-      - UniqueQuery
-      - URI
-      - VisualforceRequest
-      - WaveChange
-      - WaveInteraction
-      - WavePerformance
+    exclude:
+      - Login                                        # served in real time by Pub/Sub above — exclude from
+                                                     # the wildcard to avoid double-ingesting the login category
+      # ApexCallout / NamedCredential dominate volume (multi-MB hourly files);
+      # add them here if dev-stack ingest cost becomes a concern.
     poll_interval: 10m                              # hourly files appear ~hourly; 10m keeps pickup latency low
     lookback: 24h                                   # first run (no checkpoint): the org retains ~1.5 days of
                                                     # hourly files; 24h backfills the recent ones

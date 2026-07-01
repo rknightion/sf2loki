@@ -268,6 +268,14 @@ one entry **per row** (not per file) is also what keeps lines under Loki's per-l
   global `sink.loki.structured_metadata_fields` for that type (omit/`null` → inherit the global; `[]` →
   suppress it). `labels` promotes the named columns to **stream labels** for that type — a deliberate
   cardinality knob: only promote low-cardinality columns (each distinct value is a new stream).
+- **Wildcard discovery.** `event_types: ["*"]` discovers every EventType the org produces for the
+  interval (via a filtered `SELECT EventType … WHERE Interval=… GROUP BY EventType` — the *unfiltered*
+  aggregate under-reports, a Salesforce quirk) and ingests them all, re-checked each poll so
+  newly-enabled types appear without a restart. `exclude:` drops types (e.g. a category owned by
+  another source, or high-volume ones). Explicit per-type entries are always kept and win over
+  discovered defaults. Discovery failure is non-fatal — it falls back to the explicit entries. Caveat:
+  the startup overlap guard can't see discovered types, so use `exclude` to keep a discovered category
+  off ELF when a stream/object source owns it (e.g. `exclude: [Login]` when Login streams via Pub/Sub).
   Promotion can never clobber the reserved keys (`source`/`event_type`/`job`/`sf_org_id`/`environment`);
   config validation rejects promoting any of them or a non-identifier label name.
 
