@@ -1,0 +1,10 @@
+# Local-source build override for docker-compose.yml. The base compose pulls the
+# published GHCR image; layer this to build from the working tree instead:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+#
+services:
+  sf2loki:
+    build: .
+    image: sf2loki:dev
+    pull_policy: build

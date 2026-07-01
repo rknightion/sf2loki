@@ -220,12 +220,17 @@ Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/).
 The container is the primary run target (alongside ECS). The image is slim, runs as a non-root user,
 and exposes `:8080` (`/healthz`, `/readyz`). Metrics are pushed via OTLP, so there is no scrape port.
 
-```bash
-# build
-docker build -t sf2loki:dev .
+Every push to `main` publishes a multi-arch image to GHCR (`ghcr.io/rknightion/sf2loki:main`, plus
+`:main-<sha>`); releases add semver + `:latest`. The compose file pulls that image by default, so a
+deploy is just pull + up:
 
-# run via compose — non-secret values from .env.dev, secrets mounted from ./secrets
-docker compose --env-file .env.dev up --build
+```bash
+# run the published :main edge image — non-secret values from .env.dev, secrets from ./secrets
+docker compose --env-file .env.dev pull
+docker compose --env-file .env.dev up -d
+
+# …or build from local source instead (dev iteration):
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 ```
 
 [`docker-compose.yml`](docker-compose.yml) mounts [`config.docker.yaml`](config.docker.yaml) (no

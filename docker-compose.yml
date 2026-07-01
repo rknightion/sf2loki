@@ -1,13 +1,21 @@
-# Local Docker run for sf2loki (the primary run target alongside ECS).
+# Docker run for sf2loki — pulls the prebuilt image published to GHCR on every
+# push to main (the `:main` edge tag). This is the deploy target (e.g. jules):
 #
-#   docker compose --env-file .env.dev up --build
+#   docker compose --env-file .env.dev pull        # fetch the latest :main
+#   docker compose --env-file .env.dev up -d        # run it
+#
+# To build from local source instead (dev iteration), layer the build override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 #
 # Secrets are mounted read-only from ./secrets (gitignored); non-secret config
 # values are interpolated from the env_file. config.docker.yaml carries no secrets.
 services:
   sf2loki:
-    build: .
-    image: sf2loki:dev
+    # Pin a specific build with SF2LOKI_TAG=main-<sha> if you need to; defaults to
+    # the rolling :main edge tag.
+    image: ghcr.io/rknightion/sf2loki:${SF2LOKI_TAG:-main}
+    pull_policy: always
     env_file:
       - .env.dev
     volumes:
