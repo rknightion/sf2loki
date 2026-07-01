@@ -47,6 +47,20 @@ A file with zero rows contributes nothing to the checkpoint: its id is never
 folded into the carried "ids" set (there's no "last row" to carry it). Such a
 file may be re-listed and re-downloaded on a subsequent cycle — harmless,
 since there are no rows to (re-)emit or dedup.
+
+Concurrency (``cfg.concurrency``, per poll cycle): event types are independent
+— each has its own checkpoint key (``eventlogfile:<event_type>``) and its own
+carried watermark/ids state — so up to ``concurrency`` types are processed at
+once via one task per type, gated by an ``asyncio.Semaphore``. Processing
+*within* a type stays strictly sequential (unchanged from the single-type
+logic below); only the across-type ordering becomes concurrent. Entries from
+concurrently-running types interleave into the yielded stream, which is safe
+because the pipeline commits the most recent checkpoint value *per key* — an
+interleaved Login row and API row never contend for the same key. A
+REQUEST_LIMIT_EXCEEDED throttle sets a shared ``asyncio.Event``: a type that
+hasn't started yet (still waiting on the semaphore) skips entirely; a type
+already running finishes under its own unchanged internal logic (which may
+itself detect the same throttle and stop early). See ``_process_cycle``.
 """
 
 from __future__ import annotations
@@ -56,6 +70,7 @@ import contextlib
 import json
 import logging
 import random
+import time
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -99,6 +114,14 @@ _SKEW_WARN_THRESHOLD = timedelta(seconds=60)
 _CarriedId = tuple[str, str | None]
 
 _log = logging.getLogger(__name__)
+
+
+class _CycleDone:
+    """Sentinel enqueued on the bridge queue once every per-type worker for a
+    cycle has finished (successfully, via early return, or via exception)."""
+
+
+_CYCLE_DONE = _CycleDone()
 
 
 def _parse_created(created_date: str) -> datetime | None:
@@ -272,17 +295,11 @@ class EventLogFileSource:
             # the client's last-seen Date header): how far the local clock is
             # from Salesforce server time.
             self._cycle_skew = self._compute_cycle_skew()
-            for type_cfg in type_cfgs:
-                if stop.is_set():
-                    return
 
-                async for entry in self._process_event_type(type_cfg, state, stop):
-                    yield entry
-
-                if self._cycle_throttled:
-                    # API budget exhausted: don't touch the remaining types
-                    # this cycle; the next poll interval retries everything.
-                    break
+            cycle_start = time.monotonic()
+            async for entry in self._process_cycle(type_cfgs, state, stop):
+                yield entry
+            self._metrics.eventlogfile_cycle_seconds.set(time.monotonic() - cycle_start)
 
             if self._poll_once:
                 return
@@ -293,6 +310,89 @@ class EventLogFileSource:
                 timeout *= random.uniform(0.9, 1.1)  # jitter, not cryptographic
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=timeout)
+
+    async def _process_cycle(
+        self,
+        type_cfgs: list[EventLogFileTypeConfig],
+        state: CheckpointStore,
+        stop: asyncio.Event,
+    ) -> AsyncIterator[LogEntry]:
+        """Process every configured type this cycle, up to ``cfg.concurrency`` at once.
+
+        Each type gets its own task, gated by ``semaphore`` so at most
+        ``concurrency`` run concurrently; processing *within* a type stays
+        strictly sequential via the unchanged ``_process_event_type``. Because
+        an async generator can't be safely driven by multiple concurrent
+        callers, each worker task funnels its entries through a small bounded
+        queue (the "bridge") that this method drains and re-yields — the
+        bound (``maxsize=1``) means a slow downstream consumer (the caller of
+        this generator) stalls the queue, which stalls every worker's next
+        ``put``, which — since a worker awaits that ``put`` before listing or
+        downloading its next file — propagates backpressure all the way to
+        the Salesforce calls, exactly as the fully-sequential version did.
+
+        Throttle abort: when a worker's ``_process_event_type`` run finishes
+        having set ``self._cycle_throttled`` (REQUEST_LIMIT_EXCEEDED), this
+        sets ``throttle_event``. A type that hasn't started yet (still queued
+        behind the semaphore) checks the event and skips outright — mirroring
+        the old "break the remaining types" abort. A type already running is
+        NOT interrupted: it keeps going under its own unchanged internal
+        logic (which independently detects and reacts to the same throttle).
+        """
+        queue: asyncio.Queue[LogEntry | _CycleDone] = asyncio.Queue(maxsize=1)
+        throttle_event = asyncio.Event()
+        semaphore = asyncio.Semaphore(self._cfg.concurrency)
+
+        async def worker(type_cfg: EventLogFileTypeConfig) -> None:
+            if throttle_event.is_set() or stop.is_set():
+                return
+            async with semaphore:
+                # Re-check after acquiring: the event may have been set while
+                # this type was queued behind the semaphore.
+                if throttle_event.is_set() or stop.is_set():
+                    return
+                async for entry in self._process_event_type(type_cfg, state, stop):
+                    await queue.put(entry)
+                if self._cycle_throttled:
+                    throttle_event.set()
+
+        async def run_workers() -> list[BaseException | None]:
+            try:
+                return await asyncio.gather(
+                    *(worker(type_cfg) for type_cfg in type_cfgs),
+                    return_exceptions=True,
+                )
+            finally:
+                # Always signal completion, even if gather() itself blew up,
+                # so the consumer loop below never hangs waiting on the queue.
+                await queue.put(_CYCLE_DONE)
+
+        runner = asyncio.ensure_future(run_workers())
+        try:
+            while True:
+                item = await queue.get()
+                if isinstance(item, _CycleDone):
+                    break
+                yield item
+            results = await runner
+        except BaseException:
+            # The consumer side is unwinding (e.g. GeneratorExit from an
+            # early aclose(), or cancellation) — stop the workers too instead
+            # of leaving them running unattended in the background.
+            runner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await runner
+            raise
+
+        for result in results:
+            if isinstance(result, BaseException):
+                # An UNEXPECTED failure in one type's worker (the expected SF
+                # error paths are already contained inside
+                # _process_event_type and never raise). Every other worker
+                # has already run to completion by this point — gather()
+                # with return_exceptions=True never cancels siblings — so
+                # this type's failure genuinely couldn't affect another's.
+                raise result
 
     async def _resolve_event_types(self) -> list[EventLogFileTypeConfig]:
         """The EventTypes to ingest this cycle.

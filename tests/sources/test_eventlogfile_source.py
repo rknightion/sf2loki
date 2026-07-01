@@ -31,6 +31,30 @@ from sf2loki.state.file_store import FileCheckpointStore
 # Fakes
 
 
+class _ConcurrencyProbe:
+    """Tracks how many callers are simultaneously "inside" a probed section.
+
+    Used to PROVE the ``cfg.concurrency`` bound structurally rather than by
+    guessing at timing: ``enter()`` increments then genuinely suspends (via
+    ``asyncio.sleep``), which is what lets sibling tasks actually interleave
+    in the first place — without a real suspension point, asyncio would just
+    run each task to completion before starting the next, and "concurrent"
+    tasks would never actually overlap.
+    """
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.max_seen = 0
+
+    async def enter(self, delay: float) -> None:
+        self.current += 1
+        self.max_seen = max(self.max_seen, self.current)
+        await asyncio.sleep(delay)
+
+    def exit(self) -> None:
+        self.current -= 1
+
+
 @dataclass
 class FakeEventLogFileClient:
     """Duck-typed stand-in for EventLogFileClient with deterministic responses.
@@ -44,6 +68,16 @@ class FakeEventLogFileClient:
     mid-file). ``list_error`` / ``discover_error`` raise on listing/discovery —
     the real client wraps everything (incl. inner SOQL failures) into the
     EventLogFileError family, so that is what the fake raises too.
+
+    ``files_by_type`` overrides ``files`` per event type (falls back to
+    ``files`` when a type has no entry) — lets a concurrency test give
+    different types different files without needing separate client
+    instances (the source uses ONE client for every type). ``probe`` +
+    ``probe_delay`` instrument ``list_files`` to prove genuine overlap
+    between concurrently-processed types (see :class:`_ConcurrencyProbe`).
+    ``download_delay`` sleeps at the top of ``download`` (before the
+    throttled/error checks) — keeps a file's download "in flight" long
+    enough for a sibling type to start (or finish) concurrently.
     """
 
     files: list[EventLogFileMeta]
@@ -55,6 +89,10 @@ class FakeEventLogFileClient:
     discovered_types: list[str] = field(default_factory=list)
     discover_error: bool = False
     skew: timedelta | None = None
+    files_by_type: dict[str, list[EventLogFileMeta]] = field(default_factory=dict)
+    probe: _ConcurrencyProbe | None = None
+    probe_delay: float = 0.02
+    download_delay: float = 0.0
     list_calls: list[tuple[str, str, str, int]] = field(default_factory=list)
     download_calls: list[str] = field(default_factory=list)
     discover_calls: list[str] = field(default_factory=list)
@@ -66,9 +104,15 @@ class FakeEventLogFileClient:
         self, event_type: str, interval: str, since: str, page_size: int
     ) -> list[EventLogFileMeta]:
         self.list_calls.append((event_type, interval, since, page_size))
-        if self.list_error is not None:
-            raise self.list_error
-        return list(self.files)
+        if self.probe is not None:
+            await self.probe.enter(self.probe_delay)
+        try:
+            if self.list_error is not None:
+                raise self.list_error
+            return list(self.files_by_type.get(event_type, self.files))
+        finally:
+            if self.probe is not None:
+                self.probe.exit()
 
     async def list_event_types(self, interval: str) -> list[str]:
         self.discover_calls.append(interval)
@@ -78,6 +122,8 @@ class FakeEventLogFileClient:
 
     async def download(self, file_meta: EventLogFileMeta) -> AsyncIterator[dict[str, str]]:
         self.download_calls.append(file_meta.id)
+        if self.download_delay:
+            await asyncio.sleep(self.download_delay)
         if file_meta.id in self.throttled:
             raise EventLogFileThrottledError(
                 f"download throttled for {file_meta.id}: HTTP 403 REQUEST_LIMIT_EXCEEDED"
@@ -132,6 +178,7 @@ def make_elf_cfg(
     timestamp_column: str = "TIMESTAMP_DERIVED",
     settle_window: timedelta = timedelta(0),
     download_max_age: timedelta = timedelta(hours=24),
+    concurrency: int = 1,
 ) -> EventLogFileConfig:
     return EventLogFileConfig(
         enabled=True,
@@ -143,6 +190,7 @@ def make_elf_cfg(
         page_size=page_size,
         settle_window=settle_window,
         download_max_age=download_max_age,
+        concurrency=concurrency,
     )
 
 
@@ -795,19 +843,24 @@ async def test_listing_failure_skips_cycle_without_raising(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency", [1, 4])
 async def test_throttled_listing_aborts_rest_of_cycle(
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: pytest.TempPathFactory, concurrency: int
 ) -> None:
     """REQUEST_LIMIT_EXCEEDED on one type's listing must stop the remaining
     types this cycle (backing off until the next poll) instead of burning more
-    of the exhausted API budget."""
+    of the exhausted API budget. Holds at concurrency=1 (byte-identical to the
+    old sequential loop) and at concurrency=4 (our fake client never actually
+    suspends mid-call, so even "concurrent" tasks still run one-at-a-time to
+    completion before the next is scheduled — see the dedicated
+    ``test_throttle_lets_already_running_type_finish`` for genuine overlap)."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     client = FakeEventLogFileClient(
         files=[],
         rows_by_id={},
         list_error=EventLogFileThrottledError("HTTP 403 REQUEST_LIMIT_EXCEEDED"),
     )
-    cfg = make_elf_cfg(event_types=["Login", "API", "Report"])
+    cfg = make_elf_cfg(event_types=["Login", "API", "Report"], concurrency=concurrency)
     source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
 
     entries = await _run_cycle(source, store)  # must not raise
@@ -816,8 +869,9 @@ async def test_throttled_listing_aborts_rest_of_cycle(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency", [1, 4])
 async def test_throttled_download_aborts_rest_of_cycle(
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: pytest.TempPathFactory, concurrency: int
 ) -> None:
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=2)))
@@ -830,7 +884,7 @@ async def test_throttled_download_aborts_rest_of_cycle(
         },
         throttled={"f1"},
     )
-    cfg = make_elf_cfg(event_types=["Login", "API"])
+    cfg = make_elf_cfg(event_types=["Login", "API"], concurrency=concurrency)
     source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
 
     entries = await _run_cycle(source, store)  # must not raise
@@ -1227,3 +1281,191 @@ async def test_sampled_out_row_not_emitted_but_others_flow(
         "sf2loki_entries_sampled_out_total", {"source": "eventlogfile", "event_type": "Login"}
     )
     assert sampled == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Bounded-concurrency per-cycle processing (issue #25)
+
+
+@pytest.mark.asyncio
+async def test_concurrency_is_bounded_and_reached(tmp_path: pytest.TempPathFactory) -> None:
+    """At most cfg.concurrency types are ever "in flight" at once, and that
+    many really DO overlap (not just "never exceeded the limit" by accident —
+    the probe's max_seen must actually hit the configured value)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    n_types = 6
+    concurrency = 2
+    probe = _ConcurrencyProbe()
+    client = FakeEventLogFileClient(files=[], rows_by_id={}, probe=probe, probe_delay=0.02)
+    cfg = make_elf_cfg(event_types=[f"Type{i}" for i in range(n_types)], concurrency=concurrency)
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert entries == []  # no files configured — this test is purely about scheduling
+    assert len(client.list_calls) == n_types  # every type still got processed
+    assert probe.current == 0  # every probe entry was matched by an exit
+    assert probe.max_seen == concurrency  # bound reached exactly, never exceeded
+
+
+@pytest.mark.asyncio
+async def test_concurrent_types_interleave_and_commit_independent_checkpoints(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Two types running concurrently must each commit their OWN correct
+    checkpoint — proven with genuine overlap (the probe), not just by luck of
+    fast synchronous fakes never actually yielding control.
+
+    Mirrors production: the pipeline commits the most recent checkpoint value
+    per KEY once a batch flushes, so this drives ``events()`` directly and
+    keeps only the last value seen per key — exactly what a real flush does —
+    rather than the single-type ``_run_cycle`` helper (which only keeps the
+    very last entry of the whole stream and would silently ignore the other
+    type's checkpoint entirely).
+    """
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    login_file = make_file_meta(id="login-f1", created_date="2026-06-30T01:00:00.000+0000")
+    api_file = make_file_meta(id="api-f1", created_date="2026-06-30T01:05:00.000+0000")
+    probe = _ConcurrencyProbe()
+    client = FakeEventLogFileClient(
+        files=[],
+        rows_by_id={
+            "login-f1": [
+                {"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "login-a"},
+                {"TIMESTAMP_DERIVED": "20260630010001.000", "ROW": "login-b"},
+            ],
+            "api-f1": [
+                {"TIMESTAMP_DERIVED": "20260630010500.000", "ROW": "api-a"},
+                {"TIMESTAMP_DERIVED": "20260630010501.000", "ROW": "api-b"},
+            ],
+        },
+        files_by_type={"Login": [login_file], "API": [api_file]},
+        probe=probe,
+        probe_delay=0.02,
+    )
+    cfg = make_elf_cfg(event_types=["Login", "API"], concurrency=2)
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    last_per_key: dict[str, str] = {}
+    entries: list[LogEntry] = []
+    async for entry in source.events(store, asyncio.Event()):
+        entries.append(entry)
+        last_per_key[entry.checkpoint.key] = entry.checkpoint.value
+    for key, value in last_per_key.items():
+        await store.commit(key, value)
+
+    # Genuine overlap actually happened (not a coincidence of fast fakes).
+    assert probe.max_seen == 2
+
+    assert len(entries) == 4
+    assert {e.checkpoint.key for e in entries} == {"eventlogfile:Login", "eventlogfile:API"}
+
+    login_raw = await store.load("eventlogfile:Login")
+    assert login_raw is not None
+    login_ckpt = json.loads(login_raw)
+    assert login_ckpt["last_created"] == login_file.created_date
+    assert [i for i, _ in login_ckpt["ids"]] == ["login-f1"]
+
+    api_raw = await store.load("eventlogfile:API")
+    assert api_raw is not None
+    api_ckpt = json.loads(api_raw)
+    assert api_ckpt["last_created"] == api_file.created_date
+    assert [i for i, _ in api_ckpt["ids"]] == ["api-f1"]
+
+
+@pytest.mark.asyncio
+async def test_throttle_lets_already_running_type_finish_but_skips_unstarted(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A throttle on one type must not cut off a SIBLING type that's already
+    running concurrently — that type finishes under its own unchanged
+    internal logic. Only a type that hasn't started yet (still queued behind
+    the semaphore) checks the shared throttle event and skips outright."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    login_file = make_file_meta(id="login-f1", created_date=_created_ago(timedelta(hours=1)))
+    api_file = make_file_meta(id="api-f1", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[],
+        rows_by_id={
+            "login-f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "api-f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+        },
+        files_by_type={"Login": [login_file], "API": [api_file]},
+        throttled={"login-f1"},
+        # Keeps both Login's and API's downloads "in flight" together before
+        # Login throttles, so API is genuinely already running (not skipped)
+        # by the time the shared throttle event gets set.
+        download_delay=0.02,
+    )
+    cfg = make_elf_cfg(event_types=["Login", "API", "Report"], concurrency=2)
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # Login throttled (no entries); API was already running and got to
+    # finish; Report never started (never even listed).
+    assert {e.checkpoint.key for e in entries} == {"eventlogfile:API"}
+    assert "login-f1" in client.download_calls
+    assert "api-f1" in client.download_calls
+    assert "Report" not in {c[0] for c in client.list_calls}
+
+
+@pytest.mark.asyncio
+async def test_cycle_gauge_set_after_each_poll_cycle(tmp_path: pytest.TempPathFactory) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1")
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = make_elf_cfg()
+    metrics = Metrics()
+    source = EventLogFileSource(cfg, client, sm_fields=[], metrics=metrics, poll_once=True)  # type: ignore[arg-type]
+
+    _ = [e async for e in source.events(store, asyncio.Event())]
+
+    value = metrics.registry.get_sample_value("sf2loki_eventlogfile_cycle_seconds")
+    assert value is not None
+    assert value >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_stop_responsive_with_multiple_concurrent_types(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Setting `stop` mid-cycle, while several types are running concurrently,
+    must still make the generator terminate promptly instead of hanging or
+    running every type to completion regardless."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    files_by_type = {
+        f"Type{i}": [make_file_meta(id=f"f{i}", created_date=_created_ago(timedelta(hours=1)))]
+        for i in range(4)
+    }
+    rows_by_id = {
+        f"f{i}": [
+            {"TIMESTAMP_DERIVED": "20260630010000.000"},
+            {"TIMESTAMP_DERIVED": "20260630010001.000"},
+        ]
+        for i in range(4)
+    }
+    client = FakeEventLogFileClient(
+        files=[],
+        rows_by_id=rows_by_id,
+        files_by_type=files_by_type,
+        download_delay=0.02,
+    )
+    cfg = make_elf_cfg(event_types=list(files_by_type), concurrency=4)
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+
+    async def consume() -> list[LogEntry]:
+        collected: list[LogEntry] = []
+        async for entry in source.events(store, stop):
+            collected.append(entry)
+            stop.set()  # stop as soon as ANYTHING is emitted
+        return collected
+
+    entries = await asyncio.wait_for(consume(), timeout=2.0)
+
+    # Prompt termination is the point of this test; some in-flight files may
+    # still have completed their current row before noticing `stop`, so we
+    # only assert it didn't hang and didn't yield everything from every type.
+    assert len(entries) < 4 * 2
