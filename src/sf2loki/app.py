@@ -72,6 +72,7 @@ def build_static_labels(
         **operator_labels,
     }
 
+
 # Fixed budget for closing resources (http/grpc clients) during shutdown — kept
 # short and separate from shutdown_grace (which bounds the pipeline drain) so
 # the two don't stack past k8s's terminationGracePeriodSeconds.

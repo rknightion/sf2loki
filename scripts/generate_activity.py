@@ -82,46 +82,159 @@ _JWT_LIFETIME = timedelta(seconds=180)
 # ---------------------------------------------------------------------------
 
 _FIRST_NAMES = [
-    "Olivia", "Liam", "Emma", "Noah", "Ava", "Ethan", "Sophia", "Mason",
-    "Isabella", "Lucas", "Mia", "Oliver", "Amelia", "Elijah", "Harper",
-    "James", "Evelyn", "Benjamin", "Abigail", "Henry", "Priya", "Aarav",
-    "Wei", "Fatima", "Diego", "Yuki", "Kwame", "Ingrid", "Mateo", "Aisha",
+    "Olivia",
+    "Liam",
+    "Emma",
+    "Noah",
+    "Ava",
+    "Ethan",
+    "Sophia",
+    "Mason",
+    "Isabella",
+    "Lucas",
+    "Mia",
+    "Oliver",
+    "Amelia",
+    "Elijah",
+    "Harper",
+    "James",
+    "Evelyn",
+    "Benjamin",
+    "Abigail",
+    "Henry",
+    "Priya",
+    "Aarav",
+    "Wei",
+    "Fatima",
+    "Diego",
+    "Yuki",
+    "Kwame",
+    "Ingrid",
+    "Mateo",
+    "Aisha",
 ]
 _LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez",
-    "Wilson", "Anderson", "Nguyen", "Patel", "Kim", "Okafor", "Rossi",
-    "Andersson", "Tanaka", "Muller", "Silva", "Haddad", "Novak", "Petrov",
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Hernandez",
+    "Lopez",
+    "Gonzalez",
+    "Wilson",
+    "Anderson",
+    "Nguyen",
+    "Patel",
+    "Kim",
+    "Okafor",
+    "Rossi",
+    "Andersson",
+    "Tanaka",
+    "Muller",
+    "Silva",
+    "Haddad",
+    "Novak",
+    "Petrov",
 ]
 _COMPANY_BASES = [
-    "Northwind", "Contoso", "Acme", "Globex", "Initech", "Umbra", "Vertex",
-    "Cascade", "Ironclad", "Meridian", "Kestrel", "Solstice", "Aurora",
-    "Redwood", "Sterling", "Beacon", "Cobalt", "Everest", "Harbor", "Lattice",
-    "Nimbus", "Pinnacle", "Quantum", "Riverstone", "Summit", "Tideline",
+    "Northwind",
+    "Contoso",
+    "Acme",
+    "Globex",
+    "Initech",
+    "Umbra",
+    "Vertex",
+    "Cascade",
+    "Ironclad",
+    "Meridian",
+    "Kestrel",
+    "Solstice",
+    "Aurora",
+    "Redwood",
+    "Sterling",
+    "Beacon",
+    "Cobalt",
+    "Everest",
+    "Harbor",
+    "Lattice",
+    "Nimbus",
+    "Pinnacle",
+    "Quantum",
+    "Riverstone",
+    "Summit",
+    "Tideline",
 ]
 _COMPANY_QUALIFIERS = [
-    "Analytics", "Logistics", "Systems", "Labs", "Digital", "Robotics",
-    "Biotech", "Capital", "Foods", "Energy", "Health", "Media", "Retail",
-    "Software", "Manufacturing", "Consulting", "Freight", "Networks",
+    "Analytics",
+    "Logistics",
+    "Systems",
+    "Labs",
+    "Digital",
+    "Robotics",
+    "Biotech",
+    "Capital",
+    "Foods",
+    "Energy",
+    "Health",
+    "Media",
+    "Retail",
+    "Software",
+    "Manufacturing",
+    "Consulting",
+    "Freight",
+    "Networks",
 ]
 _COMPANY_SUFFIXES = ["Inc", "LLC", "Corp", "Group", "Holdings", "Co", "Partners", "GmbH"]
 _INDUSTRIES = [
-    "Agriculture", "Banking", "Biotechnology", "Chemicals", "Communications",
-    "Construction", "Consulting", "Education", "Electronics", "Energy",
-    "Engineering", "Entertainment", "Finance", "Healthcare", "Hospitality",
-    "Insurance", "Manufacturing", "Media", "Retail", "Technology",
-    "Telecommunications", "Transportation", "Utilities",
+    "Agriculture",
+    "Banking",
+    "Biotechnology",
+    "Chemicals",
+    "Communications",
+    "Construction",
+    "Consulting",
+    "Education",
+    "Electronics",
+    "Energy",
+    "Engineering",
+    "Entertainment",
+    "Finance",
+    "Healthcare",
+    "Hospitality",
+    "Insurance",
+    "Manufacturing",
+    "Media",
+    "Retail",
+    "Technology",
+    "Telecommunications",
+    "Transportation",
+    "Utilities",
 ]
 _RATINGS = ["Hot", "Warm", "Cold"]
 _ACCOUNT_TYPES = [
-    "Prospect", "Customer - Direct", "Customer - Channel",
-    "Channel Partner / Reseller", "Technology Partner", "Other",
+    "Prospect",
+    "Customer - Direct",
+    "Customer - Channel",
+    "Channel Partner / Reseller",
+    "Technology Partner",
+    "Other",
 ]
 _LEAD_STATUSES = ["Open - Not Contacted", "Working - Contacted"]
 _LEAD_SOURCES = ["Web", "Phone Inquiry", "Partner Referral", "Purchased List", "Other"]
 _OPP_STAGES = [
-    "Prospecting", "Qualification", "Needs Analysis", "Value Proposition",
-    "Id. Decision Makers", "Proposal/Price Quote", "Negotiation/Review",
+    "Prospecting",
+    "Qualification",
+    "Needs Analysis",
+    "Value Proposition",
+    "Id. Decision Makers",
+    "Proposal/Price Quote",
+    "Negotiation/Review",
 ]
 _OPP_STAGE_ADVANCE = [*_OPP_STAGES, "Closed Won", "Closed Lost"]
 _CASE_STATUSES = ["New", "Working", "Escalated"]
@@ -132,35 +245,73 @@ _CASE_TYPES = ["Question", "Problem", "Feature Request"]
 # whether or not the org has State & Country picklists enabled. State is
 # deliberately omitted — its valid set is country-dependent and picklist-fussy.
 _CITIES = [
-    ("San Francisco", "United States"), ("Austin", "United States"),
-    ("New York", "United States"), ("London", "United Kingdom"),
-    ("Berlin", "Germany"), ("Toronto", "Canada"),
-    ("Sydney", "Australia"), ("Singapore", "Singapore"),
-    ("Dublin", "Ireland"), ("Bengaluru", "India"),
+    ("San Francisco", "United States"),
+    ("Austin", "United States"),
+    ("New York", "United States"),
+    ("London", "United Kingdom"),
+    ("Berlin", "Germany"),
+    ("Toronto", "Canada"),
+    ("Sydney", "Australia"),
+    ("Singapore", "Singapore"),
+    ("Dublin", "Ireland"),
+    ("Bengaluru", "India"),
 ]
 _TITLES = [
-    "VP Engineering", "Director of Operations", "Account Executive",
-    "Procurement Manager", "CTO", "Head of Marketing", "IT Administrator",
-    "Product Manager", "Finance Lead", "Customer Success Manager",
+    "VP Engineering",
+    "Director of Operations",
+    "Account Executive",
+    "Procurement Manager",
+    "CTO",
+    "Head of Marketing",
+    "IT Administrator",
+    "Product Manager",
+    "Finance Lead",
+    "Customer Success Manager",
 ]
 _TASK_SUBJECTS = [
-    "Follow up", "Send quote", "Schedule demo", "Call back", "Email proposal",
-    "Prepare contract", "Check in", "Renewal discussion", "Onboarding call",
+    "Follow up",
+    "Send quote",
+    "Schedule demo",
+    "Call back",
+    "Email proposal",
+    "Prepare contract",
+    "Check in",
+    "Renewal discussion",
+    "Onboarding call",
 ]
 _EVENT_SUBJECTS = [
-    "Discovery call", "Product demo", "Quarterly review", "Kickoff meeting",
-    "Contract review", "Solution workshop", "Executive briefing",
+    "Discovery call",
+    "Product demo",
+    "Quarterly review",
+    "Kickoff meeting",
+    "Contract review",
+    "Solution workshop",
+    "Executive briefing",
 ]
 _CAMPAIGN_NAMES = [
-    "Q3 Product Launch", "Summer Webinar Series", "Annual User Conference",
-    "Partner Enablement Push", "Renewal Outreach", "Cloud Migration Program",
-    "Year-End Promotion", "Analyst Briefing Tour", "Field Marketing Roadshow",
+    "Q3 Product Launch",
+    "Summer Webinar Series",
+    "Annual User Conference",
+    "Partner Enablement Push",
+    "Renewal Outreach",
+    "Cloud Migration Program",
+    "Year-End Promotion",
+    "Analyst Briefing Tour",
+    "Field Marketing Roadshow",
     "Customer Advocacy Program",
 ]
 # Values from the standard Campaign Type / Status picklists.
 _CAMPAIGN_TYPES = [
-    "Conference", "Webinar", "Trade Show", "Public Relations", "Partners",
-    "Referral Program", "Advertisement", "Email", "Telemarketing", "Other",
+    "Conference",
+    "Webinar",
+    "Trade Show",
+    "Public Relations",
+    "Partners",
+    "Referral Program",
+    "Advertisement",
+    "Email",
+    "Telemarketing",
+    "Other",
 ]
 _CAMPAIGN_STATUSES = ["Planned", "In Progress", "Completed"]
 # A handful of real, well-known companies for extra realism (dedup is handled by
@@ -211,8 +362,7 @@ _FALLBACK_COMPANIES = [
     for b, q in zip(_COMPANY_BASES[:12], _COMPANY_QUALIFIERS[:12], strict=False)
 ]
 _FALLBACK_PEOPLE = [
-    Person(f, ln, t)
-    for f, ln, t in zip(_FIRST_NAMES, _LAST_NAMES, _TITLES * 3, strict=False)
+    Person(f, ln, t) for f, ln, t in zip(_FIRST_NAMES, _LAST_NAMES, _TITLES * 3, strict=False)
 ]
 
 
@@ -242,8 +392,7 @@ def real_companies() -> list[Company]:
     """A few real, well-known companies mixed in for realism (dedup handled by
     random suffixes + the duplicate-rule override)."""
     return [
-        Company(n, i, w, f"{n} - industry leader in {i.lower()}")
-        for n, i, w in _REAL_COMPANIES
+        Company(n, i, w, f"{n} - industry leader in {i.lower()}") for n, i, w in _REAL_COMPANIES
     ]
 
 
@@ -412,7 +561,9 @@ class Salesforce:
         # allowSave=true overrides Salesforce duplicate-alert rules so the
         # finite name pool never hard-fails a create as a "duplicate".
         resp = await self._request(
-            "POST", f"{self._base}/sobjects/{sobject}", json=fields,
+            "POST",
+            f"{self._base}/sobjects/{sobject}",
+            json=fields,
             headers={"Sforce-Duplicate-Rule-Header": "allowSave=true"},
         )
         if resp.status_code == 201:
@@ -433,9 +584,7 @@ class Salesforce:
         return False
 
     async def query(self, soql: str) -> dict:
-        resp = await self._request(
-            "GET", f"{self._base}/query", params={"q": soql}
-        )
+        resp = await self._request("GET", f"{self._base}/query", params={"q": soql})
         resp.raise_for_status()
         return resp.json()
 
@@ -452,7 +601,8 @@ class Salesforce:
 
     async def run_report(self, report_id: str) -> None:
         resp = await self._request(
-            "GET", f"{self._base}/analytics/reports/{report_id}",
+            "GET",
+            f"{self._base}/analytics/reports/{report_id}",
             params={"includeDetails": "false"},
         )
         if not resp.is_success:
@@ -460,7 +610,8 @@ class Salesforce:
 
     async def run_apex(self, body: str) -> None:
         resp = await self._request(
-            "GET", f"{self._base}/tooling/executeAnonymous/",
+            "GET",
+            f"{self._base}/tooling/executeAnonymous/",
             params={"anonymousBody": body},
         )
         if not resp.is_success:
@@ -468,7 +619,8 @@ class Salesforce:
 
     async def bulk_insert(self, sobject: str, csv_body: str) -> None:
         create = await self._request(
-            "POST", f"{self._base}/jobs/ingest",
+            "POST",
+            f"{self._base}/jobs/ingest",
             json={
                 "object": sobject,
                 "operation": "insert",
@@ -481,14 +633,17 @@ class Salesforce:
             return
         job_id = create.json()["id"]
         put = await self._request(
-            "PUT", f"{self._base}/jobs/ingest/{job_id}/batches",
-            content=csv_body, headers={"Content-Type": "text/csv"},
+            "PUT",
+            f"{self._base}/jobs/ingest/{job_id}/batches",
+            content=csv_body,
+            headers={"Content-Type": "text/csv"},
         )
         if put.status_code not in (200, 201):
             log.debug("bulk upload failed HTTP %d", put.status_code)
             return
         await self._request(
-            "PATCH", f"{self._base}/jobs/ingest/{job_id}",
+            "PATCH",
+            f"{self._base}/jobs/ingest/{job_id}",
             json={"state": "UploadComplete"},
         )
 
@@ -541,9 +696,7 @@ class Salesforce:
             log.debug("file download failed HTTP %d", resp.status_code)
 
     async def run_report_async(self, report_id: str) -> None:
-        resp = await self._request(
-            "POST", f"{self._base}/analytics/reports/{report_id}/instances"
-        )
+        resp = await self._request("POST", f"{self._base}/analytics/reports/{report_id}/instances")
         if not resp.is_success:
             log.debug("async report %s failed HTTP %d", report_id, resp.status_code)
 
@@ -566,7 +719,8 @@ class Salesforce:
         for i in range(0, len(ids), 200):
             chunk = ids[i : i + 200]
             resp = await self._request(
-                "DELETE", f"{self._base}/composite/sobjects",
+                "DELETE",
+                f"{self._base}/composite/sobjects",
                 params={"ids": ",".join(chunk), "allOrNone": "false"},
             )
             if resp.is_success:
@@ -583,8 +737,15 @@ class Salesforce:
 # Object types that carry the Description marker, deleted in this order so
 # referencing/child records go before the parents they point at (Account last).
 CLEANUP_OBJECTS = [
-    "Contract", "Task", "Event", "Case", "Campaign",
-    "Opportunity", "Contact", "Lead", "Account",
+    "Contract",
+    "Task",
+    "Event",
+    "Case",
+    "Campaign",
+    "Opportunity",
+    "Contact",
+    "Lead",
+    "Account",
 ]
 
 
@@ -709,8 +870,15 @@ class ActivityEngine:
         account_id = await self._ensure_account()
         fields = {
             "Subject": random.choice(
-                ["Login issue", "Billing question", "Feature request", "Integration error",
-                 "Performance degradation", "Data import help", "Access request"]
+                [
+                    "Login issue",
+                    "Billing question",
+                    "Feature request",
+                    "Integration error",
+                    "Performance degradation",
+                    "Data import help",
+                    "Access request",
+                ]
             ),
             "Status": random.choice(_CASE_STATUSES),
             "Origin": random.choice(_CASE_ORIGINS),
@@ -881,8 +1049,10 @@ class ActivityEngine:
     async def act_composite(self) -> None:
         ver = f"v{self.sf.api_version}"
         subrequests = [
-            {"method": "GET",
-             "url": f"{ver}/query?q={urllib.parse.quote('SELECT Id, Name FROM Account LIMIT 5')}"},
+            {
+                "method": "GET",
+                "url": f"{ver}/query?q={urllib.parse.quote('SELECT Id, Name FROM Account LIMIT 5')}",
+            },
             {"method": "GET", "url": f"{ver}/sobjects/Contact/describe"},
             {"method": "GET", "url": f"{ver}/limits"},
         ]
@@ -895,8 +1065,7 @@ class ActivityEngine:
             f"line {i}: {random.randint(0, 9999)}" for i in range(random.randint(3, 20))
         )
         body = (
-            f"{MARKER} synthetic file {stamp}\n"
-            f"Generated for observability testing.\n{lines}"
+            f"{MARKER} synthetic file {stamp}\nGenerated for observability testing.\n{lines}"
         ).encode()
         cvid = await self.sf.upload_file(
             title=f"sf2loki note {stamp}",
@@ -1043,9 +1212,9 @@ async def cleanup(sf: Salesforce) -> None:
     # Files: the marker lives on ContentVersion; delete the parent ContentDocument
     # (which removes all its versions) via the de-duplicated document ids.
     try:
-        doc_ids = list(dict.fromkeys(
-            await _collect_marker_ids(sf, "ContentVersion", "ContentDocumentId")
-        ))
+        doc_ids = list(
+            dict.fromkeys(await _collect_marker_ids(sf, "ContentVersion", "ContentDocumentId"))
+        )
     except httpx.HTTPStatusError as exc:
         log.warning("cleanup query files failed: %s", exc)
         doc_ids = []
@@ -1085,14 +1254,14 @@ async def run(args: argparse.Namespace) -> None:
                 loop.add_signal_handler(sig, _handle_signal)
 
         interval = 60.0 / max(args.ops_per_min, 1)
-        deadline = (
-            loop.time() + args.duration if args.duration > 0 else None
-        )
+        deadline = loop.time() + args.duration if args.duration > 0 else None
         last_login = loop.time()
         ticks = 0
         log.info(
             "generating activity: ~%d ops/min (every ~%.1fs), relogin every %ds%s",
-            args.ops_per_min, interval, args.relogin_every,
+            args.ops_per_min,
+            interval,
+            args.relogin_every,
             f", for {args.duration}s" if args.duration else " (Ctrl-C to stop)",
         )
 
@@ -1136,11 +1305,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--duration", type=int, default=0, help="run for N seconds then stop (0 = until Ctrl-C)"
     )
     p.add_argument(
-        "--relogin-every", type=int, default=420,
+        "--relogin-every",
+        type=int,
+        default=420,
         help="re-authenticate every N seconds (Login events)",
     )
     p.add_argument(
-        "--api-version", default=os.environ.get("SF_API_VERSION", "60.0"),
+        "--api-version",
+        default=os.environ.get("SF_API_VERSION", "60.0"),
         help="Salesforce API version",
     )
     p.add_argument(

@@ -28,7 +28,7 @@ def _as_int(value: object) -> int:
         return 0
     try:
         return int(float(value))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 

@@ -26,6 +26,7 @@ panel()/q() builder helpers, hand-assembled grid layout, committed output.
 Run:  python3 deploy/grafana/gen_dashboard.py
 Emits: deploy/grafana/sf2loki-dashboard.json
 """
+
 from __future__ import annotations
 
 import json
@@ -47,7 +48,13 @@ def nid() -> int:
     return _id[0]
 
 
-def target(expr: str, ref: str = "A", legend: str | None = None, fmt: str = "time_series", instant: bool = False) -> dict:
+def target(
+    expr: str,
+    ref: str = "A",
+    legend: str | None = None,
+    fmt: str = "time_series",
+    instant: bool = False,
+) -> dict:
     """One Prometheus query target."""
     t = {
         "datasource": DS,
@@ -179,39 +186,82 @@ y = 0
 panels.append(row("Salesforce ingestion", y))
 y += 1
 
-panels.append(panel(
-    "Events ingested rate by event type", "timeseries",
-    [target(f'sum by (event_type) (rate(sf2loki_events_ingested_total{JOB}[5m]))', legend="{{event_type}}")],
-    x=0, y=y, w=12, h=8, unit="ops",
-    desc="Real-time Pub/Sub event ingestion rate, split by Salesforce event monitoring event_type "
-         "(e.g. ApiEvent, LoginEvent, ReportEvent). The headline ingestion-volume signal, showing "
-         "event volume by type.",
-))
-panels.append(panel(
-    "Events ingested rate by source", "timeseries",
-    [target(f'sum by (source) (rate(sf2loki_events_ingested_total{JOB}[5m]))', legend="{{source}}")],
-    x=12, y=y, w=12, h=8, unit="ops",
-    desc="Same ingestion rate, split by source connector (e.g. pubsub real-time stream vs eventlogfile "
-         "batch poller) — shows which ingestion path is contributing volume.",
-))
+panels.append(
+    panel(
+        "Events ingested rate by event type",
+        "timeseries",
+        [
+            target(
+                f"sum by (event_type) (rate(sf2loki_events_ingested_total{JOB}[5m]))",
+                legend="{{event_type}}",
+            )
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Real-time Pub/Sub event ingestion rate, split by Salesforce event monitoring event_type "
+        "(e.g. ApiEvent, LoginEvent, ReportEvent). The headline ingestion-volume signal, showing "
+        "event volume by type.",
+    )
+)
+panels.append(
+    panel(
+        "Events ingested rate by source",
+        "timeseries",
+        [
+            target(
+                f"sum by (source) (rate(sf2loki_events_ingested_total{JOB}[5m]))",
+                legend="{{source}}",
+            )
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Same ingestion rate, split by source connector (e.g. pubsub real-time stream vs eventlogfile "
+        "batch poller) — shows which ingestion path is contributing volume.",
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Ingest lag (SLI) by event type", "timeseries",
-    [target(f'max by (event_type) (sf2loki_ingest_lag_seconds{JOB})', legend="{{event_type}}")],
-    x=0, y=y, w=12, h=8, unit="s",
-    desc="Difference between ingest time and the event's Salesforce EventDate, per event_type — the "
-         "primary SLI for pipeline freshness. Sustained growth means the connector is falling behind "
-         "the Salesforce event stream.",
-    thresholds=thr([(None, "green"), (60, "yellow"), (300, "red")]),
-))
-panels.append(panel(
-    "ELF rows ingested rate", "timeseries",
-    [target(f'sum by (event_type) (rate(sf2loki_eventlogfile_rows_ingested_total{JOB}[5m]))', legend="{{event_type}}")],
-    x=12, y=y, w=12, h=8, unit="ops",
-    desc="EventLogFile (batch hourly/daily CSV export) ingestion rate, by event_type. Complements the "
-         "real-time Pub/Sub row above for event types only available via ELF.",
-))
+panels.append(
+    panel(
+        "Ingest lag (SLI) by event type",
+        "timeseries",
+        [target(f"max by (event_type) (sf2loki_ingest_lag_seconds{JOB})", legend="{{event_type}}")],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="s",
+        desc="Difference between ingest time and the event's Salesforce EventDate, per event_type — the "
+        "primary SLI for pipeline freshness. Sustained growth means the connector is falling behind "
+        "the Salesforce event stream.",
+        thresholds=thr([(None, "green"), (60, "yellow"), (300, "red")]),
+    )
+)
+panels.append(
+    panel(
+        "ELF rows ingested rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (event_type) (rate(sf2loki_eventlogfile_rows_ingested_total{JOB}[5m]))",
+                legend="{{event_type}}",
+            )
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="EventLogFile (batch hourly/daily CSV export) ingestion rate, by event_type. Complements the "
+        "real-time Pub/Sub row above for event types only available via ELF.",
+    )
+)
 y += 8
 
 
@@ -221,39 +271,72 @@ y += 8
 panels.append(row("Salesforce org limits (fed by the org-limits poller)", y))
 y += 1
 
-panels.append(panel(
-    "API usage % used by limit", "bargauge",
-    [target(
-        f'100 * (1 - sf2loki_salesforce_limit_remaining{JOB} / sf2loki_salesforce_limit_max{JOB})',
-        legend="{{limit_name}}", instant=True,
-    )],
-    x=0, y=y, w=12, h=8, unit="percent",
-    desc="Percentage of each Salesforce org limit consumed (e.g. DailyApiRequests, "
-         "DailyBulkApiBatches, EventLogFileSize). Sourced from the periodic org-limits poller — "
-         "NOT the real-time event stream, so it updates on the poller's own interval, not per-event.",
-    thresholds=GREEN_YELLOW_RED,
-    options_extra={"orientation": "horizontal", "displayMode": "gradient"},
-))
-panels.append(panel(
-    "Remaining vs max for key limits", "timeseries",
-    [
-        target(f'sf2loki_salesforce_limit_remaining{JOB}', ref="A", legend="remaining · {{limit_name}}"),
-        target(f'sf2loki_salesforce_limit_max{JOB}', ref="B", legend="max · {{limit_name}}"),
-    ],
-    x=12, y=y, w=12, h=8, unit="short",
-    desc="Raw remaining and max values per Salesforce org limit, from the org-limits poller. Use "
-         "alongside the % used panel to see absolute headroom, not just the ratio.",
-))
+panels.append(
+    panel(
+        "API usage % used by limit",
+        "bargauge",
+        [
+            target(
+                f"100 * (1 - sf2loki_salesforce_limit_remaining{JOB} / sf2loki_salesforce_limit_max{JOB})",
+                legend="{{limit_name}}",
+                instant=True,
+            )
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="percent",
+        desc="Percentage of each Salesforce org limit consumed (e.g. DailyApiRequests, "
+        "DailyBulkApiBatches, EventLogFileSize). Sourced from the periodic org-limits poller — "
+        "NOT the real-time event stream, so it updates on the poller's own interval, not per-event.",
+        thresholds=GREEN_YELLOW_RED,
+        options_extra={"orientation": "horizontal", "displayMode": "gradient"},
+    )
+)
+panels.append(
+    panel(
+        "Remaining vs max for key limits",
+        "timeseries",
+        [
+            target(
+                f"sf2loki_salesforce_limit_remaining{JOB}",
+                ref="A",
+                legend="remaining · {{limit_name}}",
+            ),
+            target(f"sf2loki_salesforce_limit_max{JOB}", ref="B", legend="max · {{limit_name}}"),
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="short",
+        desc="Raw remaining and max values per Salesforce org limit, from the org-limits poller. Use "
+        "alongside the % used panel to see absolute headroom, not just the ratio.",
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Limits poll errors", "timeseries",
-    [target(f'rate(sf2loki_salesforce_limits_poll_errors_total{JOB}[5m])', legend="poll errors/s")],
-    x=0, y=y, w=24, h=6, unit="ops",
-    desc="Error rate of the org-limits poller itself (e.g. Salesforce REST /limits API call failing). "
-         "Healthy = 0; non-zero means the org-limits panels above are stale or won't update.",
-    thresholds=thr([(None, "green"), (0.001, "red")]),
-))
+panels.append(
+    panel(
+        "Limits poll errors",
+        "timeseries",
+        [
+            target(
+                f"rate(sf2loki_salesforce_limits_poll_errors_total{JOB}[5m])",
+                legend="poll errors/s",
+            )
+        ],
+        x=0,
+        y=y,
+        w=24,
+        h=6,
+        unit="ops",
+        desc="Error rate of the org-limits poller itself (e.g. Salesforce REST /limits API call failing). "
+        "Healthy = 0; non-zero means the org-limits panels above are stale or won't update.",
+        thresholds=thr([(None, "green"), (0.001, "red")]),
+    )
+)
 y += 6
 
 
@@ -263,47 +346,105 @@ y += 6
 panels.append(row("Loki sink", y))
 y += 1
 
-panels.append(panel(
-    "Push outcomes rate by outcome", "timeseries",
-    [target(f'sum by (outcome) (rate(sf2loki_loki_push_total{JOB}[5m]))', legend="{{outcome}}")],
-    x=0, y=y, w=12, h=8, unit="ops",
-    desc="Loki push attempts/s by outcome (success / retried / dropped). The RED rate signal for the "
-         "Loki sink — any sustained dropped or retried volume means data is being lost or delayed "
-         "on the way to Loki.",
-    stacking="normal",
-    overrides=[
-        {"matcher": {"id": "byName", "options": "success"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
-        {"matcher": {"id": "byName", "options": "retried"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
-        {"matcher": {"id": "byName", "options": "dropped"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
-    ],
-))
-panels.append(panel(
-    "Push duration p50/p95/p99", "timeseries",
-    [
-        target(f'histogram_quantile(0.50, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))', ref="A", legend="p50"),
-        target(f'histogram_quantile(0.95, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))', ref="B", legend="p95"),
-        target(f'histogram_quantile(0.99, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))', ref="C", legend="p99"),
-    ],
-    x=12, y=y, w=12, h=8, unit="s",
-    desc="Loki push request latency quantiles. Rising p95/p99 with stable push rate indicates Loki-side "
-         "or network slowness rather than a sf2loki-side problem.",
-))
+panels.append(
+    panel(
+        "Push outcomes rate by outcome",
+        "timeseries",
+        [
+            target(
+                f"sum by (outcome) (rate(sf2loki_loki_push_total{JOB}[5m]))", legend="{{outcome}}"
+            )
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Loki push attempts/s by outcome (success / retried / dropped). The RED rate signal for the "
+        "Loki sink — any sustained dropped or retried volume means data is being lost or delayed "
+        "on the way to Loki.",
+        stacking="normal",
+        overrides=[
+            {
+                "matcher": {"id": "byName", "options": "success"},
+                "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}],
+            },
+            {
+                "matcher": {"id": "byName", "options": "retried"},
+                "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}],
+            },
+            {
+                "matcher": {"id": "byName", "options": "dropped"},
+                "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}],
+            },
+        ],
+    )
+)
+panels.append(
+    panel(
+        "Push duration p50/p95/p99",
+        "timeseries",
+        [
+            target(
+                f"histogram_quantile(0.50, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))",
+                ref="A",
+                legend="p50",
+            ),
+            target(
+                f"histogram_quantile(0.95, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))",
+                ref="B",
+                legend="p95",
+            ),
+            target(
+                f"histogram_quantile(0.99, sum by (le) (rate(sf2loki_loki_push_duration_seconds_bucket{JOB}[5m])))",
+                ref="C",
+                legend="p99",
+            ),
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="s",
+        desc="Loki push request latency quantiles. Rising p95/p99 with stable push rate indicates Loki-side "
+        "or network slowness rather than a sf2loki-side problem.",
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Bytes pushed rate", "timeseries",
-    [target(f'rate(sf2loki_loki_bytes_pushed_total{JOB}[5m])', legend="bytes/s")],
-    x=0, y=y, w=12, h=8, unit="Bps",
-    desc="Wire bytes/s pushed to Loki. Tracks overall ingest payload volume shipped downstream.",
-))
-panels.append(panel(
-    "Lines truncated rate", "timeseries",
-    [target(f'sum by (source) (rate(sf2loki_lines_truncated_total{JOB}[5m]))', legend="{{source}}")],
-    x=12, y=y, w=12, h=8, unit="ops",
-    desc="Rate of log lines truncated to the configured max_line_bytes before push, by source. "
-         "Non-zero means some event payloads are being clipped — a data-fidelity signal, not data loss.",
-    thresholds=thr([(None, "green"), (0.001, "yellow")]),
-))
+panels.append(
+    panel(
+        "Bytes pushed rate",
+        "timeseries",
+        [target(f"rate(sf2loki_loki_bytes_pushed_total{JOB}[5m])", legend="bytes/s")],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="Bps",
+        desc="Wire bytes/s pushed to Loki. Tracks overall ingest payload volume shipped downstream.",
+    )
+)
+panels.append(
+    panel(
+        "Lines truncated rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (source) (rate(sf2loki_lines_truncated_total{JOB}[5m]))",
+                legend="{{source}}",
+            )
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Rate of log lines truncated to the configured max_line_bytes before push, by source. "
+        "Non-zero means some event payloads are being clipped — a data-fidelity signal, not data loss.",
+        thresholds=thr([(None, "green"), (0.001, "yellow")]),
+    )
+)
 y += 8
 
 
@@ -313,76 +454,145 @@ y += 8
 panels.append(row("Connector health", y))
 y += 1
 
-panels.append(panel(
-    "Auth refreshes & errors rate", "timeseries",
-    [
-        target(f'rate(sf2loki_auth_refreshes_total{JOB}[5m])', ref="A", legend="refreshes/s"),
-        target(f'rate(sf2loki_auth_errors_total{JOB}[5m])', ref="B", legend="errors/s"),
-    ],
-    x=0, y=y, w=12, h=8, unit="ops",
-    desc="Salesforce OAuth token refresh rate vs auth error rate. Refreshes-with-no-errors is healthy "
-         "steady state; any sustained error rate means credentials/connected-app config need attention.",
-    overrides=[
-        {"matcher": {"id": "byName", "options": "errors/s"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
-    ],
-))
-panels.append(panel(
-    "Internal queue depth", "timeseries",
-    [target(f'sf2loki_queue_depth{JOB}', legend="queue depth")],
-    x=12, y=y, w=12, h=8, unit="short",
-    desc="Depth of the internal in-process event queue between ingestion and the Loki sink. Healthy "
-         "≈ 0; sustained growth means the sink can't keep up with ingestion (backpressure risk).",
-    thresholds=thr([(None, "green"), (100, "yellow"), (1000, "red")]),
-))
+panels.append(
+    panel(
+        "Auth refreshes & errors rate",
+        "timeseries",
+        [
+            target(f"rate(sf2loki_auth_refreshes_total{JOB}[5m])", ref="A", legend="refreshes/s"),
+            target(f"rate(sf2loki_auth_errors_total{JOB}[5m])", ref="B", legend="errors/s"),
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Salesforce OAuth token refresh rate vs auth error rate. Refreshes-with-no-errors is healthy "
+        "steady state; any sustained error rate means credentials/connected-app config need attention.",
+        overrides=[
+            {
+                "matcher": {"id": "byName", "options": "errors/s"},
+                "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}],
+            },
+        ],
+    )
+)
+panels.append(
+    panel(
+        "Internal queue depth",
+        "timeseries",
+        [target(f"sf2loki_queue_depth{JOB}", legend="queue depth")],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="short",
+        desc="Depth of the internal in-process event queue between ingestion and the Loki sink. Healthy "
+        "≈ 0; sustained growth means the sink can't keep up with ingestion (backpressure risk).",
+        thresholds=thr([(None, "green"), (100, "yellow"), (1000, "red")]),
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Pub/Sub pending credits by topic", "timeseries",
-    [target(f'sf2loki_pubsub_pending_credits{JOB}', legend="{{topic}}")],
-    x=0, y=y, w=12, h=8, unit="short",
-    desc="Outstanding flow-control credits owed to Salesforce Pub/Sub per topic. A persistently high "
-         "or climbing value means the consumer is not keeping pace with the credit window.",
-))
-panels.append(panel(
-    "Pub/Sub reconnects rate", "timeseries",
-    [target(f'sum by (topic) (rate(sf2loki_pubsub_reconnects_total{JOB}[5m]))', legend="{{topic}}")],
-    x=12, y=y, w=12, h=8, unit="ops",
-    desc="Pub/Sub gRPC stream reconnect rate per topic. Occasional reconnects are normal (stream "
-         "lifetime limits); a sustained high rate indicates network instability or server-side issues.",
-))
+panels.append(
+    panel(
+        "Pub/Sub pending credits by topic",
+        "timeseries",
+        [target(f"sf2loki_pubsub_pending_credits{JOB}", legend="{{topic}}")],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="short",
+        desc="Outstanding flow-control credits owed to Salesforce Pub/Sub per topic. A persistently high "
+        "or climbing value means the consumer is not keeping pace with the credit window.",
+    )
+)
+panels.append(
+    panel(
+        "Pub/Sub reconnects rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (topic) (rate(sf2loki_pubsub_reconnects_total{JOB}[5m]))",
+                legend="{{topic}}",
+            )
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Pub/Sub gRPC stream reconnect rate per topic. Occasional reconnects are normal (stream "
+        "lifetime limits); a sustained high rate indicates network instability or server-side issues.",
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Decode errors rate", "timeseries",
-    [target(f'sum by (reason) (rate(sf2loki_decode_errors_total{JOB}[5m]))', legend="{{reason}}")],
-    x=0, y=y, w=12, h=8, unit="ops",
-    desc="Avro/payload decode error rate by reason. Healthy = 0; non-zero means events are being "
-         "dropped before they ever reach Loki — a silent-data-loss signal worth alerting on.",
-    thresholds=thr([(None, "green"), (0.001, "red")]),
-))
-panels.append(panel(
-    "Replay/watermark age", "stat",
-    [
-        target(f'time() - sf2loki_last_replay_commit_timestamp_seconds{JOB}', ref="A", legend="replay commit age · {{topic}}"),
-        target(f'time() - sf2loki_watermark_timestamp_seconds{JOB}', ref="B", legend="watermark age · {{source}}/{{object}}"),
-    ],
-    x=12, y=y, w=12, h=8, unit="s",
-    desc="Age (now minus last committed checkpoint) of the Pub/Sub replay_id commit and the "
-         "EventLogFile polling watermark. A climbing age means that checkpoint isn't advancing — "
-         "the connector may be stuck, even if the queue/ingestion panels still look fine.",
-    legend_calcs=["lastNotNull", "max"],
-    thresholds=thr([(None, "green"), (300, "yellow"), (900, "red")]),
-))
+panels.append(
+    panel(
+        "Decode errors rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (reason) (rate(sf2loki_decode_errors_total{JOB}[5m]))", legend="{{reason}}"
+            )
+        ],
+        x=0,
+        y=y,
+        w=12,
+        h=8,
+        unit="ops",
+        desc="Avro/payload decode error rate by reason. Healthy = 0; non-zero means events are being "
+        "dropped before they ever reach Loki — a silent-data-loss signal worth alerting on.",
+        thresholds=thr([(None, "green"), (0.001, "red")]),
+    )
+)
+panels.append(
+    panel(
+        "Replay/watermark age",
+        "stat",
+        [
+            target(
+                f"time() - sf2loki_last_replay_commit_timestamp_seconds{JOB}",
+                ref="A",
+                legend="replay commit age · {{topic}}",
+            ),
+            target(
+                f"time() - sf2loki_watermark_timestamp_seconds{JOB}",
+                ref="B",
+                legend="watermark age · {{source}}/{{object}}",
+            ),
+        ],
+        x=12,
+        y=y,
+        w=12,
+        h=8,
+        unit="s",
+        desc="Age (now minus last committed checkpoint) of the Pub/Sub replay_id commit and the "
+        "EventLogFile polling watermark. A climbing age means that checkpoint isn't advancing — "
+        "the connector may be stuck, even if the queue/ingestion panels still look fine.",
+        legend_calcs=["lastNotNull", "max"],
+        thresholds=thr([(None, "green"), (300, "yellow"), (900, "red")]),
+    )
+)
 y += 8
 
-panels.append(panel(
-    "Build info", "table",
-    [target(f'sf2loki_build_info{JOB}', instant=True, fmt="table")],
-    x=0, y=y, w=24, h=5, unit="short",
-    desc="Connector build/version metadata per running instance (sf2loki_build_info, value always 1). "
-         "Use to confirm which version is deployed and that all instances agree.",
-    options_extra={"showHeader": True, "cellHeight": "sm"},
-))
+panels.append(
+    panel(
+        "Build info",
+        "table",
+        [target(f"sf2loki_build_info{JOB}", instant=True, fmt="table")],
+        x=0,
+        y=y,
+        w=24,
+        h=5,
+        unit="short",
+        desc="Connector build/version metadata per running instance (sf2loki_build_info, value always 1). "
+        "Use to confirm which version is deployed and that all instances agree.",
+        options_extra={"showHeader": True, "cellHeight": "sm"},
+    )
+)
 y += 5
 
 
