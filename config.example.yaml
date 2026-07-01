@@ -6,161 +6,135 @@
 # files); a missing/unreadable secret file is fatal at startup too (no silent
 # blanks, in either case).
 
-salesforce:
-  environment: production                       # production | sandbox — derives login_url; an explicit login_url below overrides it
-  login_url: https://login.salesforce.com      # optional: derived from environment when omitted; set to a custom My Domain to override
-  auth_mode: jwt_bearer                          # jwt_bearer (private key + cert) | client_credentials (consumer key + secret)
-  client_id: ${SF_CLIENT_ID}                    # External Client App consumer key
-  # client_secret_file: /etc/sf2loki/secrets/client-secret  # required when auth_mode: client_credentials
-  username: svc@example.com                      # integration user (pre-authorised on the app's Policies tab)
-                                                 # not needed when auth_mode: client_credentials
-  private_key_file: /etc/sf2loki/secrets/server.key
-                                                 # not needed when auth_mode: client_credentials
-  api_version: "60.0"
-  org_id: null                                   # set this to keep the app on the `api` scope alone;
-                                                 # left null it is auto-resolved via /services/oauth2/userinfo
-                                                 # (which then needs the `openid` scope)
-  limits:
-    enabled: false   # poll /services/data/vXX.0/limits → org-limit gauges (API usage, storage, streaming events, ...)
-    poll_interval: 5m
-
-sources:
-  # Either/or per event category: by default ingest each category (Login, API,
-  # Report, ...) from exactly ONE source. Streaming /event/LoginEventStream AND
-  # polling LoginEvent AND pulling the "Login" EventLogFile are the SAME activity
-  # via different channels. A fail-fast guard refuses to start on an EXPLICIT
-  # overlap, and the ELF "*" wildcard auto-excludes categories a stream/object
-  # source already owns. Set allow_overlap: true to ingest a category via MULTIPLE
-  # sources on purpose — e.g. the real-time-but-lean stream AND the slower-but-
-  # richer EventLogFile rows for the same category (they are NOT byte-identical,
-  # so both flow — build dashboards on whichever fits).
-  allow_overlap: false
-  pubsub:
-    enabled: true
-    endpoint: api.pubsub.salesforce.com:7443
-    default_num_requested: 100                   # flow-control batch size
-    replay_preset: CUSTOM                         # falls back to LATEST when no stored replay_id
-    topics:
-      # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the
-      # org exposes (the *EventStream channels), re-filtered by include/exclude.
-      #   topics: ["*"]
-      - /event/LoginEventStream
-      - /event/ApiAnomalyEvent
-    include: ["/event/*"]                          # operator inclusion/exclusion globs
-    exclude: []
-  eventlog_objects:
-    # Poll stored event objects via SOQL. Use for categories you'd rather poll
-    # than stream (or that have no stream). Do NOT also stream the same category.
-    enabled: false
-    objects:
-      # durations accept shorthand (5m, 1h30m), ISO-8601 (PT5M), or plain seconds
-      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
-  eventlogfile:
-    # EventLogFile (CSV) ingestion. Salesforce exposes 63 EventType values (query
-    # SELECT EventType FROM EventLogFile, or the EventType picklist, to see which
-    # your org actually produces); schema is read per-file. This is the workhorse
-    # for breadth — most activity only surfaces here, not as a streaming event.
-    enabled: false
-    interval: Daily                               # Daily (settled, ~1d lag) | Hourly (fresher, needs the
-                                                  # Event Monitoring hourly opt-in in Setup) — pick ONE.
-                                                  # Many orgs generate ONLY Daily files; check before Hourly.
-    event_types:                                  # ELF EventTypes to ingest (required when enabled).
-      # Use "*" to DISCOVER and ingest every EventType the org produces for this
-      # interval (re-checked each poll, so newly-enabled types appear with no
-      # restart) — then use `exclude:` below to drop categories owned by another
-      # source or high-volume types you don't want:
-      #   event_types: ["*"]
-      #   exclude: [Login, ApexCallout]
-      # Or list types explicitly, as below. NOTE: "Login" is intentionally NOT here
-      # — it's covered by /event/LoginEventStream above, and listing it in both
-      # trips the overlap guard (with "*", exclude it instead). Each item is a bare
-      # string (uses the global structured_metadata_fields, promotes no labels) OR a
-      # per-type object (below). Explicit entries always win over discovered ones.
-      - API                                       # REST/SOAP/Bulk API calls, SOQL
-      - RestApi
-      - BulkApi
-      - BulkApi2
-      - Search                                    # SOSL searches
-      - ApexExecution                             # anonymous + triggered Apex
-      - MetadataApiOperation                      # describe / metadata calls
-      - ContentTransfer                           # file up/downloads
-      - ContentDistribution
-      - Dashboard                                 # dashboard reads
-      - Report                                    # report runs
-      - AsyncReportRun
-      - Logout
-      - DatabaseSave                              # row-level DML volume
-      - ApiTotalUsage
-      # UI-only types — only populate from real browser sessions (not the API):
-      - URI
-      - VisualforceRequest
-      - LightningPageView
-      - LightningInteraction
-      # Per-type object: override structured metadata and/or promote columns to
-      # stream labels for just this type. structured_metadata_fields overrides
-      # the global list (omit to inherit it; [] to suppress it). labels MUST be
-      # LOW cardinality — each distinct value is a new Loki stream.
-      - name: ReportExport
-        structured_metadata_fields: [REPORT_ID, OWNER_ID]
-        labels: [DELEGATED_USER]
-    poll_interval: 1h                             # how often to list new files (Daily files land ~once/day)
-    lookback: 72h                                 # initial window on first run (no checkpoint); reach back
-                                                  # far enough to catch the last few settled Daily files
-    timestamp_column: TIMESTAMP_DERIVED           # per-row event time column
-    page_size: 1000                              # SOQL LIMIT for the file-listing query
-    settle_window: 0s                             # skip files created within this grace window (avoids
-                                                  # half-written Hourly CSVs); 0 = off. Use a few min for Hourly.
-    download_max_age: 96h                          # abandon a file whose body keeps 404ing once older than
-                                                  # this, so a permanently-missing file can't wedge the checkpoint
-
-sink:
-  type: loki
-  loki:
-    # Grafana Cloud:   https://logs-prod-xx.grafana.net/loki/api/v1/push  (+ tenant_id + auth_token)
-    # Self-hosted:     http://loki:3100/loki/api/v1/push                  (+ tenant_id -> X-Scope-OrgID)
-    # Local Alloy:     http://alloy:3100/loki/api/v1/push                 (no auth)
-    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
-    tenant_id: "123456"
-    auth_token_file: /etc/sf2loki/secrets/loki-token
-    encoding: protobuf                            # protobuf (default) | json
-    compression: snappy                           # snappy (protobuf) | gzip (json) | none
-    batch:
-      max_entries: 1000
-      max_bytes: 1048576
-      flush_interval: 1s
-      max_line_bytes: 262144                      # per-line UTF-8 cap; oversized lines are
-                                                  # truncated (with a marker) before push so one
-                                                  # fat row can't 400 its batch. 0 disables.
-                                                  # Mirror your Loki server's max_line_size.
-    labels:
-      environment: prod                           # job + sf_org_id are added automatically
-    structured_metadata_fields:
-      - replay_id
-      - schema_id
-      - event_uuid
-      - user_id
-      - username
-      - source_ip
-      - session_key
-
-state:
-  store: file                                     # local JSON file (the only backend)
-  file:
-    path: /var/lib/sf2loki/state.json             # persist on a mounted volume for durable resume
-
-service:
-  log_level: info
-  log_format: json
-  health_addr: ":8080"
-  shutdown_grace: 25s
-  telemetry:
-    enabled: false                         # push all metrics via OTLP/HTTP
-    endpoint: ""                           # e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics  (Grafana Cloud) or http://alloy:4318/v1/metrics
-    auth: basic                            # basic | none
-    # Basic-auth creds default to the Loki sink tenant_id/auth_token when blank
-    # (Grafana Cloud uses one stack credential for Loki and OTLP). Override here if needed:
-    basic_auth_user: ""
-    # basic_auth_token_file: /etc/sf2loki/secrets/otlp-token
-    headers: {}                            # extra headers merged on top
-    export_interval: 60s
-    resource_attributes: {}                # extra OTel resource attrs merged onto service.name/service.version
+# Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
+# key + cert, no shared secret) or ``client_credentials`` (consumer key +
+# secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
+# compatibility.
+salesforce:  # Salesforce org connection and authentication.
+  login_url: ""  # Optional: derived from `environment` when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.
+  environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
+  auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
+  client_id: ${SF_CLIENT_ID}  # External Client App consumer key. (required)
+  client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
+  client_secret_file: /etc/sf2loki/secrets/client-secret  # File path to the client_credentials secret; required when auth_mode: client_credentials.
+  username: svc@example.com  # Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials.
+  private_key_file: /etc/sf2loki/secrets/server.key  # File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.
+  private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
+  api_version: "60.0"  # Salesforce REST/SOAP API version to target.
+  org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
+  # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
+  # limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...).
+  # Cheap (one REST call per interval) and useful product telemetry.
+  limits:  # Org-limits metric poller settings.
+    enabled: false  # Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).
+    poll_interval: 5m  # How often to poll the limits endpoint.
+# Either/or per event category: by default ingest each category (Login, API,
+# Report, ...) from exactly ONE source. Streaming ``/event/LoginEventStream``
+# AND polling ``LoginEvent`` AND pulling the "Login" EventLogFile are the SAME
+# activity via different channels. A fail-fast guard refuses to start on an
+# EXPLICIT overlap, and the ELF "*" wildcard auto-excludes categories a
+# stream/object source already owns. Set ``allow_overlap: true`` to ingest a
+# category via MULTIPLE sources on purpose — e.g. the real-time-but-lean stream
+# AND the slower-but-richer EventLogFile rows for the same category (they are
+# NOT byte-identical, so both flow — build dashboards on whichever fits).
+sources:  # Event source selection and settings.
+  pubsub:  # Pub/Sub API streaming source.
+    enabled: true  # Enable the Pub/Sub streaming source.
+    endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.
+    default_num_requested: 100  # Flow-control batch size.
+    replay_preset: CUSTOM  # Replay position; falls back to LATEST when no stored replay_id.
+    topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
+    include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
+    exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
+  # Use for categories you'd rather poll than stream (or that have no stream).
+  # Do NOT also stream the same category.
+  eventlog_objects:  # Event-object SOQL polling source.
+    enabled: false  # Enable the event-object polling source.
+    objects:  # Event objects to poll.
+      - name: ""  # The event object API name to poll (e.g. LoginEvent). (required)
+        timestamp_field: EventDate  # The field used as the per-row event time for polling/checkpointing.
+        poll_interval: 5m  # How often to poll this object.
+        lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+  # Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
+  # EventLogFile``, or the EventType picklist, to see which your org actually
+  # produces); schema is read per-file. This is the workhorse for breadth —
+  # most activity only surfaces here, not as a streaming event.
+  #
+  # Ingest exactly ONE interval (``Hourly`` or ``Daily``); hourly and daily
+  # files are redundant copies of the same events (Salesforce), so ingesting
+  # both double-counts. ``Daily`` is settled (~1 day lag) and works for every
+  # org; ``Hourly`` is fresher but needs the Event Monitoring hourly opt-in in
+  # Setup, and some orgs generate ONLY Daily files — check before choosing
+  # Hourly.
+  #
+  # Use ``event_types: ["*"]`` to DISCOVER and ingest every EventType the org
+  # produces for the configured interval (re-checked each poll, so newly
+  # enabled types appear with no restart), then use ``exclude`` to drop
+  # categories owned by another source or high-volume types you don't want. Or
+  # list types explicitly — each item is a bare string (uses the global
+  # structured_metadata_fields, promotes no labels) or a per-type object (name
+  # + optional structured_metadata_fields/labels overrides). Explicit entries
+  # always win over discovered ones.
+  eventlogfile:  # EventLogFile (CSV) ingestion source.
+    enabled: false  # Enable the EventLogFile ingestion source.
+    interval: Hourly  # Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; check before Hourly.
+    # A bare string in ``eventlogfile.event_types`` coerces to ``{name:
+    # <string>}`` (backward compatible). ``structured_metadata_fields``
+    # defaults to ``None``, meaning "fall back to the global
+    # ``sink.loki.structured_metadata_fields``"; set it to a list (including
+    # ``[]``) to override per type. ``labels`` lists columns promoted to stream
+    # labels — keep these LOW cardinality.
+    event_types:  # ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.
+      - name: ""  # The ELF EventType this override applies to (e.g. ReportExport). (required)
+        structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
+        labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
+    exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
+    poll_interval: 1h  # How often to list new files (Daily files land ~once/day).
+    lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
+    timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
+    page_size: 1000  # SOQL LIMIT for the file-listing query.
+    settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly.
+    download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
+  allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
+sink:  # Log sink settings.
+  type: loki  # Sink backend (only loki is supported).
+  # Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+
+  # tenant_id + auth_token). Self-hosted: http://loki:3100/loki/api/v1/push (+
+  # tenant_id -> X-Scope-OrgID). Local Alloy:
+  # http://alloy:3100/loki/api/v1/push (no auth).
+  loki:  # Loki sink settings.
+    url: ${GC_LOKI}  # Loki push API URL. (required)
+    tenant_id: ${GC_TENANT_ID}  # Loki tenant (X-Scope-OrgID); required for Grafana Cloud and multi-tenant Loki.
+    auth_token_file: /etc/sf2loki/secrets/loki-token  # File path to the Loki auth token.
+    auth_token: /etc/sf2loki/secrets/auth-token  # Loki auth token, inline (alternative to auth_token_file).
+    encoding: protobuf  # Wire encoding for the push request.
+    compression: snappy  # Compression: snappy (protobuf) | gzip (json) | none.
+    batch:  # Push batching settings.
+      max_entries: 1000  # Flush the batch after this many log entries.
+      max_bytes: 1048576  # Flush the batch after this many bytes.
+      flush_interval: 1s  # Flush the batch after this much time, regardless of size.
+      max_line_bytes: 262144  # Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
+    labels: {environment: prod}  # Static stream labels merged onto every push (job + sf_org_id are added automatically).
+    structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]  # Event fields promoted to Loki structured metadata (not stream labels).
+state:  # Checkpoint/state store settings.
+  store: file  # State backend (local JSON file is the only backend).
+  file:  # File-backed state store settings.
+    path: /var/lib/sf2loki/state.json  # Checkpoint file path; persist on a mounted volume for durable resume.
+service:  # Application-level service settings.
+  log_level: info  # Application log level.
+  log_format: json  # Application log output format.
+  health_addr: ":8080"  # Address to bind the health-check HTTP server.
+  shutdown_grace: 25s  # Grace period allowed for in-flight work to finish on shutdown.
+  # When ``enabled`` is false, metrics are still recorded in-process (cheap,
+  # used by tests via the in-memory reader) but exported nowhere — there is no
+  # Prometheus scrape endpoint; sf2loki is OTLP-push-native.
+  telemetry:  # OTLP metrics egress settings.
+    enabled: false  # Push all metrics via OTLP/HTTP.
+    endpoint: https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics  # Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics; for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.
+    auth: basic  # Auth for the OTLP endpoint. "basic" sends Authorization: Basic base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic, the credentials default to the Loki sink's tenant_id/auth_token when left blank — Grafana Cloud uses one stack credential for both Loki and OTLP.
+    basic_auth_user: ""  # Basic-auth username; defaults to the Loki sink's tenant_id when blank.
+    basic_auth_token: /etc/sf2loki/secrets/basic-auth-token  # Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.
+    basic_auth_token_file: /etc/sf2loki/secrets/otlp-token  # File path to the basic-auth token (alternative to basic_auth_token).
+    headers: {}  # Explicit headers, merged on top of any computed Authorization header. Values support ${ENV} interpolation at config load.
+    export_interval: 1m  # How often to export accumulated metrics via OTLP.
+    resource_attributes: {}  # Extra OTel resource attributes merged onto the defaults (service.name, etc.).

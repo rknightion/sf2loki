@@ -14,6 +14,7 @@ would drop comments and render durations/paths in the wrong shape.
 from __future__ import annotations
 
 import json
+import textwrap
 from datetime import timedelta
 from pathlib import Path
 from types import UnionType
@@ -148,23 +149,62 @@ def _first_line(text: str | None) -> str:
     return text.strip().splitlines()[0].strip()
 
 
+_NARRATIVE_WRAP_WIDTH = 79
+
+
+def _docstring_narrative(model: type[BaseModel]) -> list[str]:
+    """Return a model's class-docstring narrative (everything after the first
+    line/summary sentence), as plain paragraph text with each paragraph's
+    internal whitespace collapsed — ready for comment-wrapping.
+
+    Docstrings follow the usual "one-line summary, blank line, body" shape
+    (see e.g. ``SourcesConfig``/``EventLogFileConfig`` in ``config.py``); the
+    summary line duplicates the field's own ``description`` one level up, so
+    only the body (the actual narrative/guidance) is rendered here.
+    """
+    doc = model.__doc__
+    if not doc:
+        return []
+    paragraphs = doc.strip().split("\n\n")
+    body = paragraphs[1:]  # paragraphs[0] is the one-line summary.
+    return [" ".join(p.split()) for p in body if p.strip()]
+
+
+def _render_narrative_comment(model: type[BaseModel], indent: str, lines: list[str]) -> None:
+    """Emit a model's docstring narrative (see ``_docstring_narrative``) as a
+    wrapped ``#``-prefixed comment block, one blank-commented line between
+    paragraphs, immediately above that model's section.
+    """
+    paragraphs = _docstring_narrative(model)
+    if not paragraphs:
+        return
+    width = max(_NARRATIVE_WRAP_WIDTH - len(indent) - 2, 20)
+    for i, paragraph in enumerate(paragraphs):
+        if i > 0:
+            lines.append(f"{indent}#")
+        for wrapped in textwrap.wrap(paragraph, width=width) or [""]:
+            lines.append(f"{indent}# {wrapped}")
+
+
 def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) -> None:
     annotation = field.annotation
     comment = _first_line(field.description)
     is_required = field.is_required()
 
     if _is_model_type(annotation):
+        inner_type = _unwrap_optional(annotation)
+        assert isinstance(inner_type, type) and issubclass(inner_type, BaseModel)
+        _render_narrative_comment(inner_type, indent, lines)
         if comment:
             lines.append(f"{indent}{name}:  # {comment}")
         else:
             lines.append(f"{indent}{name}:")
-        inner_type = _unwrap_optional(annotation)
-        assert isinstance(inner_type, type) and issubclass(inner_type, BaseModel)
         _render_model(inner_type, indent + "  ", lines)
         return
 
     item_model = _list_item_model_type(annotation)
     if item_model is not None:
+        _render_narrative_comment(item_model, indent, lines)
         if comment:
             lines.append(f"{indent}{name}:  # {comment}")
         else:
