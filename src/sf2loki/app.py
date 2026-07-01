@@ -29,6 +29,7 @@ from sf2loki.config import (
     telemetry_headers,
 )
 from sf2loki.coordinate.base import NoopCoordinator
+from sf2loki.egress import EgressGovernor
 from sf2loki.model import Batch, LogEntry
 from sf2loki.obs.health import Health
 from sf2loki.obs.logging import configure_logging, get_logger
@@ -124,12 +125,14 @@ class Pipeline:
         metrics: Metrics,
         static_labels: Mapping[str, str] | None = None,
         queue_maxsize: int | None = None,
+        governor: EgressGovernor | None = None,
     ) -> None:
         self._sources = list(sources)
         self._sink = sink
         self._state = state
         self._batch = batch
         self._metrics = metrics
+        self._governor = governor
         self._static_labels: dict[str, str] = dict(static_labels or {})
         # Explicit override for tests; production wiring takes the config value.
         self._queue_maxsize = batch.queue_maxsize if queue_maxsize is None else queue_maxsize
@@ -167,6 +170,10 @@ class Pipeline:
         """
         if not self._sources:
             return
+        # Load the persisted daily-budget counter before the first flush so
+        # admission decisions are deterministic from the start.
+        if self._governor is not None:
+            await self._governor.start()
         self._queued_bytes = 0  # fresh accounting per run (the queue is fresh too)
         queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
         producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
@@ -315,6 +322,25 @@ class Pipeline:
             await self._commit(all_entries)
             return
         batch = Batch(entries=real)
+        # Egress governor: rate caps + daily byte budget. Admission is per-batch,
+        # BEFORE the retry loop (retries never re-admit). lines/bytes are computed
+        # once and reused for record() after a successful push.
+        lines = len(real)
+        bytes_ = 0
+        if self._governor is not None:
+            bytes_ = sum(len(e.line.encode("utf-8")) for e in real)
+            admitted = await self._governor.admit(lines, bytes_, stop)
+            if not admitted:
+                # Drop-mode budget exhaustion: discard this batch (counted) but
+                # advance checkpoints — the permanent-drop shape, never wedged.
+                self._metrics.loki_entries_dropped.labels(reason="budget").inc(len(real))
+                log.warning(
+                    "dropping over-budget batch and advancing checkpoint",
+                    entries=len(real),
+                    bytes=bytes_,
+                )
+                await self._commit(all_entries)
+                return
         backoff = _RETRY_BACKOFF_BASE
         while True:
             t0 = asyncio.get_running_loop().time()
@@ -356,6 +382,8 @@ class Pipeline:
                 self._metrics.last_push_success_ts.set(datetime.now(UTC).timestamp())
                 self._metrics.loki_push_duration.observe(asyncio.get_running_loop().time() - t0)
                 log.debug("pushed batch to loki", entries=len(batch.entries))
+                if self._governor is not None:
+                    await self._governor.record(lines, bytes_)
                 await self._commit(all_entries)
                 return
 
@@ -468,6 +496,21 @@ def _sink_degradation_check(pipeline: Pipeline, threshold: float) -> Callable[[]
     return check
 
 
+def _composite_degraded_check(
+    checks: Sequence[Callable[[], str | None]],
+) -> Callable[[], str | None]:
+    """Compose readiness predicates: return the first non-None reason, else None."""
+
+    def check() -> str | None:
+        for c in checks:
+            reason = c()
+            if reason is not None:
+                return reason
+        return None
+
+    return check
+
+
 @dataclass(frozen=True, slots=True)
 class _StartupInfo:
     """Summary of what the app is configured to run, for the startup banner."""
@@ -521,6 +564,9 @@ class App:
 
         state = _build_state(cfg)
         sm_fields = cfg.sink.loki.structured_metadata_fields
+        transform_salt = (
+            cfg.sources.transform_salt.get_secret_value() if cfg.sources.transform_salt else ""
+        )
 
         sources: list[Source] = []
         closers: list[Callable[[], Awaitable[None]]] = []
@@ -568,6 +614,7 @@ class App:
                 metrics=metrics,
                 topic_discoverer=MetadataClient(cfg.salesforce, tokens, sf_http),
                 owned_categories=pubsub_owned,
+                transform_salt=transform_salt,
             )
             sources.append(pubsub_src)
             pubsub_topics = pubsub_src.resolve_topics()
@@ -579,7 +626,11 @@ class App:
             soql = SoqlClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
             sources.append(
                 EventLogObjectsSource(
-                    cfg.sources.eventlog_objects, soql, sm_fields=sm_fields, metrics=metrics
+                    cfg.sources.eventlog_objects,
+                    soql,
+                    sm_fields=sm_fields,
+                    metrics=metrics,
+                    transform_salt=transform_salt,
                 )
             )
 
@@ -607,6 +658,7 @@ class App:
                     sm_fields=sm_fields,
                     metrics=metrics,
                     exclude_categories=elf_owned,
+                    transform_salt=transform_salt,
                 )
             )
 
@@ -619,21 +671,36 @@ class App:
             allow_overlap=cfg.sources.allow_overlap,
         )
 
+        # Egress guardrails (rate caps + daily byte budget). Only wired in when a
+        # control is actually configured; otherwise the pipeline runs governor-free
+        # and behaviour is unchanged.
+        egress_governor = EgressGovernor(cfg.sink.loki.egress, state=state, metrics=metrics)
+        governor = egress_governor if egress_governor.enabled else None
+
         pipeline = Pipeline(
             sources=sources,
             sink=sink,
             state=state,
             batch=cfg.sink.loki.batch,  # queue_maxsize/queue_max_bytes ride in here
             metrics=metrics,
+            governor=governor,
         )
 
-        # Readiness degradation: report 503 on /readyz once Loki pushes have
-        # been failing continuously for longer than the configured threshold
-        # (0 disables). Liveness (/healthz) is deliberately unaffected — data
-        # is checkpointed and retried, so a restart would not help.
+        # Readiness degradation: a composite of independent predicates, first
+        # non-None reason wins. The budget-pause reason is checked first (an
+        # exhausted budget is a deliberate, operator-visible state), then the
+        # sink-failing reason. Liveness (/healthz) is deliberately unaffected —
+        # data is checkpointed and retried, so a restart would not help.
+        degraded_checks: list[Callable[[], str | None]] = []
+        if governor is not None:
+            # degraded_reason() self-gates to pause mode, so it is inert for
+            # rate-cap-only or drop-mode configurations.
+            degraded_checks.append(governor.degraded_reason)
         unready_after = cfg.service.unready_after_sink_failing.total_seconds()
         if unready_after > 0:
-            health.set_degraded_check(_sink_degradation_check(pipeline, unready_after))
+            degraded_checks.append(_sink_degradation_check(pipeline, unready_after))
+        if degraded_checks:
+            health.set_degraded_check(_composite_degraded_check(degraded_checks))
 
         limits_poller: LimitsPoller | None = None
         if cfg.salesforce.limits.enabled:
