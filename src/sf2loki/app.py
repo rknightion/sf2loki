@@ -50,6 +50,27 @@ _SENTINEL: object = object()
 _RETRY_BACKOFF_BASE = 1.0
 _RETRY_BACKOFF_MAX = 30.0
 
+
+def build_static_labels(
+    *, environment: str, org_id: str, operator_labels: Mapping[str, str]
+) -> dict[str, str]:
+    """Deployment-wide stream labels applied to every emitted entry.
+
+    Always sets ``job`` + ``service_name`` (so these streams surface under the
+    sf2loki exporter in Grafana rather than as ``unknown_service``) and derives
+    ``environment`` from the Salesforce ``environment`` toggle. Operator-supplied
+    ``sink.loki.labels`` are merged last, so they win over these defaults (e.g. to
+    point ``service_name`` at the monitored system or override ``environment``).
+    All keys must be in :data:`~sf2loki.sinks.loki.labels.ALLOWED_LABELS`.
+    """
+    return {
+        "job": "sf2loki",
+        "service_name": "sf2loki",
+        "environment": environment,
+        "sf_org_id": org_id,
+        **operator_labels,
+    }
+
 # Fixed budget for closing resources (http/grpc clients) during shutdown — kept
 # short and separate from shutdown_grace (which bounds the pipeline drain) so
 # the two don't stack past k8s's terminationGracePeriodSeconds.
@@ -418,7 +439,11 @@ class App:
         # Resolve the org id once and assemble deployment-wide labels.
         org_id = self._cfg.salesforce.org_id or await self._tokens.org_id()
         self._pipeline.set_static_labels(
-            {"job": "sf2loki", "sf_org_id": org_id, **self._cfg.sink.loki.labels}
+            build_static_labels(
+                environment=self._cfg.salesforce.environment,
+                org_id=org_id,
+                operator_labels=self._cfg.sink.loki.labels,
+            )
         )
 
         coordinator = NoopCoordinator()

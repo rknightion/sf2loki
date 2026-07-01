@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 ALLOWED_LABELS: frozenset[str] = frozenset(
-    {"job", "source", "event_type", "sf_org_id", "environment"}
+    {"job", "service_name", "source", "event_type", "sf_org_id", "environment"}
 )
 
 

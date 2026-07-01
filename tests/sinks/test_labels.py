@@ -20,6 +20,10 @@ class TestGuardLabels:
     def test_passes_for_subset_of_allowed_keys(self) -> None:
         guard_labels({"job": "sf2loki", "environment": "prod"})
 
+    def test_service_name_is_an_allowed_label(self) -> None:
+        assert "service_name" in ALLOWED_LABELS
+        guard_labels({"service_name": "sf2loki"})  # must not raise
+
     def test_passes_for_empty_mapping(self) -> None:
         guard_labels({})
 
