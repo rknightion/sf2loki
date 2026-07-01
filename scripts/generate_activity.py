@@ -9,10 +9,17 @@ data to chew on. Covers the breadth of event categories an org normally sees:
     -> API / RestApi ELF events, and the underlying records product queries hit
   * SOQL queries                       -> API ELF events
   * SOSL searches                      -> Search ELF events
-  * report runs (existing reports)     -> Report ELF events
-  * Bulk API 2.0 ingest jobs           -> BulkApi ELF events
+  * Bulk API 2.0 ingest + query jobs   -> BulkApi ELF events
+  * composite / batch requests         -> API ELF events
+  * sObject + global describe          -> API (metadata) ELF events
+  * file upload + download             -> ContentTransfer / file ELF events
   * anonymous Apex (Tooling API)       -> ApexExecution ELF events
-  * periodic re-authentication         -> Login ELF events + LoginEventStream
+  * periodic re-auth + token revoke    -> Login / Logout events + LoginEventStream
+
+Capability-gated (offered only when discover() finds them enabled in the org):
+  * report runs, sync + async          -> Report / AsyncReportRun ELF events
+  * dashboard reads                    -> Dashboard ELF events
+  * Campaign / CampaignMember, Contract -> more object coverage
 
 It authenticates with the same JWT-bearer credentials sf2loki uses (read from a
 `.env` file or the environment), stamps every record it creates with a marker in
@@ -39,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -143,6 +151,42 @@ _EVENT_SUBJECTS = [
     "Discovery call", "Product demo", "Quarterly review", "Kickoff meeting",
     "Contract review", "Solution workshop", "Executive briefing",
 ]
+_CAMPAIGN_NAMES = [
+    "Q3 Product Launch", "Summer Webinar Series", "Annual User Conference",
+    "Partner Enablement Push", "Renewal Outreach", "Cloud Migration Program",
+    "Year-End Promotion", "Analyst Briefing Tour", "Field Marketing Roadshow",
+    "Customer Advocacy Program",
+]
+# Values from the standard Campaign Type / Status picklists.
+_CAMPAIGN_TYPES = [
+    "Conference", "Webinar", "Trade Show", "Public Relations", "Partners",
+    "Referral Program", "Advertisement", "Email", "Telemarketing", "Other",
+]
+_CAMPAIGN_STATUSES = ["Planned", "In Progress", "Completed"]
+# A handful of real, well-known companies for extra realism (dedup is handled by
+# random suffixes + the duplicate-rule override). Industry values are picklist-valid.
+_REAL_COMPANIES = [
+    ("Microsoft", "Technology", "https://microsoft.com"),
+    ("Salesforce", "Technology", "https://salesforce.com"),
+    ("Amazon", "Retail", "https://amazon.com"),
+    ("JPMorgan Chase", "Banking", "https://jpmorganchase.com"),
+    ("Pfizer", "Biotechnology", "https://pfizer.com"),
+    ("Toyota", "Manufacturing", "https://toyota.com"),
+    ("Shell", "Energy", "https://shell.com"),
+    ("Unilever", "Retail", "https://unilever.com"),
+    ("Siemens", "Engineering", "https://siemens.com"),
+    ("HSBC", "Banking", "https://hsbc.com"),
+    ("Nestle", "Retail", "https://nestle.com"),
+    ("Verizon", "Telecommunications", "https://verizon.com"),
+    ("Boeing", "Manufacturing", "https://boeing.com"),
+    ("AstraZeneca", "Biotechnology", "https://astrazeneca.com"),
+    ("Accenture", "Consulting", "https://accenture.com"),
+    ("Maersk", "Transportation", "https://maersk.com"),
+    ("Vodafone", "Telecommunications", "https://vodafone.com"),
+    ("Allianz", "Insurance", "https://allianz.com"),
+    ("BASF", "Chemicals", "https://basf.com"),
+    ("Marriott", "Hospitality", "https://marriott.com"),
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,19 +238,29 @@ def load_companies(data_dir: Path = DATA_DIR) -> list[Company]:
     return pool or list(_FALLBACK_COMPANIES)
 
 
+def real_companies() -> list[Company]:
+    """A few real, well-known companies mixed in for realism (dedup handled by
+    random suffixes + the duplicate-rule override)."""
+    return [
+        Company(n, i, w, f"{n} - industry leader in {i.lower()}")
+        for n, i, w in _REAL_COMPANIES
+    ]
+
+
 def load_people(data_dir: Path = DATA_DIR) -> list[Person]:
     rows = _read_csv_rows(data_dir / "people.csv", 3)
     pool = [Person(f, ln, t) for f, ln, t in rows]
     return pool or list(_FALLBACK_PEOPLE)
 
 
-def marker_ids(records: list[dict]) -> list[str]:
+def marker_ids(records: list[dict], id_field: str = "Id") -> list[str]:
     """Ids of records whose Description carries the synthetic MARKER.
 
     Description is a Long Text Area and cannot be SOQL-filtered, so callers
-    SELECT it and filter here client-side.
+    SELECT it and filter here client-side. *id_field* lets callers project a
+    different id (e.g. ContentDocumentId when cleaning up files).
     """
-    return [r["Id"] for r in records if MARKER in (r.get("Description") or "")]
+    return [r[id_field] for r in records if MARKER in (r.get("Description") or "")]
 
 
 def _uniqueify(name: str) -> str:
@@ -235,6 +289,10 @@ def _rand_email(first: str, last: str) -> str:
 
 def _rand_phone() -> str:
     return f"+1 {random.randint(200, 989)}-{random.randint(200, 989)}-{random.randint(1000, 9999)}"
+
+
+def _today() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _future_date(max_days: int = 120) -> str:
@@ -295,6 +353,7 @@ class Salesforce:
         self.instance_url: str = ""
         self._token: str = ""
         self.login_count = 0
+        self.logout_count = 0
 
     @property
     def _base(self) -> str:
@@ -326,6 +385,17 @@ class Salesforce:
         self.login_count += 1
         log.info("authenticated (login #%d) -> %s", self.login_count, self.instance_url)
 
+    async def revoke(self, token: str) -> None:
+        """Revoke an access token — produces a Logout ELF event for that session."""
+        if not token:
+            return
+        with contextlib.suppress(httpx.HTTPError):
+            resp = await self._client.post(
+                f"{self.login_url}/services/oauth2/revoke", data={"token": token}
+            )
+            if resp.is_success:
+                self.logout_count += 1
+
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
 
@@ -338,7 +408,7 @@ class Salesforce:
             resp = await self._client.request(method, url, headers=headers, **kw)
         return resp
 
-    async def create(self, sobject: str, fields: dict) -> str | None:
+    async def create(self, sobject: str, fields: dict, quiet: bool = False) -> str | None:
         # allowSave=true overrides Salesforce duplicate-alert rules so the
         # finite name pool never hard-fails a create as a "duplicate".
         resp = await self._request(
@@ -347,7 +417,10 @@ class Salesforce:
         )
         if resp.status_code == 201:
             return resp.json()["id"]
-        log.warning("create %s failed HTTP %d: %s", sobject, resp.status_code, resp.text[:300])
+        # quiet=True for capability-probed objects: a missing feature is expected,
+        # not an error worth a warning.
+        emit = log.debug if quiet else log.warning
+        emit("create %s failed HTTP %d: %s", sobject, resp.status_code, resp.text[:300])
         return None
 
     async def update(self, sobject: str, record_id: str, fields: dict) -> bool:
@@ -419,6 +492,74 @@ class Salesforce:
             json={"state": "UploadComplete"},
         )
 
+    async def bulk_query(self, soql: str) -> None:
+        """Submit a Bulk API 2.0 query job (BulkApi ELF events, query flavour)."""
+        resp = await self._request(
+            "POST", f"{self._base}/jobs/query", json={"operation": "query", "query": soql}
+        )
+        if resp.status_code not in (200, 201):
+            log.debug("bulk query failed HTTP %d: %s", resp.status_code, resp.text[:200])
+
+    async def describe_global(self) -> None:
+        resp = await self._request("GET", f"{self._base}/sobjects/")
+        if not resp.is_success:
+            log.debug("describe global failed HTTP %d", resp.status_code)
+
+    async def describe_sobject(self, sobject: str) -> None:
+        resp = await self._request("GET", f"{self._base}/sobjects/{sobject}/describe/")
+        if not resp.is_success:
+            log.debug("describe %s failed HTTP %d", sobject, resp.status_code)
+
+    async def composite_batch(self, subrequests: list[dict]) -> None:
+        """Run a batch of subrequests in one round-trip (composite API usage)."""
+        resp = await self._request(
+            "POST", f"{self._base}/composite/batch", json={"batchRequests": subrequests}
+        )
+        if not resp.is_success:
+            log.debug("composite batch failed HTTP %d: %s", resp.status_code, resp.text[:200])
+
+    async def upload_file(
+        self, title: str, filename: str, body: bytes, description: str
+    ) -> str | None:
+        """Upload a ContentVersion (file). Produces ContentTransfer/file ELF events."""
+        return await self.create(
+            "ContentVersion",
+            {
+                "Title": title,
+                "PathOnClient": filename,
+                "VersionData": base64.b64encode(body).decode("ascii"),
+                "Description": description,
+            },
+        )
+
+    async def download_file(self, content_version_id: str) -> None:
+        """Download a file's binary — produces a file-transfer ELF event."""
+        resp = await self._request(
+            "GET", f"{self._base}/sobjects/ContentVersion/{content_version_id}/VersionData"
+        )
+        if not resp.is_success:
+            log.debug("file download failed HTTP %d", resp.status_code)
+
+    async def run_report_async(self, report_id: str) -> None:
+        resp = await self._request(
+            "POST", f"{self._base}/analytics/reports/{report_id}/instances"
+        )
+        if not resp.is_success:
+            log.debug("async report %s failed HTTP %d", report_id, resp.status_code)
+
+    async def list_dashboards(self) -> list[str]:
+        resp = await self._request("GET", f"{self._base}/analytics/dashboards")
+        if not resp.is_success:
+            return []
+        payload = resp.json()
+        items = payload.get("dashboards", payload) if isinstance(payload, dict) else payload
+        return [d["id"] for d in items if isinstance(d, dict) and "id" in d]
+
+    async def get_dashboard(self, dashboard_id: str) -> None:
+        resp = await self._request("GET", f"{self._base}/analytics/dashboards/{dashboard_id}")
+        if not resp.is_success:
+            log.debug("dashboard %s failed HTTP %d", dashboard_id, resp.status_code)
+
     async def delete_many(self, ids: list[str]) -> int:
         """Delete up to 200 records via the sObject Collections API. Returns count deleted."""
         deleted = 0
@@ -439,8 +580,12 @@ class Salesforce:
 # Activity engine
 # ---------------------------------------------------------------------------
 
-# Object types that carry the Description marker (used for cleanup + relationships).
-CLEANUP_OBJECTS = ["Task", "Event", "Case", "Opportunity", "Contact", "Lead", "Account"]
+# Object types that carry the Description marker, deleted in this order so
+# referencing/child records go before the parents they point at (Account last).
+CLEANUP_OBJECTS = [
+    "Contract", "Task", "Event", "Case", "Campaign",
+    "Opportunity", "Contact", "Lead", "Account",
+]
 
 
 class ActivityEngine:
@@ -450,9 +595,27 @@ class ActivityEngine:
         self.pools: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=200))
         self.counts: dict[str, int] = defaultdict(int)
         self._reports: list[str] = []
-        # realistic value pools drawn from data/*.csv (or built-in fallback)
-        self.companies = load_companies()
+        self._dashboards: list[str] = []
+        # optional features confirmed present in this org (see discover())
+        self.caps: set[str] = set()
+        # realistic value pools drawn from data/*.csv (or built-in fallback),
+        # plus a few real, well-known companies for extra realism
+        self.companies = load_companies() + real_companies()
         self.people = load_people()
+
+    async def discover(self) -> None:
+        """Probe optional features once so the menu only offers what works."""
+        self._reports = await self.sf.list_reports()
+        if self._reports:
+            self.caps.add("report")
+        self._dashboards = await self.sf.list_dashboards()
+        if self._dashboards:
+            self.caps.add("dashboard")
+        if await self.act_create_campaign():
+            self.caps.add("campaign")
+        if await self.act_create_contract():
+            self.caps.add("contract")
+        log.info("capabilities: %s", ", ".join(sorted(self.caps)) or "core only")
 
     def _company(self) -> Company:
         return random.choice(self.companies)
@@ -658,11 +821,20 @@ class ActivityEngine:
 
     async def act_report(self) -> None:
         if not self._reports:
-            self._reports = await self.sf.list_reports()
-        if not self._reports:
             return
-        await self.sf.run_report(random.choice(self._reports))
-        self.counts["report"] += 1
+        report_id = random.choice(self._reports)
+        if random.random() < 0.4:
+            await self.sf.run_report_async(report_id)
+            self.counts["report:async"] += 1
+        else:
+            await self.sf.run_report(report_id)
+            self.counts["report"] += 1
+
+    async def act_dashboard(self) -> None:
+        if not self._dashboards:
+            return
+        await self.sf.get_dashboard(random.choice(self._dashboards))
+        self.counts["dashboard"] += 1
 
     async def act_apex(self) -> None:
         n = random.randint(1, 5)
@@ -685,10 +857,107 @@ class ActivityEngine:
         await self.sf.bulk_insert("Contact", "\n".join(rows))
         self.counts["bulk:Contact"] += 1
 
+    async def act_bulk_query(self) -> None:
+        soql = random.choice(
+            [
+                "SELECT Id, Name FROM Account",
+                "SELECT Id, Email FROM Contact",
+                "SELECT Id, StageName, Amount FROM Opportunity",
+                "SELECT Id, Company, Status FROM Lead",
+            ]
+        )
+        await self.sf.bulk_query(soql)
+        self.counts["bulkquery"] += 1
+
+    async def act_describe(self) -> None:
+        if random.random() < 0.4:
+            await self.sf.describe_global()
+        else:
+            await self.sf.describe_sobject(
+                random.choice(["Account", "Contact", "Lead", "Opportunity", "Case"])
+            )
+        self.counts["describe"] += 1
+
+    async def act_composite(self) -> None:
+        ver = f"v{self.sf.api_version}"
+        subrequests = [
+            {"method": "GET",
+             "url": f"{ver}/query?q={urllib.parse.quote('SELECT Id, Name FROM Account LIMIT 5')}"},
+            {"method": "GET", "url": f"{ver}/sobjects/Contact/describe"},
+            {"method": "GET", "url": f"{ver}/limits"},
+        ]
+        await self.sf.composite_batch(subrequests)
+        self.counts["composite"] += 1
+
+    async def act_file(self) -> None:
+        stamp = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        lines = "\n".join(
+            f"line {i}: {random.randint(0, 9999)}" for i in range(random.randint(3, 20))
+        )
+        body = (
+            f"{MARKER} synthetic file {stamp}\n"
+            f"Generated for observability testing.\n{lines}"
+        ).encode()
+        cvid = await self.sf.upload_file(
+            title=f"sf2loki note {stamp}",
+            filename=f"sf2loki-{stamp}.txt",
+            body=body,
+            description=_desc("file"),
+        )
+        self._remember("ContentVersion", cvid)
+        if cvid:
+            await self.sf.download_file(cvid)
+            self.counts["file:download"] += 1
+
+    async def act_create_campaign(self) -> str | None:
+        fields = {
+            "Name": f"{random.choice(_CAMPAIGN_NAMES)} {random.randint(2, 999)}",
+            "Type": random.choice(_CAMPAIGN_TYPES),
+            "Status": random.choice(_CAMPAIGN_STATUSES),
+            "IsActive": True,
+            "StartDate": _today(),
+            "Description": _desc("campaign"),
+        }
+        cid = self._remember("Campaign", await self.sf.create("Campaign", fields, quiet=True))
+        if cid and random.random() < 0.7:
+            await self.act_add_campaign_member(cid)
+        return cid
+
+    async def act_add_campaign_member(self, campaign_id: str | None = None) -> None:
+        cid = campaign_id or self._pick("Campaign")
+        if not cid:
+            return
+        fields: dict = {"CampaignId": cid, "Status": "Sent"}
+        contact_id = self._pick("Contact")
+        if contact_id:
+            fields["ContactId"] = contact_id
+        else:
+            lead_id = self._pick("Lead")
+            if not lead_id:
+                return
+            fields["LeadId"] = lead_id
+        # CampaignMember has no Description; it is cascade-deleted with its Campaign.
+        if await self.sf.create("CampaignMember", fields, quiet=True):
+            self.counts["campaignmember"] += 1
+
+    async def act_create_contract(self) -> str | None:
+        account_id = await self._ensure_account()
+        if not account_id:
+            return None
+        fields = {
+            "AccountId": account_id,
+            "Status": "Draft",
+            "StartDate": _today(),
+            "ContractTerm": random.choice([12, 24, 36]),
+            "Description": _desc("contract"),
+        }
+        return self._remember("Contract", await self.sf.create("Contract", fields, quiet=True))
+
     # --- weighted menu --------------------------------------------------
 
     def _menu(self) -> list[tuple]:
-        return [
+        # Core actions available in any org.
+        menu: list[tuple] = [
             (self.act_create_account, 8),
             (self.act_create_contact, 10),
             (self.act_create_lead, 8),
@@ -700,10 +969,24 @@ class ActivityEngine:
             (self.act_advance_opportunity, 4),
             (self.act_query, 12),
             (self.act_search, 8),
-            (self.act_report, 3),
             (self.act_apex, 2),
             (self.act_bulk, 2),
+            (self.act_bulk_query, 2),
+            (self.act_describe, 3),
+            (self.act_composite, 4),
+            (self.act_file, 4),
         ]
+        # Capability-gated actions (only offered when discover() confirmed them).
+        if "report" in self.caps:
+            menu.append((self.act_report, 3))
+        if "dashboard" in self.caps:
+            menu.append((self.act_dashboard, 2))
+        if "campaign" in self.caps:
+            menu.append((self.act_create_campaign, 4))
+            menu.append((self.act_add_campaign_member, 3))
+        if "contract" in self.caps:
+            menu.append((self.act_create_contract, 3))
+        return menu
 
     async def tick(self) -> None:
         actions, weights = zip(*self._menu(), strict=True)
@@ -724,6 +1007,20 @@ class ActivityEngine:
 # ---------------------------------------------------------------------------
 
 
+async def _collect_marker_ids(sf: Salesforce, sobject: str, id_field: str = "Id") -> list[str]:
+    """Paginate `SELECT {id_field}, Description FROM {sobject}`, keeping marked ids."""
+    ids: list[str] = []
+    soql = f"SELECT {id_field}, Description FROM {sobject}"
+    result = await sf.query(soql)
+    ids.extend(marker_ids(result.get("records", []), id_field))
+    while not result.get("done", True) and result.get("nextRecordsUrl"):
+        resp = await sf._request("GET", f"{sf.instance_url}{result['nextRecordsUrl']}")
+        resp.raise_for_status()
+        result = resp.json()
+        ids.extend(marker_ids(result.get("records", []), id_field))
+    return ids
+
+
 async def cleanup(sf: Salesforce) -> None:
     """Delete every record this tool ever created.
 
@@ -733,23 +1030,30 @@ async def cleanup(sf: Salesforce) -> None:
     """
     total = 0
     for sobject in CLEANUP_OBJECTS:
-        ids: list[str] = []
-        soql = f"SELECT Id, Description FROM {sobject}"
         try:
-            result = await sf.query(soql)
+            ids = await _collect_marker_ids(sf, sobject)
         except httpx.HTTPStatusError as exc:
             log.warning("cleanup query %s failed: %s", sobject, exc)
             continue
-        ids.extend(marker_ids(result.get("records", [])))
-        while not result.get("done", True) and result.get("nextRecordsUrl"):
-            resp = await sf._request("GET", f"{sf.instance_url}{result['nextRecordsUrl']}")
-            resp.raise_for_status()
-            result = resp.json()
-            ids.extend(marker_ids(result.get("records", [])))
         if ids:
             deleted = await sf.delete_many(ids)
             total += deleted
             log.info("deleted %d %s record(s)", deleted, sobject)
+
+    # Files: the marker lives on ContentVersion; delete the parent ContentDocument
+    # (which removes all its versions) via the de-duplicated document ids.
+    try:
+        doc_ids = list(dict.fromkeys(
+            await _collect_marker_ids(sf, "ContentVersion", "ContentDocumentId")
+        ))
+    except httpx.HTTPStatusError as exc:
+        log.warning("cleanup query files failed: %s", exc)
+        doc_ids = []
+    if doc_ids:
+        deleted = await sf.delete_many(doc_ids)
+        total += deleted
+        log.info("deleted %d file(s)", deleted)
+
     log.info("cleanup complete — %d record(s) removed", total)
 
 
@@ -768,6 +1072,7 @@ async def run(args: argparse.Namespace) -> None:
             return
 
         engine = ActivityEngine(sf)
+        await engine.discover()
         stop = asyncio.Event()
 
         def _handle_signal() -> None:
@@ -799,7 +1104,9 @@ async def run(args: argparse.Namespace) -> None:
 
             now = loop.time()
             if now - last_login >= args.relogin_every:
+                previous = sf._token
                 await sf.login()
+                await sf.revoke(previous)  # Logout ELF event for the retired session
                 last_login = now
             if deadline is not None and now >= deadline:
                 log.info("duration reached")
@@ -811,7 +1118,7 @@ async def run(args: argparse.Namespace) -> None:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
 
         log.info("done after %d ops — %s", ticks, engine.summary())
-        log.info("logins performed: %d", sf.login_count)
+        log.info("logins: %d, logouts: %d", sf.login_count, sf.logout_count)
         log.info("run with --cleanup to delete the %s-tagged records", MARKER)
 
 

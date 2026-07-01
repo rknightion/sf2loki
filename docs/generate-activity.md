@@ -12,14 +12,24 @@ Covers the breadth of event categories a real org sees:
   and the underlying records product queries hit
 - SOQL queries — `API` ELF events
 - SOSL searches — `Search` ELF events
-- report runs (existing reports in the org) — `Report` ELF events
-- Bulk API 2.0 ingest jobs — `BulkApi` ELF events
+- Bulk API 2.0 ingest **and** query jobs — `BulkApi` ELF events
+- composite / batch requests — `API` ELF events
+- sObject + global describe calls — `API` (metadata) ELF events
+- file upload + download (ContentVersion) — `ContentTransfer` / file-transfer ELF events
 - anonymous Apex via the Tooling API — `ApexExecution` ELF events
-- periodic re-authentication — `Login` ELF events + `LoginEventStream`
+- periodic re-authentication and token revocation — `Login` / `Logout` ELF events + `LoginEventStream`
 
-Actions are picked from a weighted menu each tick (creates, field updates, opportunity stage
-advances, queries, searches, report runs, Apex, bulk inserts), so the traffic pattern looks organic
-rather than lock-step.
+**Capability-gated** (offered only when the org actually has them — a one-time `discover()` probe at
+startup logs which are active, and the rest are silently skipped so the tool stays reliable in any
+org):
+
+- report runs, synchronous and async — `Report` / `AsyncReportRun` ELF events
+- dashboard reads — `Dashboard` ELF events
+- Campaign + CampaignMember, and Contract records — more object coverage
+
+Actions are picked from a weighted menu each tick, so the traffic pattern looks organic rather than
+lock-step. `URI`, `LightningPageView`, and `LightningInteraction` remain out of reach — those need a
+real browser UI session (see Caveats).
 
 ## Data pools
 

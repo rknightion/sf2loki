@@ -112,7 +112,7 @@ async def test_cleanup_deletes_only_marked_records_and_never_filters_description
     assert set(sf.deleted) == {"keep"}
     assert "real" not in sf.deleted
     # queries select Description for client-side filtering, never LIKE-filter it
-    assert all("SELECT Id, Description" in q for q in sf.queries)
+    assert all("Description" in q for q in sf.queries)
     assert all("LIKE" not in q for q in sf.queries)
 
 
@@ -120,3 +120,56 @@ async def test_cleanup_deletes_only_marked_records_and_never_filters_description
 def test_cleanup_objects_are_child_before_parent(obj: str) -> None:
     # Account must be deleted last so its children are gone first.
     assert g.CLEANUP_OBJECTS[-1] == "Account"
+
+
+def test_marker_ids_can_project_an_alternate_id_field() -> None:
+    records = [
+        {"ContentDocumentId": "doc1", "Description": f"{g.MARKER} file"},
+        {"ContentDocumentId": "doc2", "Description": "real file"},
+    ]
+    assert g.marker_ids(records, "ContentDocumentId") == ["doc1"]
+
+
+# --- capability-gated action menu ------------------------------------------
+
+
+def _engine() -> g.ActivityEngine:
+    return g.ActivityEngine(sf=object())  # type: ignore[arg-type]
+
+
+def _menu_names(engine: g.ActivityEngine) -> set[str]:
+    return {action.__name__ for action, _weight in engine._menu()}
+
+
+def test_menu_always_offers_universal_api_actions() -> None:
+    engine = _engine()
+    engine.caps = set()
+    names = _menu_names(engine)
+    for always_on in ("act_file", "act_describe", "act_composite", "act_bulk_query"):
+        assert always_on in names
+
+
+def test_menu_hides_capability_gated_actions_without_caps() -> None:
+    engine = _engine()
+    engine.caps = set()
+    names = _menu_names(engine)
+    for gated in (
+        "act_report",
+        "act_dashboard",
+        "act_create_campaign",
+        "act_create_contract",
+    ):
+        assert gated not in names
+
+
+def test_menu_reveals_actions_for_present_caps() -> None:
+    engine = _engine()
+    engine.caps = {"report", "dashboard", "campaign", "contract"}
+    names = _menu_names(engine)
+    for gated in (
+        "act_report",
+        "act_dashboard",
+        "act_create_campaign",
+        "act_create_contract",
+    ):
+        assert gated in names
