@@ -14,58 +14,76 @@ salesforce:
 
 sources:
   # Login streams in real time via Pub/Sub; the whole rest of the mix comes from
-  # the Daily EventLogFile CSVs. Categories are kept disjoint (no "Login" in the
+  # the Hourly EventLogFile CSVs. Categories are kept disjoint (no "Login" in the
   # ELF list) so the either/or overlap guard is satisfied.
   pubsub:
     enabled: true
     topics: ["/event/LoginEventStream"]
     include: ["/event/*"]
   eventlog_objects:
+    # Left off: the stored RTEM *Event objects (ApiEvent, ReportEvent, ...) are
+    # Salesforce big objects — they reject ORDER BY ASC / FIELDS(ALL), which is
+    # what this source builds, so polling them does not work. Near-real-time for
+    # those categories is Pub/Sub streaming, not this.
     enabled: false
     objects:
       - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
   eventlogfile:
     enabled: true
-    interval: Daily                                 # this dev org only generates DAILY files. Hourly
-                                                    # needs the Event Monitoring hourly opt-in in Setup
-                                                    # (not enabled here) — leave it Daily or nothing lands.
-    # Broad mix for dashboard-building. "Login" is deliberately absent — it arrives
-    # in real time via Pub/Sub above (adding it here would trip the overlap guard).
-    # Salesforce exposes 63 EventType values in this org; these cover everything the
-    # activity generator + normal usage actually emit. The last four are UI-only and
-    # only populate if someone clicks around the Salesforce UI (the generator can't
-    # produce them over the API) — harmless no-ops otherwise.
+    interval: Hourly                                # this org generates Hourly files (Event Monitoring
+                                                    # hourly is enabled). Hourly lands ~20-30 min after the
+                                                    # hour closes — far fresher than Daily's ~24h+.
+    # Broad mix for dashboard-building — everything the activity generator + normal
+    # usage emit into hourly files. "Login" is deliberately absent (it arrives in
+    # real time via Pub/Sub above; listing it here would trip the overlap guard).
+    # ApexCallout / NamedCredential dominate volume (multi-MB files); drop them if
+    # dev-stack ingest cost matters.
     event_types:
       - API
-      - ApiTotalUsage
+      - ApexCallout
       - ApexExecution
+      - ApiTotalUsage
       - AsyncReportRun
+      - AuraRequest
       - BulkApi
       - BulkApi2
+      - CompositeApi
+      - CompositeApiSubrequest
       - ContentDistribution
+      - ContentDocumentLink
       - ContentTransfer
-      - Dashboard
+      - CSPViolation
       - DatabaseSave
+      - DocumentAttachmentDownloads
+      - ExternalODataCallout
+      - LightningInteraction
+      - LightningPageView
+      - LightningPerformance
       - Logout
       - MetadataApiOperation
+      - NamedCredential
       - OneCommerceUsage
+      - PackageInstall
+      - PermissionUpdate
       - Report
       - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
       - RestApi
       - Search
+      - UiTelemetryNavigationTiming
+      - UiTelemetryResourceTiming
+      - UniqueQuery
       - URI
       - VisualforceRequest
-      - LightningPageView
-      - LightningInteraction
-    poll_interval: 15m                              # Daily files land once a day (~a day after the fact);
-                                                    # 15m just keeps pickup latency low once one appears.
-    lookback: 72h                                   # first run (no checkpoint): reach back far enough to
-                                                    # catch the last couple of settled Daily files.
-    settle_window: 5m                               # skip files created within this grace window (harmless
-                                                    # for Daily; matters if you switch to Hourly)
-    download_max_age: 96h                            # abandon a file whose body keeps 404ing once older than
-                                                    # this; kept above lookback so the initial backfill of
-                                                    # older Daily files isn't prematurely given up on
+      - WaveChange
+      - WaveInteraction
+      - WavePerformance
+    poll_interval: 10m                              # hourly files appear ~hourly; 10m keeps pickup latency low
+    lookback: 24h                                   # first run (no checkpoint): the org retains ~1.5 days of
+                                                    # hourly files; 24h backfills the recent ones
+    settle_window: 5m                               # skip files created within this grace window so a
+                                                    # half-written hourly CSV isn't pulled mid-write
+    download_max_age: 24h                            # abandon a file whose body keeps 404ing once older than
+                                                    # this, so it can't wedge the checkpoint
 
 sink:
   type: loki
