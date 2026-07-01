@@ -345,5 +345,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) — free to use, modify, and self-host; if you run a modified version
+[AGPL-3.0-only](LICENSE) — free to use, modify, and self-host; if you run a modified version
 as a network service, the AGPL requires you to offer its source to those users.

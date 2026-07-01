@@ -35,7 +35,7 @@ just gen-config  # regenerate config.example.yaml + docs/config-reference.md
   `BREAKING CHANGE:` for majors). PR titles should follow the same convention
   (squash merges use them).
 - **No DCO / CLA.** No sign-off dance — by contributing you agree your work is
-  licensed under the project license (AGPL-3.0-or-later).
+  licensed under the project license (AGPL-3.0-only).
 - **Label discipline is a feature.** Anything that adds Loki stream labels or
   otherwise touches cardinality gets extra scrutiny — see DESIGN.md.
 
