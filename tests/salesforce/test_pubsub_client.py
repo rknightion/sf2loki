@@ -83,12 +83,16 @@ class FakeTokenProvider:
             expires_at=datetime(2099, 1, 1, tzinfo=UTC),
         )
         self._org = org
+        self.invalidate_calls = 0
 
     async def token(self) -> AccessToken:
         return self._token
 
     async def org_id(self) -> str:
         return self._org
+
+    def invalidate(self) -> None:
+        self.invalidate_calls += 1
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +215,36 @@ class FlowControlFakeServicer(pb_grpc.PubSubServicer):
                     pending_num_requested=self._n // 2 + 1,
                 )
                 return
+
+
+class AbortingFakeServicer(pb_grpc.PubSubServicer):
+    """Servicer that aborts every RPC with a configurable gRPC status code.
+
+    Used to verify auth-failure handling: an UNAUTHENTICATED abort mid-stream
+    is what Salesforce returns once the access token backing the subscription
+    expires server-side.
+    """
+
+    def __init__(self, code: grpc.StatusCode) -> None:
+        self._code = code
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        await context.abort(self._code, "rejected")
+        return pb.SchemaInfo()  # pragma: no cover - abort() never returns
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        # Consume the initial FetchRequest, then reject — mirrors a token that
+        # was accepted at subscribe time but rejected once expired.
+        async for _req in request_iterator:
+            break
+        await context.abort(self._code, "rejected")
+        yield pb.FetchResponse()  # pragma: no cover - abort() never returns
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +376,75 @@ async def test_subscribe_passes_auth_metadata(
         assert meta.get("accesstoken") == token_provider._token.value
         assert meta.get("instanceurl") == token_provider._token.instance_url
         assert meta.get("tenantid") == token_provider._org
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: auth-failure handling (token invalidation on UNAUTHENTICATED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_invalidates_token_on_unauthenticated(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """An UNAUTHENTICATED stream error invalidates the cached token.
+
+    Salesforce rejects the subscription once its backing access token expires
+    server-side. The token cache must be cleared so the source's reconnect
+    re-mints a fresh token — otherwise every reconnect re-presents the dead
+    token and the stream never recovers.
+    """
+    servicer = AbortingFakeServicer(grpc.StatusCode.UNAUTHENTICATED)
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            async for _ in client.subscribe("/event/X", replay_preset=pb.LATEST):
+                pass
+        assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        assert token_provider.invalidate_calls == 1
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_does_not_invalidate_on_non_auth_error(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """A non-auth stream error (e.g. UNAVAILABLE) must NOT invalidate the token.
+
+    Re-minting on every transient transport hiccup would hammer the token
+    endpoint pointlessly; only genuine auth rejections clear the cache.
+    """
+    servicer = AbortingFakeServicer(grpc.StatusCode.UNAVAILABLE)
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        with pytest.raises(grpc.aio.AioRpcError):
+            async for _ in client.subscribe("/event/X", replay_preset=pb.LATEST):
+                pass
+        assert token_provider.invalidate_calls == 0
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_schema_invalidates_token_on_unauthenticated(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """GetSchema also invalidates the token on an UNAUTHENTICATED rejection."""
+    servicer = AbortingFakeServicer(grpc.StatusCode.UNAUTHENTICATED)
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        with pytest.raises(grpc.aio.AioRpcError):
+            await client.get_schema(_SCHEMA_ID)
+        assert token_provider.invalidate_calls == 1
     finally:
         await server.stop(None)
         await client.aclose()

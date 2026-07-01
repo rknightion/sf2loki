@@ -162,10 +162,14 @@ class PubSubClient:
         This is also the fetch_schema callback wired into :class:`AvroCodec`,
         so the codec calls it on cache miss — callers rarely need it directly.
         """
-        resp = await self._stub().GetSchema(
-            pb.SchemaRequest(schema_id=schema_id),  # type: ignore[attr-defined]
-            metadata=await self._metadata(),
-        )
+        try:
+            resp = await self._stub().GetSchema(
+                pb.SchemaRequest(schema_id=schema_id),  # type: ignore[attr-defined]
+                metadata=await self._metadata(),
+            )
+        except grpc.aio.AioRpcError as exc:
+            self._handle_rpc_error(exc)
+            raise
         return resp.schema_json  # type: ignore[no-any-return]
 
     async def subscribe(
@@ -197,55 +201,73 @@ class PubSubClient:
         n = num_requested if num_requested is not None else self._cfg.default_num_requested
         low_watermark = n // 2
 
-        call: grpc.aio.StreamStreamCall[Any, Any] = self._stub().Subscribe(
-            metadata=await self._metadata()
-        )
-
-        # Initial FetchRequest identifies the topic and replay position.
-        await call.write(
-            pb.FetchRequest(  # type: ignore[attr-defined]
-                topic_name=topic,
-                replay_preset=replay_preset,
-                replay_id=replay_id,
-                num_requested=n,
+        try:
+            call: grpc.aio.StreamStreamCall[Any, Any] = self._stub().Subscribe(
+                metadata=await self._metadata()
             )
-        )
 
-        async for response in call:
-            for ce in response.events:
-                schema_id: str = ce.event.schema_id
-                try:
-                    decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
-                except Exception as exc:
-                    # One malformed event must not kill the whole topic stream.
-                    self._metrics.decode_errors.labels(reason=type(exc).__name__).inc()
-                    continue
-                self._metrics.schema_cache_size.set(self._codec.cache_size())
-                yield DecodedEvent(
-                    topic=topic,
-                    replay_id=ce.replay_id,
-                    schema_id=schema_id,
-                    payload=decoded_payload,
+            # Initial FetchRequest identifies the topic and replay position.
+            await call.write(
+                pb.FetchRequest(  # type: ignore[attr-defined]
+                    topic_name=topic,
+                    replay_preset=replay_preset,
+                    replay_id=replay_id,
+                    num_requested=n,
+                )
+            )
+
+            async for response in call:
+                for ce in response.events:
+                    schema_id: str = ce.event.schema_id
+                    try:
+                        decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
+                    except Exception as exc:
+                        # One malformed event must not kill the whole topic stream.
+                        self._metrics.decode_errors.labels(reason=type(exc).__name__).inc()
+                        continue
+                    self._metrics.schema_cache_size.set(self._codec.cache_size())
+                    yield DecodedEvent(
+                        topic=topic,
+                        replay_id=ce.replay_id,
+                        schema_id=schema_id,
+                        payload=decoded_payload,
+                    )
+
+                self._metrics.pubsub_pending_credits.labels(topic=topic).set(
+                    response.pending_num_requested
                 )
 
-            self._metrics.pubsub_pending_credits.labels(topic=topic).set(
-                response.pending_num_requested
-            )
-
-            # Flow-control: top up when outstanding credits drop to or below
-            # the low watermark so the server never runs dry.  Guard against
-            # writing to a stream the server has already half-closed.
-            if response.pending_num_requested <= low_watermark:
-                try:
-                    await call.write(
-                        pb.FetchRequest(  # type: ignore[attr-defined]
-                            topic_name=topic,
-                            num_requested=n,
+                # Flow-control: top up when outstanding credits drop to or below
+                # the low watermark so the server never runs dry.  Guard against
+                # writing to a stream the server has already half-closed.
+                if response.pending_num_requested <= low_watermark:
+                    try:
+                        await call.write(
+                            pb.FetchRequest(  # type: ignore[attr-defined]
+                                topic_name=topic,
+                                num_requested=n,
+                            )
                         )
-                    )
-                except asyncio.InvalidStateError, grpc.aio.AioRpcError:
-                    # Stream already finished — no more events coming; stop.
-                    break
+                    except asyncio.InvalidStateError:
+                        # Stream already half-closed by the server — no more
+                        # events coming; stop cleanly.
+                        break
+                    except grpc.aio.AioRpcError as exc:
+                        # The server closed the stream between responses (a
+                        # benign end-of-stream on the write side). Still
+                        # invalidate on an auth rejection so the reconnect
+                        # re-mints, then stop cleanly.
+                        self._handle_rpc_error(exc)
+                        break
+        except grpc.aio.AioRpcError as exc:
+            # The RPC terminated — most commonly Salesforce returning
+            # UNAUTHENTICATED once the access token backing the subscription
+            # expires server-side. Invalidate the cached token so the caller's
+            # reconnect mints a fresh one, then re-raise to trigger that
+            # reconnect/backoff. Without the invalidation the reconnect would
+            # re-present the dead token and the stream would never recover.
+            self._handle_rpc_error(exc)
+            raise
 
     async def aclose(self) -> None:
         """Close the underlying gRPC channel (only if owned + actually created)."""
@@ -255,6 +277,17 @@ class PubSubClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _handle_rpc_error(self, exc: grpc.aio.AioRpcError) -> None:
+        """Invalidate the cached token on an auth rejection.
+
+        Mirrors the 401 handling in the REST-based Salesforce clients: an
+        ``UNAUTHENTICATED`` gRPC status means the access token is no longer
+        accepted, so the cache is cleared and the next :meth:`_metadata` call
+        (on reconnect) mints a fresh token.
+        """
+        if exc.code() == grpc.StatusCode.UNAUTHENTICATED:
+            self._tokens.invalidate()
 
     async def _metadata(self) -> list[tuple[str, str]]:
         """Build the gRPC metadata list required for every Salesforce RPC call."""
