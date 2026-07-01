@@ -53,14 +53,19 @@ def test_loki_bytes_pushed_counter() -> None:
     assert val == 1024.0
 
 
-def test_ingest_lag_gauge() -> None:
+def test_ingest_lag_histogram() -> None:
     m = make_metrics()
-    m.ingest_lag.labels(event_type="LoginEventStream").set(42.0)
-    val = m.registry.get_sample_value(
-        "sf2loki_ingest_lag_seconds",
+    m.ingest_lag.labels(event_type="LoginEventStream").observe(42.0)
+    count = m.registry.get_sample_value(
+        "sf2loki_ingest_lag_seconds_count",
         {"event_type": "LoginEventStream"},
     )
-    assert val == 42.0
+    total = m.registry.get_sample_value(
+        "sf2loki_ingest_lag_seconds_sum",
+        {"event_type": "LoginEventStream"},
+    )
+    assert count == 1.0
+    assert total == 42.0
 
 
 def test_last_replay_commit_ts_gauge() -> None:

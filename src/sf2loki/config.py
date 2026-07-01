@@ -252,6 +252,80 @@ class SalesforceConfig(StrictModel):
         return self
 
 
+class TransformRule(StrictModel):
+    """One declarative redaction/filter rule, applied at a source's decode boundary.
+
+    Rules run on the decoded payload BEFORE field routing, label promotion, and
+    timestamp extraction — so redacting the timestamp column triggers the
+    timestamp-fallback path, and a ``drop_field`` of a label-promoted column is
+    rejected at load time (it would silently drop the label).
+    """
+
+    action: Literal["hash", "mask", "drop_field", "drop_row", "regex_replace"] = Field(
+        description=(
+            "hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails "
+            "keep the domain, IPv4 truncates to /24, else '***') | drop_field | "
+            "drop_row (row filter via `match`) | regex_replace (pattern -> replacement)."
+        ),
+    )
+    fields: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Payload field names the action applies to (required for hash/mask/"
+            "drop_field/regex_replace; not used by drop_row)."
+        ),
+        examples=[["SOURCE_IP", "CLIENT_IP"]],
+    )
+    match: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "drop_row only: drop rows where EVERY field equals (or glob-matches) "
+            "its value, e.g. {EVENT_TYPE: Sites}."
+        ),
+    )
+    pattern: str | None = Field(
+        default=None,
+        description="regex_replace only: the regular expression to replace (must compile).",
+    )
+    replacement: str = Field(
+        default="",
+        description="regex_replace only: the replacement text (backrefs allowed).",
+    )
+    name: str = Field(
+        default="",
+        description=(
+            "Optional stable rule name used as the `rule` metric label for drop_row "
+            'counts; defaults to "<action>-<index>".'
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_action_requirements(self) -> TransformRule:
+        if self.action == "drop_row":
+            if not self.match:
+                raise ValueError("transform action 'drop_row' requires a non-empty `match`")
+            if self.fields:
+                raise ValueError("transform action 'drop_row' takes `match`, not `fields`")
+        elif not self.fields:
+            raise ValueError(f"transform action {self.action!r} requires non-empty `fields`")
+        if self.action == "regex_replace":
+            if not self.pattern:
+                raise ValueError("transform action 'regex_replace' requires `pattern`")
+            try:
+                re.compile(self.pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"transform pattern {self.pattern!r} does not compile: {exc}"
+                ) from exc
+        elif self.pattern is not None:
+            raise ValueError(f"transform action {self.action!r} does not take `pattern`")
+        return self
+
+
+# Sampling rates are a keep-fraction in (0, 1]; 1.0 = keep everything (default).
+SampleRate = Annotated[float, Field(gt=0.0, le=1.0)]
+
+
 class PubSubConfig(StrictModel):
     """Salesforce Pub/Sub API (real-time event streaming) source."""
 
@@ -296,6 +370,23 @@ class PubSubConfig(StrictModel):
             "then runs only at startup)."
         ),
     )
+    sample: dict[str, SampleRate] = Field(
+        default_factory=dict,
+        description=(
+            "Opt-in lossy volume control: topic glob -> keep fraction (0-1], first "
+            "matching glob wins. Sampling is deterministic by replay_id hash, so a "
+            "replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out "
+            "events still advance checkpoints."
+        ),
+        examples=[{"/event/ApiEventStream": 0.25}],
+    )
+    transforms: list[TransformRule] = Field(
+        default_factory=list,
+        description=(
+            "Redaction/filter rules applied to each decoded event payload before "
+            "shaping (see TransformRule)."
+        ),
+    )
 
 
 # SOQL identifier safety: object/field/EventType names are interpolated into
@@ -326,6 +417,13 @@ class EventLogObjectConfig(StrictModel):
         default=timedelta(hours=1),
         description="Initial window to fetch on first run (no checkpoint).",
     )
+    sample: SampleRate = Field(
+        default=1.0,
+        description=(
+            "Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic "
+            "by record Id hash (replay-stable). 1.0 keeps everything."
+        ),
+    )
 
 
 class EventLogObjectsConfig(StrictModel):
@@ -338,6 +436,13 @@ class EventLogObjectsConfig(StrictModel):
     enabled: bool = Field(default=False, description="Enable the event-object polling source.")
     objects: list[EventLogObjectConfig] = Field(
         default_factory=list, description="Event objects to poll."
+    )
+    transforms: list[TransformRule] = Field(
+        default_factory=list,
+        description=(
+            "Redaction/filter rules applied to each polled record before shaping "
+            "(see TransformRule)."
+        ),
     )
 
 
@@ -387,6 +492,14 @@ class EventLogFileTypeConfig(StrictModel):
             "LOW cardinality — each distinct value is a new Loki stream."
         ),
         examples=[["DELEGATED_USER"]],
+    )
+    sample: SampleRate = Field(
+        default=1.0,
+        description=(
+            "Opt-in lossy volume control: keep fraction (0-1] of this type's rows, "
+            "deterministic by row key hash (replay-stable, Loki-dedup-safe). "
+            "1.0 keeps everything."
+        ),
     )
 
     @model_validator(mode="after")
@@ -511,6 +624,12 @@ class EventLogFileConfig(StrictModel):
             "can't wedge the watermark forever. Files younger than this are retried."
         ),
     )
+    transforms: list[TransformRule] = Field(
+        default_factory=list,
+        description=(
+            "Redaction/filter rules applied to each CSV row before shaping (see TransformRule)."
+        ),
+    )
 
     @property
     def discover(self) -> bool:
@@ -525,6 +644,25 @@ class EventLogFileConfig(StrictModel):
                 'list the ELF EventType values to ingest (e.g. [Login, API]) or "*" to '
                 "discover and ingest all types the org produces"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _forbid_dropping_promoted_labels(self) -> EventLogFileConfig:
+        # drop_field of a label-promoted column would silently drop the label per
+        # row; hash/mask are allowed (a pseudonymised label is a legitimate choice).
+        dropped = {
+            f for rule in self.transforms if rule.action == "drop_field" for f in rule.fields
+        }
+        if not dropped:
+            return self
+        for t in self.event_types:
+            clash = dropped.intersection(t.labels)
+            if clash:
+                raise ValueError(
+                    f"eventlogfile type {t.name!r}: transform drop_field removes "
+                    f"column(s) {sorted(clash)} promoted to labels; remove the label "
+                    "or use hash/mask instead"
+                )
         return self
 
 
@@ -558,6 +696,20 @@ class SourcesConfig(StrictModel):
             "Bypass the fail-fast overlap guard that refuses to start when one "
             "event category is enabled on more than one source."
         ),
+    )
+    transform_salt: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Deployment-wide salt for `hash` transform rules (stable pseudonyms that "
+            "still correlate within this deployment). Strongly recommended whenever a "
+            "hash rule is configured — unsalted hashes of low-entropy values (IPs, "
+            "usernames) are trivially reversible by table lookup."
+        ),
+    )
+    transform_salt_file: Path | None = Field(
+        default=None,
+        description="File path to the transform hash salt (alternative to transform_salt).",
+        examples=["/etc/sf2loki/secrets/transform-salt"],
     )
 
 
@@ -599,6 +751,46 @@ class LokiBatchConfig(StrictModel):
     )
 
 
+class EgressConfig(StrictModel):
+    """Egress guardrails: rate caps and a daily byte budget (all OFF by default).
+
+    Bytes are counted pre-compression (sum of pushed line bytes) — the closest
+    approximation of what Loki-based platforms meter and bill. The rate caps
+    delay pushes (lossless backpressure, propagated upstream to polling/stream
+    flow control); the budget either pauses pushes until the next UTC day
+    (lossless, delayed — bounded by Salesforce-side retention) or drops
+    (lossy, counted in loki_entries_dropped{reason="budget"}).
+    """
+
+    max_lines_per_second: float = Field(
+        default=0,
+        ge=0,
+        description="Token-bucket cap on pushed lines/second; 0 disables.",
+    )
+    max_bytes_per_second: float = Field(
+        default=0,
+        ge=0,
+        description="Token-bucket cap on pushed (pre-compression) bytes/second; 0 disables.",
+    )
+    daily_byte_budget: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Maximum pre-compression bytes pushed per UTC day; 0 disables. The used "
+            "counter persists in the state store, so restarts don't reset it. WARN at "
+            "80%, ERROR + budget_action at 100%."
+        ),
+    )
+    budget_action: Literal["pause", "drop"] = Field(
+        default="pause",
+        description=(
+            "What to do when the daily budget is exhausted: pause (hold pushes + "
+            "checkpoints until the next UTC day; data delayed, never lost, readiness "
+            "reports degraded) | drop (keep running, discard over-budget entries)."
+        ),
+    )
+
+
 class LokiConfig(StrictModel):
     """Loki push-API sink.
 
@@ -631,6 +823,10 @@ class LokiConfig(StrictModel):
     )
     batch: LokiBatchConfig = Field(
         default_factory=LokiBatchConfig, description="Push batching settings."
+    )
+    egress: EgressConfig = Field(
+        default_factory=EgressConfig,
+        description="Egress guardrails: rate caps + daily byte budget (all off by default).",
     )
     labels: dict[str, str] = Field(
         default_factory=dict,
@@ -858,6 +1054,13 @@ def resolve_secrets(cfg: Config) -> Config:
         cfg.sink.loki.auth_token_file,
         cfg.sink.loki.auth_token,
         "loki auth token",
+    )
+    # Transform hash salt is optional (hash rules work unsalted, with a documented
+    # rainbow-table caveat), so resolve a file if given but never require it.
+    cfg.sources.transform_salt = _resolve_secret_file(
+        cfg.sources.transform_salt_file,
+        cfg.sources.transform_salt,
+        "transform hash salt",
     )
     # Telemetry basic-auth token is optional (falls back to the Loki token when
     # left unset), so resolve it if a file is given but never require it here.

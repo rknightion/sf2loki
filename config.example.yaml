@@ -48,6 +48,18 @@ sources:  # Event source selection and settings.
     include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
     exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
     rediscovery_interval: 1h  # How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).
+    sample: {/event/ApiEventStream: 0.25}  # Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints.
+    # Rules run on the decoded payload BEFORE field routing, label promotion,
+    # and timestamp extraction — so redacting the timestamp column triggers the
+    # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+    # is rejected at load time (it would silently drop the label).
+    transforms:  # Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule).
+      - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+        fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+        match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+        pattern: null  # regex_replace only: the regular expression to replace (must compile).
+        replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+        name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
   # Use for categories you'd rather poll than stream (or that have no stream).
   # Do NOT also stream the same category.
   eventlog_objects:  # Event-object SOQL polling source.
@@ -57,6 +69,18 @@ sources:  # Event source selection and settings.
         timestamp_field: EventDate  # The field used as the per-row event time for polling/checkpointing.
         poll_interval: 5m  # How often to poll this object.
         lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+        sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+    # Rules run on the decoded payload BEFORE field routing, label promotion,
+    # and timestamp extraction — so redacting the timestamp column triggers the
+    # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+    # is rejected at load time (it would silently drop the label).
+    transforms:  # Redaction/filter rules applied to each polled record before shaping (see TransformRule).
+      - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+        fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+        match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+        pattern: null  # regex_replace only: the regular expression to replace (must compile).
+        replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+        name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
   # Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
   # EventLogFile``, or the EventType picklist, to see which your org actually
   # produces); schema is read per-file. This is the workhorse for breadth —
@@ -90,6 +114,7 @@ sources:  # Event source selection and settings.
       - name: ""  # The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. (required)
         structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
         labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
+        sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything.
     exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
     poll_interval: 1h  # How often to list new files (Daily files land ~once/day).
     lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
@@ -97,7 +122,20 @@ sources:  # Event source selection and settings.
     page_size: 1000  # SOQL LIMIT for the file-listing query.
     settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly.
     download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
+    # Rules run on the decoded payload BEFORE field routing, label promotion,
+    # and timestamp extraction — so redacting the timestamp column triggers the
+    # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+    # is rejected at load time (it would silently drop the label).
+    transforms:  # Redaction/filter rules applied to each CSV row before shaping (see TransformRule).
+      - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+        fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+        match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+        pattern: null  # regex_replace only: the regular expression to replace (must compile).
+        replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+        name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
   allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
+  # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
+  transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
 sink:  # Log sink settings.
   type: loki  # Sink backend (only loki is supported).
   # Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+
@@ -118,6 +156,17 @@ sink:  # Log sink settings.
       max_line_bytes: 262144  # Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
       queue_maxsize: 10000  # Entry-count bound of the internal source->sink queue. Producers block (structural backpressure) when full.
       queue_max_bytes: 268435456  # Approximate byte budget for queued entries (worst-case memory during a sink outage). Producers block when exceeded, even if the entry-count bound is not reached. Default 256 MiB; 0 disables byte accounting.
+    # Bytes are counted pre-compression (sum of pushed line bytes) — the
+    # closest approximation of what Loki-based platforms meter and bill. The
+    # rate caps delay pushes (lossless backpressure, propagated upstream to
+    # polling/stream flow control); the budget either pauses pushes until the
+    # next UTC day (lossless, delayed — bounded by Salesforce-side retention)
+    # or drops (lossy, counted in loki_entries_dropped{reason="budget"}).
+    egress:  # Egress guardrails: rate caps + daily byte budget (all off by default).
+      max_lines_per_second: 0  # Token-bucket cap on pushed lines/second; 0 disables.
+      max_bytes_per_second: 0  # Token-bucket cap on pushed (pre-compression) bytes/second; 0 disables.
+      daily_byte_budget: 0  # Maximum pre-compression bytes pushed per UTC day; 0 disables. The used counter persists in the state store, so restarts don't reset it. WARN at 80%, ERROR + budget_action at 100%.
+      budget_action: pause  # What to do when the daily budget is exhausted: pause (hold pushes + checkpoints until the next UTC day; data delayed, never lost, readiness reports degraded) | drop (keep running, discard over-budget entries).
     labels: {environment: prod}  # Static stream labels merged onto every push (job + sf_org_id are added automatically).
     structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]  # Event fields promoted to Loki structured metadata (not stream labels).
 state:  # Checkpoint/state store settings.

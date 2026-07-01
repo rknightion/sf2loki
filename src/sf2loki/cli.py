@@ -47,11 +47,95 @@ def main(argv: Sequence[str] | None = None) -> int:
         "reference, or the JSON schema.",
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Live end-to-end preflight: auth, permissions, entitlements, Pub/Sub "
+        "reachability, a Loki test write, and state-dir checks; prints a "
+        "PASS/WARN/FAIL table and exits 1 on any FAIL.",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit machine-readable JSON instead of the table (for CI).",
+    )
+
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="One-shot historical EventLogFile backfill into Loki (resumable; uses "
+        "a separate state file so it is safe alongside the running service).",
+    )
+    backfill_parser.add_argument(
+        "--since",
+        required=True,
+        help="Start of the backfill window, YYYY-MM-DD (UTC, inclusive).",
+    )
+    backfill_parser.add_argument(
+        "--until",
+        default=None,
+        help="End of the backfill window, YYYY-MM-DD (UTC, exclusive; default: now).",
+    )
+    backfill_parser.add_argument(
+        "--event-types",
+        default=None,
+        help="Comma-separated ELF EventTypes to backfill (default: the configured types).",
+    )
+    backfill_parser.add_argument(
+        "--interval",
+        choices=["Daily", "Hourly"],
+        default="Daily",
+        help="Which ELF interval to backfill (Daily is complete per Salesforce docs).",
+    )
+    backfill_parser.add_argument(
+        "--ingest-timestamps",
+        action="store_true",
+        help="Use ingest-time timestamps (event time preserved in structured metadata "
+        'key event_time) instead of the default backfill="true" label strategy.',
+    )
+    backfill_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=2,
+        help="Concurrent file downloads (each spools up to 8 MiB).",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "config":
         sys.stdout.write(_CONFIGDOC_RENDERERS[args.kind]())
         return 0
+
+    if args.command == "doctor":
+        from sf2loki.doctor import run_doctor
+
+        return uvloop.run(run_doctor(args.config, json_output=args.json_output))
+
+    if args.command == "backfill":
+        from sf2loki.backfill import parse_backfill_date, run_backfill
+
+        try:
+            since = parse_backfill_date(args.since)
+            until = parse_backfill_date(args.until) if args.until else None
+            cfg = load(args.config)
+        except (ConfigError, ValueError) as exc:
+            print(f"sf2loki: {exc}", file=sys.stderr)
+            return 2
+        event_types = (
+            [t.strip() for t in args.event_types.split(",") if t.strip()]
+            if args.event_types
+            else None
+        )
+        return uvloop.run(
+            run_backfill(
+                cfg,
+                since=since,
+                until=until,
+                event_types=event_types,
+                interval=args.interval,
+                ingest_timestamps=args.ingest_timestamps,
+                concurrency=args.concurrency,
+            )
+        )
 
     if args.check:
         try:

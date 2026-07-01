@@ -95,11 +95,25 @@ class _Gauge:
         self._instr.set(value, _NO_ATTRS)
 
 
+class _BoundHistogram:
+    __slots__ = ("_attrs", "_instr")
+
+    def __init__(self, instr: _RecordInstrument, attrs: Mapping[str, str]) -> None:
+        self._instr = instr
+        self._attrs = attrs
+
+    def observe(self, value: float) -> None:
+        self._instr.record(value, self._attrs)
+
+
 class _Histogram:
     __slots__ = ("_instr",)
 
     def __init__(self, instr: _RecordInstrument) -> None:
         self._instr = instr
+
+    def labels(self, **kwargs: str) -> _BoundHistogram:
+        return _BoundHistogram(self._instr, kwargs)
 
     def observe(self, value: float) -> None:
         self._instr.record(value, _NO_ATTRS)
@@ -247,10 +261,27 @@ class Metrics:
                 description="Unix ts of the last successful Loki push",
             )
         )
-        self.ingest_lag = _Gauge(
-            meter.create_gauge(
+        # Histogram (not a gauge): enables p95/p99 lag alerting. Buckets reach 24h
+        # because EventLogFile lag is legitimately 3-6h — the OTel defaults top out
+        # at 10000s and would collapse the entire ELF range into +Inf.
+        self.ingest_lag = _Histogram(
+            meter.create_histogram(
                 "sf2loki_ingest_lag_seconds",
                 description="now - event EventDate, per event type (SLI)",
+                explicit_bucket_boundaries_advisory=[
+                    1,
+                    5,
+                    15,
+                    60,
+                    300,
+                    900,
+                    1800,
+                    3600,
+                    7200,
+                    14400,
+                    28800,
+                    86400,
+                ],
             )
         )
         self.last_replay_commit_ts = _Gauge(
@@ -372,6 +403,54 @@ class Metrics:
             meter.create_counter(
                 "sf2loki_lines_truncated",
                 description="Log lines truncated to max_line_bytes, per source",
+            )
+        )
+
+        # --- Egress guardrails (sampling / rate cap / daily byte budget) ---
+        self.entries_sampled_out = _Counter(
+            meter.create_counter(
+                "sf2loki_entries_sampled_out",
+                description=(
+                    "Rows/events dropped by deterministic per-type sampling, "
+                    "per source and event type"
+                ),
+            )
+        )
+        self.rows_filtered = _Counter(
+            meter.create_counter(
+                "sf2loki_rows_filtered",
+                description="Rows dropped by transform drop_row rules, per source and rule",
+            )
+        )
+        self.egress_budget_used_bytes = _Gauge(
+            meter.create_gauge(
+                "sf2loki_egress_budget_used_bytes",
+                description=(
+                    "Pre-compression bytes counted against the daily egress budget "
+                    "(current UTC day)"
+                ),
+            )
+        )
+        self.egress_paused = _Gauge(
+            meter.create_gauge(
+                "sf2loki_egress_paused",
+                description="1 while pushes are paused by the daily byte budget, else 0",
+            )
+        )
+
+        # --- EventLogFile cycle timing (concurrent per-type processing) ---
+        self.eventlogfile_cycle_seconds = _Gauge(
+            meter.create_gauge(
+                "sf2loki_eventlogfile_cycle_seconds",
+                description="Wall-clock duration of the last EventLogFile poll cycle",
+            )
+        )
+
+        # --- HA / leadership ---
+        self.leader = _Gauge(
+            meter.create_gauge(
+                "sf2loki_leader",
+                description="1 while this instance holds leadership (or runs standalone), else 0",
             )
         )
 

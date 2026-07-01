@@ -43,6 +43,8 @@
 | `eventlog_objects` | `EventLogObjectsConfig` |  | no | Event-object SOQL polling source. |
 | `eventlogfile` | `EventLogFileConfig` |  | no | EventLogFile (CSV) ingestion source. |
 | `allow_overlap` | `bool` | false | no | Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source. |
+| `transform_salt` | `SecretStr` | *(secret)* | no | Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup. |
+| `transform_salt_file` | `Path` | /etc/sf2loki/secrets/transform-salt | no | File path to the transform hash salt (alternative to transform_salt). |
 
 ## PubSubConfig
 
@@ -56,6 +58,19 @@
 | `include` | `list[str]` | ["*"] | no | Operator inclusion globs applied to discovered/explicit topics. |
 | `exclude` | `list[str]` | [] | no | Operator exclusion globs applied to discovered/explicit topics. |
 | `rediscovery_interval` | `Duration` | 1h | no | How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup). |
+| `sample` | `dict[str, typing.Annotated[float, FieldInfo(annotation=NoneType, required=True, metadata=[Gt(gt=0.0), Le(le=1.0)])]]` | {/event/ApiEventStream: 0.25} | no | Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints. |
+| `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule). |
+
+## TransformRule
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `action` | `Literal['hash', 'mask', 'drop_field', 'drop_row', 'regex_replace']` | null | yes | hash (salted SHA-256 -> stable pseudonym) \| mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') \| drop_field \| drop_row (row filter via `match`) \| regex_replace (pattern -> replacement). |
+| `fields` | `list[str]` | [SOURCE_IP, CLIENT_IP] | no | Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row). |
+| `match` | `dict[str, str]` | {} | no | drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}. |
+| `pattern` | `str` | null | no | regex_replace only: the regular expression to replace (must compile). |
+| `replacement` | `str` | "" | no | regex_replace only: the replacement text (backrefs allowed). |
+| `name` | `str` | "" | no | Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>". |
 
 ## EventLogObjectsConfig
 
@@ -63,6 +78,7 @@
 | --- | --- | --- | --- | --- |
 | `enabled` | `bool` | false | no | Enable the event-object polling source. |
 | `objects` | `list[EventLogObjectConfig]` |  | no | Event objects to poll. |
+| `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each polled record before shaping (see TransformRule). |
 
 ## EventLogObjectConfig
 
@@ -72,6 +88,7 @@
 | `timestamp_field` | `str` | EventDate | no | The field used as the per-row event time for polling/checkpointing. |
 | `poll_interval` | `Duration` | 5m | no | How often to poll this object. |
 | `lookback` | `Duration` | 1h | no | Initial window to fetch on first run (no checkpoint). |
+| `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything. |
 
 ## EventLogFileConfig
 
@@ -87,6 +104,7 @@
 | `page_size` | `int` | 1000 | no | SOQL LIMIT for the file-listing query. |
 | `settle_window` | `Duration` | 0s | no | Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly. |
 | `download_max_age` | `Duration` | 1d | no | A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried. |
+| `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each CSV row before shaping (see TransformRule). |
 
 ## EventLogFileTypeConfig
 
@@ -95,6 +113,7 @@
 | `name` | `str` | "" | yes | The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. |
 | `structured_metadata_fields` | `list[str]` | [REPORT_ID, OWNER_ID] | no | Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it. |
 | `labels` | `list[str]` | [DELEGATED_USER] | no | Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream. |
+| `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything. |
 
 ## SinkConfig
 
@@ -114,6 +133,7 @@
 | `encoding` | `Literal['protobuf', 'json']` | protobuf | no | Wire encoding for the push request. |
 | `compression` | `Literal['snappy', 'gzip', 'none']` | snappy | no | Compression: snappy (protobuf) \| gzip (json) \| none. |
 | `batch` | `LokiBatchConfig` |  | no | Push batching settings. |
+| `egress` | `EgressConfig` |  | no | Egress guardrails: rate caps + daily byte budget (all off by default). |
 | `labels` | `dict[str, str]` | {environment: prod} | no | Static stream labels merged onto every push (job + sf_org_id are added automatically). |
 | `structured_metadata_fields` | `list[str]` | [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key] | no | Event fields promoted to Loki structured metadata (not stream labels). |
 
@@ -127,6 +147,15 @@
 | `max_line_bytes` | `int` | 262144 | no | Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables. |
 | `queue_maxsize` | `int` | 10000 | no | Entry-count bound of the internal source->sink queue. Producers block (structural backpressure) when full. |
 | `queue_max_bytes` | `int` | 268435456 | no | Approximate byte budget for queued entries (worst-case memory during a sink outage). Producers block when exceeded, even if the entry-count bound is not reached. Default 256 MiB; 0 disables byte accounting. |
+
+## EgressConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `max_lines_per_second` | `float` | 0 | no | Token-bucket cap on pushed lines/second; 0 disables. |
+| `max_bytes_per_second` | `float` | 0 | no | Token-bucket cap on pushed (pre-compression) bytes/second; 0 disables. |
+| `daily_byte_budget` | `int` | 0 | no | Maximum pre-compression bytes pushed per UTC day; 0 disables. The used counter persists in the state store, so restarts don't reset it. WARN at 80%, ERROR + budget_action at 100%. |
+| `budget_action` | `Literal['pause', 'drop']` | pause | no | What to do when the daily budget is exhausted: pause (hold pushes + checkpoints until the next UTC day; data delayed, never lost, readiness reports degraded) \| drop (keep running, discard over-budget entries). |
 
 ## StateConfig
 

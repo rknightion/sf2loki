@@ -205,7 +205,7 @@ class Pipeline:
                         source=source.name, event_type=event_type
                     ).inc()
                     lag = (datetime.now(UTC) - entry.timestamp).total_seconds()
-                    self._metrics.ingest_lag.labels(event_type=event_type).set(lag)
+                    self._metrics.ingest_lag.labels(event_type=event_type).observe(lag)
                 await self._charge(entry)
                 await queue.put(entry)
                 # Also updated here (not just in the consumer) so the gauge keeps
