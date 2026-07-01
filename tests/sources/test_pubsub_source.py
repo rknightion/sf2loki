@@ -8,13 +8,15 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
+import grpc
+import grpc.aio
 import pytest
 import structlog.testing
 
 from sf2loki.config import PubSubConfig
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.pubsub_client import DecodedEvent, preset_for
-from sf2loki.sources.pubsub_source import PubSubSource
+from sf2loki.salesforce.pubsub_client import DecodedEvent, KeepaliveEvent, preset_for
+from sf2loki.sources.pubsub_source import PubSubSource, _jitter
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -97,6 +99,59 @@ class FakePubSubClient:
                 self._stop_after_first.set()
         # Subsequent calls: empty stream (immediate close) so reconnect backoff
         # triggers; the stop event will interrupt the backoff sleep.
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _rpc_error(code: grpc.StatusCode) -> grpc.aio.AioRpcError:
+    """Build a real AioRpcError with the given status code (as raised client-side)."""
+    return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), grpc.aio.Metadata(), "rejected", "")
+
+
+class ScriptedClient:
+    """Fake client whose subscribe() follows a per-call script.
+
+    Each script entry is either an Exception (raised after the call is
+    recorded) or a list of items; list items are yielded in order, except that
+    an Exception inside the list is raised at that point (mid-stream failure).
+    After the script is exhausted every stream is empty (immediate clean close).
+    ``on_call`` maps a 0-based call index to an asyncio.Event set when that
+    call starts, letting tests deterministically wait for a given attempt.
+    """
+
+    def __init__(
+        self,
+        scripts: list[Exception | list[DecodedEvent | KeepaliveEvent | Exception]],
+        *,
+        on_call: dict[int, asyncio.Event] | None = None,
+    ) -> None:
+        self.scripts = scripts
+        self.calls: list[dict[str, object]] = []
+        self._on_call = on_call or {}
+
+    async def subscribe(
+        self,
+        topic: str,
+        *,
+        replay_preset: int,
+        replay_id: bytes = b"",
+        num_requested: int | None = None,
+    ) -> AsyncIterator[DecodedEvent | KeepaliveEvent]:
+        idx = len(self.calls)
+        self.calls.append({"topic": topic, "replay_preset": replay_preset, "replay_id": replay_id})
+        signal = self._on_call.get(idx)
+        if signal is not None:
+            signal.set()
+        if idx < len(self.scripts):
+            script = self.scripts[idx]
+            if isinstance(script, Exception):
+                raise script
+            for item in script:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        # Script exhausted: empty stream (immediate clean close).
 
     async def aclose(self) -> None:
         pass
@@ -594,25 +649,359 @@ async def test_stream_error_is_logged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Replay-id self-healing on INVALID_ARGUMENT (B1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalid_replay_id_falls_back_to_earliest() -> None:
+    """INVALID_ARGUMENT while resuming from a stored replay id → resubscribe EARLIEST.
+
+    Salesforce rejects an expired/corrupt CUSTOM replay id with INVALID_ARGUMENT;
+    retrying with the same dead id forever is a permanent silent outage. The
+    source must discard the id, count a fallback, log ERROR, and go EARLIEST
+    (bounded duplicates, deduped by Loki) — never LATEST (guaranteed loss).
+    """
+    stored_b64 = base64.b64encode(STORED_REPLAY_ID).decode("ascii")
+    state = FakeCheckpointStore({f"pubsub:{TOPIC}": stored_b64})
+    stop = asyncio.Event()
+    client = ScriptedClient(
+        [
+            _rpc_error(grpc.StatusCode.INVALID_ARGUMENT),
+            [make_event(replay_id=REPLAY_ID_1)],
+        ]
+    )
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        metrics=metrics,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    assert len(client.calls) >= 2
+    assert client.calls[0]["replay_preset"] == preset_for("CUSTOM")
+    assert client.calls[0]["replay_id"] == STORED_REPLAY_ID
+    assert client.calls[1]["replay_preset"] == preset_for("EARLIEST")
+    assert client.calls[1]["replay_id"] == b""
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_pubsub_replay_fallbacks_total", {"topic": TOPIC}
+    )
+    assert val == 1.0
+
+    errors = [e for e in captured if e["log_level"] == "error"]
+    assert errors, "replay fallback was not logged at ERROR"
+    assert "data gap" in errors[0]["event"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_argument_without_custom_position_retries_loudly() -> None:
+    """INVALID_ARGUMENT while NOT resuming from a replay id = config error.
+
+    No replay fallback (there is no id to discard); every attempt logs at
+    ERROR so the loop is permanently red and diagnosable, not silent.
+    """
+    state = FakeCheckpointStore()  # no stored id → LATEST
+    stop = asyncio.Event()
+    third_call = asyncio.Event()
+    client = ScriptedClient(
+        [_rpc_error(grpc.StatusCode.INVALID_ARGUMENT)] * 5,
+        on_call={2: third_call},
+    )
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        metrics=metrics,
+    )
+
+    entries: list = []
+
+    async def consume() -> None:
+        async for entry in src.events(state, stop):
+            entries.append(entry)
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(third_call.wait(), timeout=5.0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    errors = [e for e in captured if e["log_level"] == "error"]
+    assert len(errors) >= 2, "config-error INVALID_ARGUMENT must log ERROR on every attempt"
+    for call in client.calls:
+        assert call["replay_preset"] == preset_for("LATEST")
+    assert (
+        metrics.registry.get_sample_value("sf2loki_pubsub_replay_fallbacks_total", {"topic": TOPIC})
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Keepalive checkpointing (B2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_keepalive_enqueues_checkpoint_only_entry() -> None:
+    """A keepalive's latest_replay_id is enqueued as a checkpoint_only LogEntry.
+
+    Routed through the queue (not committed directly) so the pipeline's
+    commit-after-push ordering is preserved.
+    """
+    stop = asyncio.Event()
+    ka = KeepaliveEvent(topic=TOPIC, latest_replay_id=b"\x00\x05")
+    client = ScriptedClient([[ka]])
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+    )
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.checkpoint_only is True
+    assert entry.line == ""
+    assert dict(entry.labels) == {}
+    assert dict(entry.structured_metadata) == {}
+    assert entry.checkpoint.key == f"pubsub:{TOPIC}"
+    assert entry.checkpoint.value == base64.b64encode(b"\x00\x05").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_keepalive_with_unchanged_replay_id_is_not_reemitted() -> None:
+    """Repeated keepalives with the same latest_replay_id emit only one entry."""
+    stop = asyncio.Event()
+    ka5 = KeepaliveEvent(topic=TOPIC, latest_replay_id=b"\x00\x05")
+    ka5_dup = KeepaliveEvent(topic=TOPIC, latest_replay_id=b"\x00\x05")
+    ka6 = KeepaliveEvent(topic=TOPIC, latest_replay_id=b"\x00\x06")
+    client = ScriptedClient([[ka5, ka5_dup, ka6]])
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+    )
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=2)
+
+    assert len(entries) == 2
+    values = [e.checkpoint.value for e in entries]
+    assert values == [
+        base64.b64encode(b"\x00\x05").decode("ascii"),
+        base64.b64encode(b"\x00\x06").decode("ascii"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_resumes_from_keepalive_replay_id() -> None:
+    """After a keepalive, a reconnect subscribes CUSTOM from the keepalive's id."""
+    stop = asyncio.Event()
+    second_call = asyncio.Event()
+    ka = KeepaliveEvent(topic=TOPIC, latest_replay_id=b"\x00\x05")
+    client = ScriptedClient([[ka]], on_call={1: second_call})
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+    )
+    state = FakeCheckpointStore()
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(second_call.wait(), timeout=5.0)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert client.calls[1]["replay_preset"] == preset_for("CUSTOM")
+    assert client.calls[1]["replay_id"] == b"\x00\x05"
+
+
+# ---------------------------------------------------------------------------
+# Backoff reset + jitter (B5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backoff_resets_after_healthy_connection() -> None:
+    """Backoff returns to base once a connection delivers an event.
+
+    Without the reset, the known session-expiry churn (a failure every few
+    minutes) ratchets every topic to max_backoff permanently.
+    """
+    base = 0.01
+    stop = asyncio.Event()
+    fifth_call = asyncio.Event()
+    err = _rpc_error(grpc.StatusCode.UNAVAILABLE)
+    # Attempts 1-3 fail immediately; attempt 4 delivers an event (healthy) then
+    # fails mid-stream; attempt 5 signals the test to stop.
+    client = ScriptedClient(
+        [err, err, err, [make_event(replay_id=REPLAY_ID_1), err]],
+        on_call={4: fifth_call},
+    )
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=base,
+        max_backoff=30.0,
+    )
+    state = FakeCheckpointStore()
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):
+            pass
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(fifth_call.wait(), timeout=5.0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    warnings = [e for e in captured if e["event"] == "pubsub stream error"]
+    assert len(warnings) >= 4
+    # Attempts 1-3 ratchet the backoff; attempt 4 received an event first, so
+    # its failure must be logged with the backoff reset to base.
+    assert warnings[2]["backoff"] > base
+    assert warnings[3]["backoff"] == pytest.approx(base)
+
+
+def test_jitter_bounds() -> None:
+    """_jitter returns a uniform value in [0, backoff/2]."""
+    for _ in range(200):
+        j = _jitter(10.0)
+        assert 0.0 <= j <= 5.0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_sleep_applies_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconnect sleeps include jitter so topics don't reconnect in lockstep."""
+    jitter_calls: list[float] = []
+
+    def fake_jitter(backoff: float) -> float:
+        jitter_calls.append(backoff)
+        return 0.0
+
+    monkeypatch.setattr("sf2loki.sources.pubsub_source._jitter", fake_jitter)
+
+    stop = asyncio.Event()
+    second_call = asyncio.Event()
+    client = ScriptedClient(
+        [_rpc_error(grpc.StatusCode.UNAVAILABLE)],
+        on_call={1: second_call},
+    )
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+    )
+    state = FakeCheckpointStore()
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(second_call.wait(), timeout=5.0)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert jitter_calls, "reconnect sleep did not apply jitter"
+
+
+# ---------------------------------------------------------------------------
+# Sentinel put on cancelled shutdown (B7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancelled_topic_task_with_full_queue_does_not_hang() -> None:
+    """Force-cancelling _run_topic with a full queue must not hang on the sentinel.
+
+    When tasks are force-cancelled the consumer is gone; an awaited put on a
+    full queue that nobody drains would block forever.
+    """
+    stop = asyncio.Event()
+    hang = asyncio.Event()
+
+    class HangingClient:
+        async def subscribe(
+            self,
+            topic: str,
+            *,
+            replay_preset: int,
+            replay_id: bytes = b"",
+            num_requested: int | None = None,
+        ) -> AsyncIterator[DecodedEvent]:
+            if False:  # make this an async generator
+                yield  # pragma: no cover
+            await hang.wait()
+
+        async def aclose(self) -> None:
+            pass
+
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        HangingClient(),  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+    )
+    state = FakeCheckpointStore()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    queue.put_nowait(None)  # fill the queue so a sentinel put would block
+
+    task = asyncio.create_task(src._run_topic(TOPIC, state, stop, queue))
+    await asyncio.sleep(0.05)  # let the task reach the subscribe await
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
 # Topic discovery / "*" wildcard
 
 
 class FakeStreamDiscoverer:
-    def __init__(self, topics: list[str], *, error: bool = False) -> None:
+    def __init__(self, topics: list[str], *, error: bool = False, fail_times: int = 0) -> None:
         self.topics = topics
         self.error = error
+        self.fail_times = fail_times
         self.calls = 0
 
     async def list_event_stream_topics(self) -> list[str]:
         self.calls += 1
-        if self.error:
+        if self.error or self.calls <= self.fail_times:
             raise RuntimeError("discovery down")
         return list(self.topics)
 
 
 def _resolver_src(topics, *, include=None, exclude=None, discoverer=None) -> PubSubSource:
     cfg = PubSubConfig(topics=topics, include=include or ["/event/*"], exclude=exclude or [])
-    return PubSubSource(cfg, object(), sm_fields=[], topic_discoverer=discoverer)  # type: ignore[arg-type]
+    return PubSubSource(
+        cfg,
+        object(),  # type: ignore[arg-type]
+        sm_fields=[],
+        topic_discoverer=discoverer,
+        reconnect_backoff=0.01,  # keep discovery-retry sleeps short in tests
+    )
 
 
 @pytest.mark.asyncio
@@ -640,10 +1029,28 @@ async def test_no_wildcard_skips_discovery() -> None:
 
 
 @pytest.mark.asyncio
-async def test_discovery_failure_falls_back_to_explicit() -> None:
+async def test_discovery_failure_retries_then_falls_back_to_explicit() -> None:
+    """A persistently failing discovery is retried, then falls back with an ERROR log.
+
+    One transient failure must not silently reduce the subscription set for
+    the process lifetime (the old behavior tried once and warned).
+    """
     disc = FakeStreamDiscoverer([], error=True)
     src = _resolver_src(["*", "/event/LoginEventStream"], discoverer=disc)
-    assert await src._resolve_topics() == ["/event/LoginEventStream"]
+    with structlog.testing.capture_logs() as captured:
+        assert await src._resolve_topics() == ["/event/LoginEventStream"]
+    assert disc.calls == 3, "discovery must be retried before giving up"
+    errors = [e for e in captured if e["log_level"] == "error"]
+    assert errors, "final discovery failure must be logged at ERROR"
+
+
+@pytest.mark.asyncio
+async def test_discovery_transient_failure_retries_then_succeeds() -> None:
+    disc = FakeStreamDiscoverer(["/event/ApiEventStream"], fail_times=2)
+    src = _resolver_src(["*", "/event/LoginEventStream"], discoverer=disc)
+    topics = await src._resolve_topics()
+    assert disc.calls == 3
+    assert sorted(topics) == ["/event/ApiEventStream", "/event/LoginEventStream"]
 
 
 def test_resolve_topics_sync_excludes_wildcard_marker() -> None:

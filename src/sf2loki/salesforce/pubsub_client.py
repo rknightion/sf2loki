@@ -20,7 +20,7 @@ from sf2loki.config import PubSubConfig
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
 from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
-from sf2loki.salesforce.avro_codec import AvroCodec
+from sf2loki.salesforce.avro_codec import AvroCodec, SchemaFetchError
 
 if TYPE_CHECKING:
     from sf2loki.auth.jwt_auth import AccessToken, TokenProvider
@@ -28,6 +28,25 @@ if TYPE_CHECKING:
 # Low-watermark fraction: send a top-up when outstanding credits drop below
 # this fraction of the originally requested batch size.
 _TOPUP_THRESHOLD_FRACTION = 0.5
+
+# Application-level watchdog: Salesforce guarantees SOME FetchResponse (events
+# or an empty keepalive batch with latest_replay_id) at least every 270s while
+# flow-control credits are pending. Silence beyond this means a dead (half-open)
+# stream, so it is torn down and the source reconnects.
+STREAM_STALL_TIMEOUT_SECONDS = 300.0
+
+# HTTP/2 keepalive pings on the owned channel: detect dead transports (NAT/LB
+# idle drops) below the application watchdog, without waiting the full 300s.
+_CHANNEL_OPTIONS: list[tuple[str, int]] = [
+    ("grpc.keepalive_time_ms", 30_000),
+    ("grpc.keepalive_timeout_ms", 10_000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
+]
+
+
+class StreamStalledError(TimeoutError):
+    """No FetchResponse arrived within the stall timeout; stream presumed dead."""
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +105,20 @@ class DecodedEvent:
     payload: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class KeepaliveEvent:
+    """An empty-batch FetchResponse's ``latest_replay_id`` (Salesforce keepalive).
+
+    Salesforce sends one at least every 270s while credits are pending and
+    explicitly recommends persisting the id: it is >= every replay_id delivered
+    before it, so it is a valid resume position even on a quiet topic — without
+    it the stored checkpoint ages out of the 72h replay retention window.
+    """
+
+    topic: str
+    latest_replay_id: bytes
+
+
 # ---------------------------------------------------------------------------
 # PubSubClient
 # ---------------------------------------------------------------------------
@@ -104,6 +137,10 @@ class PubSubClient:
         Optional injected :class:`grpc.aio.Channel`.  When *None* (production),
         a TLS channel to ``cfg.endpoint`` is created and owned by this client.
         Pass an insecure channel in tests to avoid TLS setup.
+    stall_timeout:
+        Seconds of stream silence tolerated before the watchdog declares the
+        stream dead (default :data:`STREAM_STALL_TIMEOUT_SECONDS`).  Injectable
+        for tests.
     """
 
     def __init__(
@@ -113,10 +150,12 @@ class PubSubClient:
         *,
         channel: grpc.aio.Channel | None = None,
         metrics: Metrics | None = None,
+        stall_timeout: float = STREAM_STALL_TIMEOUT_SECONDS,
     ) -> None:
         self._cfg = cfg
         self._tokens = tokens
         self._metrics = metrics if metrics is not None else Metrics()
+        self._stall_timeout = stall_timeout
 
         if channel is None:
             # Production path: the TLS channel is created LAZILY on first use
@@ -148,7 +187,9 @@ class PubSubClient:
         """
         if self._stub_cached is None:
             creds = grpc.ssl_channel_credentials()
-            self._channel = grpc.aio.secure_channel(self._cfg.endpoint, creds)
+            self._channel = grpc.aio.secure_channel(
+                self._cfg.endpoint, creds, options=_CHANNEL_OPTIONS
+            )
             self._stub_cached = pb_grpc.PubSubStub(self._channel)  # type: ignore[no-untyped-call]
         return self._stub_cached
 
@@ -179,8 +220,8 @@ class PubSubClient:
         replay_preset: int,
         replay_id: bytes = b"",
         num_requested: int | None = None,
-    ) -> AsyncIterator[DecodedEvent]:
-        """Subscribe to *topic* and yield decoded events.
+    ) -> AsyncIterator[DecodedEvent | KeepaliveEvent]:
+        """Subscribe to *topic* and yield decoded events and keepalive markers.
 
         Parameters
         ----------
@@ -197,14 +238,24 @@ class PubSubClient:
         ------
         DecodedEvent
             One per Salesforce event received on the stream.
+        KeepaliveEvent
+            One per empty-batch FetchResponse carrying a ``latest_replay_id``
+            (Salesforce's keepalive) so callers can advance their checkpoint
+            on quiet topics.
+
+        Raises
+        ------
+        StreamStalledError
+            When no FetchResponse of any kind arrives within *stall_timeout*
+            seconds — the stream is presumed dead (half-open connection).
         """
         n = num_requested if num_requested is not None else self._cfg.default_num_requested
         low_watermark = n // 2
 
+        call: grpc.aio.StreamStreamCall[Any, Any] | None = None
         try:
-            call: grpc.aio.StreamStreamCall[Any, Any] = self._stub().Subscribe(
-                metadata=await self._metadata()
-            )
+            call = self._stub().Subscribe(metadata=await self._metadata())
+            assert call is not None  # narrow for the type checker
 
             # Initial FetchRequest identifies the topic and replay position.
             await call.write(
@@ -216,11 +267,34 @@ class PubSubClient:
                 )
             )
 
-            async for response in call:
+            responses = call.__aiter__()
+            while True:
+                # Watchdog: Salesforce guarantees SOME FetchResponse (events or
+                # keepalive) at least every 270s while credits are pending, so
+                # silence beyond the stall timeout means a dead stream.
+                try:
+                    response = await asyncio.wait_for(
+                        responses.__anext__(), timeout=self._stall_timeout
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    self._metrics.pubsub_stream_stalls.labels(topic=topic).inc()
+                    raise StreamStalledError(
+                        f"no FetchResponse on {topic} for {self._stall_timeout}s; "
+                        "stream presumed dead"
+                    ) from None
+
                 for ce in response.events:
                     schema_id: str = ce.event.schema_id
                     try:
                         decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
+                    except SchemaFetchError:
+                        # Schema fetch/parse failed (e.g. GetSchema RPC error).
+                        # NOT a poison payload: skipping would advance the
+                        # checkpoint past the event (silent loss). Propagate so
+                        # the source reconnects and replays from the checkpoint.
+                        raise
                     except Exception as exc:
                         # One malformed event must not kill the whole topic stream.
                         self._metrics.decode_errors.labels(reason=type(exc).__name__).inc()
@@ -233,13 +307,22 @@ class PubSubClient:
                         payload=decoded_payload,
                     )
 
+                if not response.events and response.latest_replay_id:
+                    # Keepalive: empty batch whose latest_replay_id is a valid
+                    # resume position — surface it so quiet topics can still
+                    # advance their checkpoint.
+                    yield KeepaliveEvent(topic=topic, latest_replay_id=response.latest_replay_id)
+
                 self._metrics.pubsub_pending_credits.labels(topic=topic).set(
                     response.pending_num_requested
                 )
 
                 # Flow-control: top up when outstanding credits drop to or below
-                # the low watermark so the server never runs dry.  Guard against
-                # writing to a stream the server has already half-closed.
+                # the low watermark so the server never runs dry.  This fires on
+                # every response (including keepalives), which also satisfies
+                # Salesforce's rule that a FetchRequest must arrive within 60s
+                # of pending credits hitting 0.  Guard against writing to a
+                # stream the server has already half-closed.
                 if response.pending_num_requested <= low_watermark:
                     try:
                         await call.write(
@@ -268,6 +351,12 @@ class PubSubClient:
             # re-present the dead token and the stream would never recover.
             self._handle_rpc_error(exc)
             raise
+        finally:
+            # Cancel the RPC so it doesn't linger when the generator is closed
+            # mid-iteration (GeneratorExit via the stop path) or torn down by
+            # the watchdog. A no-op on an already-finished call.
+            if call is not None:
+                call.cancel()
 
     async def aclose(self) -> None:
         """Close the underlying gRPC channel (only if owned + actually created)."""

@@ -9,6 +9,7 @@ Uses an in-process fake gRPC servicer to exercise:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from collections.abc import AsyncIterator
@@ -25,7 +26,14 @@ from sf2loki.config import PubSubConfig
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
 from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
-from sf2loki.salesforce.pubsub_client import DecodedEvent, PubSubClient, preset_for
+from sf2loki.salesforce.avro_codec import SchemaFetchError
+from sf2loki.salesforce.pubsub_client import (
+    DecodedEvent,
+    KeepaliveEvent,
+    PubSubClient,
+    StreamStalledError,
+    preset_for,
+)
 
 # ---------------------------------------------------------------------------
 # Test schema + encoding helpers
@@ -247,6 +255,92 @@ class AbortingFakeServicer(pb_grpc.PubSubServicer):
         yield pb.FetchResponse()  # pragma: no cover - abort() never returns
 
 
+class SchemaFetchFailingServicer(pb_grpc.PubSubServicer):
+    """GetSchema fails with UNAVAILABLE while Subscribe delivers events.
+
+    Models a transient schema-registry outage during an otherwise healthy
+    stream: the events must NOT be poison-skipped (that would advance the
+    checkpoint past them = loss); the stream must die so the source replays.
+    """
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        await context.abort(grpc.StatusCode.UNAVAILABLE, "schema registry down")
+        return pb.SchemaInfo()  # pragma: no cover - abort() never returns
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        record = {"Id": "ok", "EventDate": "2024-01-01T00:00:00Z"}
+        async for _req in request_iterator:
+            yield pb.FetchResponse(
+                events=[_make_consumer_event(record, b"\x01")],
+                latest_replay_id=b"\x01",
+                rpc_id="rpc-1",
+                pending_num_requested=5,
+            )
+            return
+
+
+class HangingFakeServicer(pb_grpc.PubSubServicer):
+    """Servicer that accepts the subscription but never sends any response.
+
+    Models a half-open connection: the client sees no error and no data.
+    """
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        return pb.SchemaInfo(schema_json=_SCHEMA_JSON, schema_id=request.schema_id)
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        async for _req in request_iterator:
+            await asyncio.sleep(3600)
+        yield pb.FetchResponse()  # pragma: no cover - never reached
+
+
+class _RecordingFakeCall:
+    """Fake StreamStreamCall: yields queued responses, then hangs; records cancel()."""
+
+    def __init__(self, responses: list[pb.FetchResponse]) -> None:
+        self._responses = responses
+        self.cancelled = False
+        self._hang = asyncio.Event()
+
+    async def write(self, request: pb.FetchRequest) -> None:
+        return None
+
+    def cancel(self) -> bool:
+        self.cancelled = True
+        self._hang.set()
+        return True
+
+    def __aiter__(self) -> AsyncIterator[pb.FetchResponse]:
+        return self._gen()
+
+    async def _gen(self) -> AsyncIterator[pb.FetchResponse]:
+        for r in self._responses:
+            yield r
+        await self._hang.wait()
+
+
+class _FakeStub:
+    """Stub double returning a pre-built fake call from Subscribe."""
+
+    def __init__(self, call: _RecordingFakeCall) -> None:
+        self._call = call
+
+    def Subscribe(self, metadata: object = None) -> _RecordingFakeCall:
+        return self._call
+
+
 # ---------------------------------------------------------------------------
 # Pytest fixtures
 # ---------------------------------------------------------------------------
@@ -273,13 +367,17 @@ async def _make_server_and_client(
     cfg: PubSubConfig,
     tokens: FakeTokenProvider,
     metrics: Metrics | None = None,
+    stall_timeout: float | None = None,
 ) -> tuple[grpc.aio.Server, PubSubClient]:
     server: grpc.aio.Server = grpc.aio.server()
     pb_grpc.add_PubSubServicer_to_server(servicer, server)
     port: int = server.add_insecure_port("127.0.0.1:0")
     await server.start()
     channel: grpc.aio.Channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
-    client = PubSubClient(cfg, tokens, channel=channel, metrics=metrics)
+    kwargs: dict[str, Any] = {}
+    if stall_timeout is not None:
+        kwargs["stall_timeout"] = stall_timeout
+    client = PubSubClient(cfg, tokens, channel=channel, metrics=metrics, **kwargs)
     return server, client
 
 
@@ -576,3 +674,176 @@ async def test_subscribe_skips_malformed_event_and_counts_decode_error(
     finally:
         await server.stop(None)
         await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: keepalive latest_replay_id (B2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_yields_keepalive_on_empty_batch(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """An empty-batch FetchResponse with latest_replay_id yields a KeepaliveEvent.
+
+    Salesforce sends one at least every 270s on a quiet topic and recommends
+    saving the id; without it the checkpoint ages out of the 72h replay window.
+    """
+    servicer = BasicFakeServicer([])  # empty events + latest_replay_id=b"\x00\x01"
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        items = [ev async for ev in client.subscribe("/event/X", replay_preset=pb.LATEST)]
+        keepalives = [i for i in items if isinstance(i, KeepaliveEvent)]
+        assert keepalives == [KeepaliveEvent(topic="/event/X", latest_replay_id=b"\x00\x01")]
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_no_keepalive_when_events_present(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """A batch WITH events yields only DecodedEvents (no keepalive marker)."""
+    record = {"Id": "EV001", "EventDate": "2024-06-01T12:00:00Z"}
+    servicer = BasicFakeServicer([_make_consumer_event(record, b"\x01")])
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        items = [ev async for ev in client.subscribe("/event/X", replay_preset=pb.LATEST)]
+        assert items and all(isinstance(i, DecodedEvent) for i in items)
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: schema-fetch RPC failures propagate (B3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_schema_fetch_rpc_failure_kills_stream_not_skipped(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """A GetSchema transport failure propagates instead of poison-skipping the event.
+
+    Skipping would advance the checkpoint past the event = silent loss; killing
+    the stream makes the source reconnect and replay from the checkpoint.
+    """
+    servicer = SchemaFetchFailingServicer()
+    metrics = Metrics()
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider, metrics)
+
+    try:
+        events: list[object] = []
+        with pytest.raises(SchemaFetchError):
+            async for ev in client.subscribe("/event/X", replay_preset=pb.LATEST):
+                events.append(ev)
+
+        assert events == []
+        decode_errors = metrics.registry.get_sample_value(
+            "sf2loki_decode_errors_total", {"reason": "SchemaFetchError"}
+        )
+        assert decode_errors is None, "schema-fetch failure was wrongly counted as poison"
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: dead-stream watchdog + channel keepalive options (B4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stalled_stream_raises_and_increments_metric(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """No FetchResponse within stall_timeout raises StreamStalledError + counts a stall."""
+    servicer = HangingFakeServicer()
+    metrics = Metrics()
+    topic = "/event/X"
+    server, client = await _make_server_and_client(
+        servicer, pubsub_cfg, token_provider, metrics, stall_timeout=0.1
+    )
+
+    try:
+        with pytest.raises(StreamStalledError):
+            async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+                pass
+
+        val = metrics.registry.get_sample_value(
+            "sf2loki_pubsub_stream_stalls_total", {"topic": topic}
+        )
+        assert val == 1.0
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owned_channel_sets_keepalive_options(
+    pubsub_cfg: PubSubConfig,
+    token_provider: FakeTokenProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lazily-created production channel enables HTTP/2 keepalive pings.
+
+    Without them a half-open TCP connection (NAT/LB idle timeout) hangs a topic
+    forever with zero errors.
+    """
+    import grpc.aio as grpc_aio
+
+    captured: dict[str, Any] = {}
+    real_insecure = grpc_aio.insecure_channel
+
+    def fake_secure_channel(target: str, creds: object, options: object = None) -> grpc.aio.Channel:
+        captured["options"] = options
+        return real_insecure(target)
+
+    monkeypatch.setattr(grpc_aio, "secure_channel", fake_secure_channel)
+    client = PubSubClient(pubsub_cfg, token_provider)  # channel=None -> production path
+    client._stub()
+
+    opts = dict(captured["options"])
+    assert opts["grpc.keepalive_time_ms"] == 30_000
+    assert opts["grpc.keepalive_timeout_ms"] == 10_000
+    assert opts["grpc.keepalive_permit_without_calls"] == 1
+    assert opts["grpc.http2.max_pings_without_data"] == 0
+    await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Tests: generator close cancels the RPC (B8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generator_close_cancels_rpc(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """Closing the subscribe generator mid-iteration cancels the underlying RPC.
+
+    The stop path closes the generator via GeneratorExit; without an explicit
+    cancel the RPC lingers on the channel.
+    """
+    keepalive_resp = pb.FetchResponse(
+        events=[], latest_replay_id=b"\x07", pending_num_requested=100
+    )
+    fake_call = _RecordingFakeCall([keepalive_resp])
+    channel: grpc.aio.Channel = grpc.aio.insecure_channel("127.0.0.1:1")
+    client = PubSubClient(pubsub_cfg, token_provider, channel=channel)
+    client._stub_cached = _FakeStub(fake_call)
+
+    try:
+        agen = client.subscribe("/event/X", replay_preset=pb.LATEST)
+        async for _ev in agen:
+            break  # generator now suspended at the yield
+        assert not fake_call.cancelled
+        await agen.aclose()
+        assert fake_call.cancelled, "RPC was not cancelled on generator close"
+    finally:
+        await channel.close()

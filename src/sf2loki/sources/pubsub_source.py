@@ -11,15 +11,24 @@ from __future__ import annotations
 import asyncio
 import base64
 import fnmatch
+import random
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
+
+import grpc
+import grpc.aio
 
 from sf2loki.config import PubSubConfig
 from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.logging import get_logger
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.pubsub_client import DecodedEvent, PubSubClient, preset_for
+from sf2loki.salesforce.pubsub_client import (
+    DecodedEvent,
+    KeepaliveEvent,
+    PubSubClient,
+    preset_for,
+)
 from sf2loki.shaping import extract_timestamp, route_fields
 
 if TYPE_CHECKING:
@@ -30,6 +39,20 @@ log = get_logger(__name__)
 # Topic wildcard: discover and subscribe to every RTEM streaming channel the org
 # exposes (still subject to the include/exclude globs).
 TOPIC_WILDCARD = "*"
+
+# Attempts made to discover wildcard topics before falling back to the explicit
+# topic list (with an ERROR log — a transient discovery failure must not
+# silently shrink the subscription set for the process lifetime).
+_DISCOVERY_ATTEMPTS = 3
+
+
+def _jitter(backoff: float) -> float:
+    """Uniform jitter added to reconnect sleeps.
+
+    Without it every topic reconnects in lockstep after an org-wide failure
+    (e.g. token expiry), hammering Salesforce with simultaneous subscribes.
+    """
+    return random.uniform(0.0, backoff / 2)
 
 
 class _StreamDiscovererLike(Protocol):
@@ -119,18 +142,47 @@ class PubSubSource:
         """Topics to subscribe to this run, expanding the ``"*"`` wildcard.
 
         When ``"*"`` is present and a discoverer is wired, discover every RTEM
-        stream and merge it with any explicit topics. A discovery failure is
-        non-fatal — fall back to the explicit topics.
+        stream (with retries — see :meth:`_discover_with_retry`) and merge it
+        with any explicit topics. A persistent discovery failure is non-fatal —
+        fall back to the explicit topics.
         """
         topics = list(self._cfg.topics)
         if TOPIC_WILDCARD in topics and self._topic_discoverer is not None:
-            try:
-                discovered = await self._topic_discoverer.list_event_stream_topics()
-                topics += [t for t in discovered if t not in topics]
-            except Exception as exc:
-                # Discovery must never crash the source — fall back to explicit topics.
-                log.warning("pubsub: stream discovery failed; using explicit topics only: %s", exc)
+            discovered = await self._discover_with_retry()
+            topics += [t for t in discovered if t not in topics]
         return self._filter(topics)
+
+    async def _discover_with_retry(self) -> list[str]:
+        """Discover RTEM stream topics, retrying transient failures with backoff.
+
+        Discovery runs once per :meth:`events` call, so a single transient
+        failure would otherwise silently shrink the subscription set for the
+        process lifetime. Retries ``_DISCOVERY_ATTEMPTS`` times; on final
+        failure logs at ERROR and returns [] (explicit topics still subscribe).
+        """
+        assert self._topic_discoverer is not None
+        delay = self._reconnect_backoff
+        for attempt in range(1, _DISCOVERY_ATTEMPTS + 1):
+            try:
+                return await self._topic_discoverer.list_event_stream_topics()
+            except Exception as exc:
+                if attempt == _DISCOVERY_ATTEMPTS:
+                    log.error(
+                        "pubsub stream discovery failed; wildcard topics DROPPED for this run "
+                        "(explicit topics unaffected) — restart to retry",
+                        attempts=attempt,
+                        error=repr(exc),
+                    )
+                    return []
+                log.warning(
+                    "pubsub stream discovery failed; retrying",
+                    attempt=attempt,
+                    error=repr(exc),
+                    delay=delay,
+                )
+                await asyncio.sleep(delay + _jitter(delay))
+                delay = min(delay * 2, self._max_backoff)
+        return []  # unreachable; keeps the type checker happy
 
     async def events(self, state: CheckpointStore, stop: asyncio.Event) -> AsyncIterator[LogEntry]:
         """Yield decoded log entries from all resolved topics.
@@ -180,9 +232,11 @@ class PubSubSource:
     ) -> None:
         """Manage the subscribe loop for a single topic.
 
-        Implements exponential-backoff reconnect: on a clean stream end, resets
-        the backoff and reconnects after a short delay.  On an exception, backs
-        off then reconnects.  In both cases, resumes from the last seen replay_id.
+        Implements exponential-backoff reconnect with uniform jitter (so all
+        topics don't resubscribe in lockstep after an org-wide failure).
+        Backoff resets to base once a connection proves healthy — defined as
+        having received at least one event or keepalive on it — or on a clean
+        stream end.  Resumes from the last seen replay_id (event or keepalive).
         """
         # Determine initial replay position.
         stored = await state.load(f"pubsub:{topic}")
@@ -207,6 +261,7 @@ class PubSubSource:
                     self._metrics.pubsub_reconnects.labels(topic=topic).inc()
                     log.info("pubsub reconnecting", topic=topic, attempt=attempt, backoff=backoff)
                 attempt += 1
+                received = False  # any event/keepalive seen on THIS connection
                 try:
                     async for ev in self._client.subscribe(
                         topic,
@@ -216,6 +271,20 @@ class PubSubSource:
                     ):
                         if stop.is_set():
                             return
+                        if not received:
+                            received = True
+                            # Connection proved healthy: reset the backoff so
+                            # recurring mid-stream failures (e.g. the known
+                            # session-expiry churn every few minutes) don't
+                            # ratchet every topic to max_backoff permanently.
+                            backoff = self._reconnect_backoff
+                        if isinstance(ev, KeepaliveEvent):
+                            if ev.latest_replay_id == replay_id:
+                                continue  # unchanged — avoid checkpoint churn
+                            replay_id = ev.latest_replay_id
+                            preset = preset_for("CUSTOM")
+                            await queue.put(self._keepalive_entry(topic, ev.latest_replay_id))
+                            continue
                         entry = self._to_log_entry(topic, ev)
                         # Update resume position for reconnect.
                         replay_id = ev.replay_id
@@ -227,28 +296,106 @@ class PubSubSource:
                         return
                     backoff = self._reconnect_backoff  # reset on clean close
                     # Brief pause before reconnecting.
-                    try:
-                        await asyncio.wait_for(stop.wait(), timeout=backoff)
-                        return  # stop was set during the sleep
-                    except TimeoutError:
-                        pass
-
+                    if await self._sleep_or_stop(stop, backoff):
+                        return
                 except Exception as exc:
                     if stop.is_set():
                         return
-                    log.warning(
-                        "pubsub stream error", topic=topic, error=repr(exc), backoff=backoff
-                    )
-                    # Transient error: back off then reconnect.
-                    try:
-                        await asyncio.wait_for(stop.wait(), timeout=backoff)
-                        return  # stop was set during backoff
-                    except TimeoutError:
-                        pass
+                    if self._is_invalid_argument(exc):
+                        if preset == preset_for("CUSTOM"):
+                            # Salesforce rejects an expired (outside the 72h
+                            # retention window) or corrupt replay id with
+                            # INVALID_ARGUMENT — indistinguishably. Retrying
+                            # with the same dead id would loop forever, a
+                            # permanent silent outage. Discard it and restart
+                            # from EARLIEST: bounded (≤72h) duplicates that
+                            # Loki's byte-identical dedup collapses. Never
+                            # LATEST — that guarantees loss.
+                            log.error(
+                                "pubsub replay id rejected (expired or corrupt); falling back "
+                                "to EARLIEST — possible data gap if the id aged out of "
+                                "Salesforce's 72h retention; up to 72h of events may be "
+                                "re-delivered",
+                                topic=topic,
+                                error=repr(exc),
+                            )
+                            self._metrics.pubsub_replay_fallbacks.labels(topic=topic).inc()
+                            replay_id = b""
+                            preset = preset_for("EARLIEST")
+                        else:
+                            # INVALID_ARGUMENT with no replay id in play is a
+                            # genuine config error (e.g. bad num_requested).
+                            # Keep retrying with backoff, but loudly: a
+                            # permanently-red ERROR loop beats a crash and
+                            # beats silent WARN-level retries.
+                            log.error(
+                                "pubsub subscribe rejected with INVALID_ARGUMENT while not "
+                                "resuming from a replay id — likely a configuration error; "
+                                "retrying with backoff",
+                                topic=topic,
+                                error=repr(exc),
+                                backoff=backoff,
+                            )
+                    else:
+                        log.warning(
+                            "pubsub stream error", topic=topic, error=repr(exc), backoff=backoff
+                        )
+                    # Back off then reconnect.
+                    if await self._sleep_or_stop(stop, backoff):
+                        return
                     backoff = min(backoff * 2, self._max_backoff)
         finally:
-            # Always put a sentinel so the drain loop can terminate.
-            await queue.put(None)
+            # Always put a sentinel so the drain loop can terminate. put_nowait
+            # first: on force-cancel, an awaited put on a full queue that nobody
+            # drains would hang forever.
+            try:
+                queue.put_nowait(None)
+            except asyncio.QueueFull:
+                task = asyncio.current_task()
+                if task is None or not task.cancelling():
+                    # Not being cancelled → the consumer is still draining, so a
+                    # brief awaited put keeps termination deterministic.
+                    await queue.put(None)
+
+    async def _sleep_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
+        """Sleep *delay* plus uniform jitter; return True if *stop* fired meanwhile."""
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay + _jitter(delay))
+            return True
+        except TimeoutError:
+            return False
+
+    @staticmethod
+    def _is_invalid_argument(exc: BaseException) -> bool:
+        """True when *exc* is a gRPC INVALID_ARGUMENT rejection.
+
+        Salesforce uses this status (error code trailer
+        ``...fetch.replayid.corrupted``) for both expired and corrupt replay
+        ids — the two are not distinguishable and are handled identically.
+        """
+        return (
+            isinstance(exc, grpc.aio.AioRpcError) and exc.code() == grpc.StatusCode.INVALID_ARGUMENT
+        )
+
+    def _keepalive_entry(self, topic: str, latest_replay_id: bytes) -> LogEntry:
+        """A checkpoint_only LogEntry carrying a keepalive ``latest_replay_id``.
+
+        Routed through the queue rather than committed directly to the state
+        store: pipeline FIFO ordering guarantees every real entry queued ahead
+        of it is pushed to Loki before this token commits, preserving the
+        commit-after-push at-least-once invariant.
+        """
+        return LogEntry(
+            timestamp=datetime.now(UTC),
+            labels={},
+            line="",
+            structured_metadata={},
+            checkpoint=CheckpointToken(
+                key=f"pubsub:{topic}",
+                value=base64.b64encode(latest_replay_id).decode("ascii"),
+            ),
+            checkpoint_only=True,
+        )
 
     @staticmethod
     def _event_timestamp(payload: Mapping[str, object]) -> datetime:

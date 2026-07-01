@@ -13,7 +13,7 @@ import json
 import fastavro
 import pytest
 
-from sf2loki.salesforce.avro_codec import AvroCodec
+from sf2loki.salesforce.avro_codec import AvroCodec, SchemaFetchError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -139,3 +139,83 @@ async def test_concurrent_decode_fetches_schema_once() -> None:
         assert r == _TEST_RECORD
 
     assert fetch_count == 1, f"schema fetched {fetch_count} times, expected 1"
+
+
+# ---------------------------------------------------------------------------
+# Schema-fetch failures must be distinguishable from poison payloads (B3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_schema_fetch_failure_raises_schema_fetch_error() -> None:
+    """A failing fetch_schema callback surfaces as SchemaFetchError (not a generic error).
+
+    The subscribe loop poison-skips generic decode errors; a schema-fetch RPC
+    failure must be a distinct type so it propagates (kills the stream) instead
+    of silently skipping events and advancing the checkpoint past them.
+    """
+
+    async def failing_fetcher(schema_id: str) -> str:
+        raise RuntimeError("schema registry down")
+
+    codec = AvroCodec(failing_fetcher)
+    with pytest.raises(SchemaFetchError) as excinfo:
+        await codec.decode("schema-1", b"\x00")
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_schema_parse_failure_raises_schema_fetch_error() -> None:
+    """Unparseable schema JSON is a schema problem, not a payload problem."""
+
+    async def garbage_fetcher(schema_id: str) -> str:
+        return "not valid json {"
+
+    codec = AvroCodec(garbage_fetcher)
+    with pytest.raises(SchemaFetchError):
+        await codec.decode("schema-1", b"\x00")
+
+
+@pytest.mark.asyncio
+async def test_failed_fetch_is_not_cached_and_retry_succeeds() -> None:
+    """A failed fetch leaves the cache empty; the next decode refetches and succeeds."""
+    schema_json = json.dumps(_TEST_SCHEMA)
+    payload = _encode_record(_TEST_SCHEMA, _TEST_RECORD)
+    calls = 0
+
+    async def flaky_fetcher(schema_id: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        return schema_json
+
+    codec = AvroCodec(flaky_fetcher)
+    with pytest.raises(SchemaFetchError):
+        await codec.decode("schema-1", payload)
+    assert codec.cache_size() == 0
+
+    result = await codec.decode("schema-1", payload)
+    assert result == _TEST_RECORD
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_malformed_payload_with_valid_schema_is_not_schema_fetch_error() -> None:
+    """A payload decode failure with a valid (cached) schema is NOT SchemaFetchError.
+
+    This is the poison-payload case the subscribe loop skips-and-counts.
+    """
+    schema_json = json.dumps(_TEST_SCHEMA)
+
+    async def fetcher(schema_id: str) -> str:
+        return schema_json
+
+    codec = AvroCodec(fetcher)
+    # Warm the cache with a good decode first.
+    await codec.decode("schema-1", _encode_record(_TEST_SCHEMA, _TEST_RECORD))
+
+    with pytest.raises(Exception) as excinfo:
+        await codec.decode("schema-1", b"\xff\xff\xff not valid avro")
+    assert not isinstance(excinfo.value, SchemaFetchError)

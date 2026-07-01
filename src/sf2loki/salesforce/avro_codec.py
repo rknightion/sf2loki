@@ -16,6 +16,17 @@ from typing import Any, cast
 import fastavro
 
 
+class SchemaFetchError(Exception):
+    """The Avro schema for a schema_id could not be fetched or parsed.
+
+    Raised when the *fetch_schema* callback fails (e.g. a GetSchema gRPC/transport
+    error) or the returned schema JSON is unparseable. Deliberately distinct from
+    a payload decode error: the subscribe loop poison-skips payload errors, but a
+    schema-fetch failure must propagate — skipping events because the registry was
+    briefly unreachable would advance the checkpoint past them (silent data loss).
+    """
+
+
 class AvroCodec:
     """Decode schemaless Avro payloads, caching parsed schemas by schema_id.
 
@@ -71,7 +82,12 @@ class AvroCodec:
             if schema_id in self._cache:
                 return self._cache[schema_id]
 
-            schema_json = await self._fetch_schema(schema_id)
-            parsed = fastavro.parse_schema(json.loads(schema_json))
+            try:
+                schema_json = await self._fetch_schema(schema_id)
+                parsed = fastavro.parse_schema(json.loads(schema_json))
+            except Exception as exc:
+                raise SchemaFetchError(
+                    f"failed to fetch/parse Avro schema {schema_id!r}: {exc!r}"
+                ) from exc
             self._cache[schema_id] = parsed
             return parsed
