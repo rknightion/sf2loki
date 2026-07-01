@@ -11,6 +11,12 @@ salesforce:
   api_version: "60.0"
   # org_id omitted -> auto-resolved via /userinfo (needs the `openid` scope on the app).
   # Set SF_ORG_ID and add `org_id: ${SF_ORG_ID}` here to keep the app on `api` alone.
+  limits:
+    # Poll /services/data/vXX.0/limits and emit sf2loki_salesforce_limit_max /
+    # _remaining gauges per org limit (DailyApiRequests, DataStorageMB,
+    # DailyStreamingApiEvents, ...). One cheap REST call per interval.
+    enabled: true
+    poll_interval: 5m
 
 sources:
   # This dev org ingests BOTH ways for maximum dashboard material: every RTEM
