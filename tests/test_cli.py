@@ -80,3 +80,15 @@ sink:
     )
     rc = main(["--config", str(p), "--check"])
     assert rc == 1
+
+
+def test_config_example_subcommand_prints_yaml(capsys):
+    rc = main(["config", "example"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "salesforce:" in out
+
+
+def test_config_schema_subcommand_prints_json(capsys):
+    rc = main(["config", "schema"])
+    out = capsys.readouterr().out
+    assert rc == 0 and '"title": "Config"' in out
