@@ -72,6 +72,26 @@ def test_secret_leaf_marks_required_when_no_default():
     assert "(required)" in lines[0]
 
 
+def test_example_yaml_comments_out_inline_secrets_but_keeps_file_fields_active():
+    # Finding: inline SecretStr fields (private_key, client_secret, ...) take
+    # precedence over their sibling *_file field at load time, so an active
+    # placeholder line here would silently shadow a real mounted secret file.
+    # The example must comment out the inline secret key while keeping the
+    # *_file field active, and keep the inline option discoverable as a
+    # commented hint.
+    text = configdoc.example_yaml()
+    doc = yaml.safe_load(text)
+
+    salesforce = doc["salesforce"]
+    assert "private_key" not in salesforce
+    assert "client_secret" not in salesforce
+    assert "private_key_file" in salesforce
+    assert "client_secret_file" in salesforce
+
+    assert "# private_key:" in text
+    assert "# client_secret:" in text
+
+
 def test_reference_markdown_has_a_section_per_model_and_lists_limits():
     md = configdoc.reference_markdown()
     assert md.startswith("# ")

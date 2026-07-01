@@ -65,6 +65,18 @@ def _is_secret_field(name: str, annotation: Any) -> bool:
     return name.endswith("_file") and ("secret" in name or "key" in name or "token" in name)
 
 
+def _is_inline_secret_field(annotation: Any) -> bool:
+    """True only for a true ``SecretStr``-typed field (not a ``*_file`` path).
+
+    Used by ``example_yaml()`` to comment out inline secret lines so they
+    can never shadow the sibling ``*_file`` field at load time (see
+    ``resolve_secrets``/``_resolve_secret_file`` in ``config.py``, where the
+    inline value takes precedence over the file value). ``*_file`` fields
+    stay active/uncommented.
+    """
+    return _unwrap_optional(annotation) is SecretStr
+
+
 def _unwrap_optional(annotation: Any) -> Any:
     """Strip an Optional[...] / X | None wrapper down to the inner type.
 
@@ -224,12 +236,18 @@ def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) ->
             value_str = f"{_SECRET_PLACEHOLDER_ROOT}/{name.removesuffix('_file').replace('_', '-')}"
             value_str = _fmt_scalar(value_str)
         required_tag = " (required)" if is_required else ""
+        # Inline SecretStr fields render commented-out: they take precedence
+        # over the sibling *_file field at load time (see resolve_secrets in
+        # config.py), so an active placeholder here would silently shadow a
+        # real mounted secret file. Keep the line for discoverability, but
+        # never let it be an active YAML key. *_file fields stay active.
+        prefix = "# " if _is_inline_secret_field(annotation) else ""
         if comment:
-            lines.append(f"{indent}{name}: {value_str}  # {comment}{required_tag}")
+            lines.append(f"{indent}{prefix}{name}: {value_str}  # {comment}{required_tag}")
         elif required_tag:
-            lines.append(f"{indent}{name}: {value_str}  #{required_tag}")
+            lines.append(f"{indent}{prefix}{name}: {value_str}  #{required_tag}")
         else:
-            lines.append(f"{indent}{name}: {value_str}")
+            lines.append(f"{indent}{prefix}{name}: {value_str}")
         return
 
     value = _resolve_value(field)

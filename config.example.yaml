@@ -15,11 +15,11 @@ salesforce:  # Salesforce org connection and authentication.
   environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
   auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
   client_id: ${SF_CLIENT_ID}  # External Client App consumer key. (required)
-  client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
+  # client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
   client_secret_file: /etc/sf2loki/secrets/client-secret  # File path to the client_credentials secret; required when auth_mode: client_credentials.
   username: svc@example.com  # Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials.
   private_key_file: /etc/sf2loki/secrets/server.key  # File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.
-  private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
+  # private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
   api_version: "60.0"  # Salesforce REST/SOAP API version to target.
   org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
   # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
@@ -106,7 +106,7 @@ sink:  # Log sink settings.
     url: ${GC_LOKI}  # Loki push API URL. (required)
     tenant_id: ${GC_TENANT_ID}  # Loki tenant (X-Scope-OrgID); required for Grafana Cloud and multi-tenant Loki.
     auth_token_file: /etc/sf2loki/secrets/loki-token  # File path to the Loki auth token.
-    auth_token: /etc/sf2loki/secrets/auth-token  # Loki auth token, inline (alternative to auth_token_file).
+    # auth_token: /etc/sf2loki/secrets/auth-token  # Loki auth token, inline (alternative to auth_token_file).
     encoding: protobuf  # Wire encoding for the push request.
     compression: snappy  # Compression: snappy (protobuf) | gzip (json) | none.
     batch:  # Push batching settings.
@@ -133,7 +133,7 @@ service:  # Application-level service settings.
     endpoint: https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics  # Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics; for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.
     auth: basic  # Auth for the OTLP endpoint. "basic" sends Authorization: Basic base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic, the credentials default to the Loki sink's tenant_id/auth_token when left blank — Grafana Cloud uses one stack credential for both Loki and OTLP.
     basic_auth_user: ""  # Basic-auth username; defaults to the Loki sink's tenant_id when blank.
-    basic_auth_token: /etc/sf2loki/secrets/basic-auth-token  # Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.
+    # basic_auth_token: /etc/sf2loki/secrets/basic-auth-token  # Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.
     basic_auth_token_file: /etc/sf2loki/secrets/otlp-token  # File path to the basic-auth token (alternative to basic_auth_token).
     headers: {}  # Explicit headers, merged on top of any computed Authorization header. Values support ${ENV} interpolation at config load.
     export_interval: 1m  # How often to export accumulated metrics via OTLP.
