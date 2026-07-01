@@ -211,3 +211,50 @@ async def test_health_read_timeout_closes_idle_connection() -> None:
         await writer.wait_closed()
     finally:
         await h.stop()
+
+
+# --- standby readiness reason (HA active-passive) ---
+
+
+def test_decide_readyz_standby_reason() -> None:
+    assert decide("/readyz", ready=False, not_ready_reason="standby") == (503, "standby")
+
+
+def test_decide_healthz_ok_when_standby() -> None:
+    # A passive replica is not ready, but it IS alive.
+    assert decide("/healthz", ready=False, not_ready_reason="standby") == (200, "ok")
+
+
+@pytest.mark.asyncio
+async def test_health_server_standby_readyz_503_healthz_200() -> None:
+    h = Health()
+    await h.start(":0")
+    port = h.port
+    try:
+        h.set_not_ready("standby")
+        async with httpx.AsyncClient() as client:
+            base = f"http://127.0.0.1:{port}"
+            r = await client.get(f"{base}/readyz")
+            assert r.status_code == 503
+            assert r.text == "standby"
+            r = await client.get(f"{base}/healthz")
+            assert r.status_code == 200
+            assert r.text == "ok"
+    finally:
+        await h.stop()
+
+
+@pytest.mark.asyncio
+async def test_health_set_ready_clears_standby() -> None:
+    h = Health()
+    await h.start(":0")
+    port = h.port
+    try:
+        h.set_not_ready("standby")
+        h.set_ready()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{port}/readyz")
+        assert r.status_code == 200
+        assert r.text == "ready"
+    finally:
+        await h.stop()

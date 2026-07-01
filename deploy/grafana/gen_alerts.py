@@ -279,6 +279,7 @@ api_budget_low_expr = (
     f"< {API_BUDGET_LOW_RATIO}"
 )
 egress_paused_expr = "sf2loki_egress_paused == 1"
+leadership_anomaly_expr = "sum(sf2loki_leader) != 1"
 ingest_lag_p95_expr = (
     "histogram_quantile(0.95, sum by (le) ("
     "rate(sf2loki_ingest_lag_seconds_bucket[15m]))) "
@@ -378,6 +379,25 @@ DEGRADATION_RULES = [
             "ingest-lag panel by event_type to isolate which path (Pub/Sub real-time vs "
             "EventLogFile batch) is lagging, then check queue depth / Loki push health for "
             "backpressure."
+        ),
+    ),
+    rule(
+        "leadership-anomaly",
+        "sf2loki: leadership anomaly (leaderless or split-brain)",
+        leadership_anomaly_expr,
+        range_seconds=300,
+        # 10m pending: a clean failover shows sum==0 for up to one lease ttl
+        # (default 30s) plus restart time — don't alert on normal takeovers.
+        for_="10m",
+        severity="warning",
+        summary="sum(sf2loki_leader) != 1 — no leader is ingesting, or two are.",
+        description=(
+            "Across all sf2loki replicas exactly one should hold leadership "
+            "(sf2loki_leader == 1); a standalone instance always reports 1. Sustained 0 means "
+            "no replica is ingesting (leaderless — check lease-file storage reachability and "
+            "replica logs); sustained 2+ means split-brain (two leaders double-ingesting — "
+            "check that both replicas point at the SAME lease file on shared storage and that "
+            "host clocks are NTP-synced)."
         ),
     ),
 ]

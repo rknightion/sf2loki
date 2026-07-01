@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import signal
+import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -28,7 +30,8 @@ from sf2loki.config import (
     LokiBatchConfig,
     telemetry_headers,
 )
-from sf2loki.coordinate.base import NoopCoordinator
+from sf2loki.coordinate.base import Coordinator, NoopCoordinator, StateFenceError
+from sf2loki.coordinate.file_lease import FileLeaseCoordinator
 from sf2loki.egress import EgressGovernor
 from sf2loki.model import Batch, LogEntry
 from sf2loki.obs.health import Health
@@ -175,6 +178,9 @@ class Pipeline:
         if self._governor is not None:
             await self._governor.start()
         self._queued_bytes = 0  # fresh accounting per run (the queue is fresh too)
+        # Re-invokable across failover: clear any stale outage mark left by a
+        # previous acquisition so a re-acquired leader doesn't report degraded.
+        self._sink_failing_since = None
         queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
         producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
         consumer = asyncio.create_task(self._consume(queue, len(producers), stop))
@@ -534,6 +540,7 @@ class App:
         metrics: Metrics,
         health: Health,
         closers: Sequence[Callable[[], Awaitable[None]]],
+        coordinator: Coordinator,
         limits_poller: LimitsPoller | None = None,
         startup: _StartupInfo | None = None,
     ) -> None:
@@ -543,6 +550,7 @@ class App:
         self._metrics = metrics
         self._health = health
         self._closers = list(closers)
+        self._coordinator = coordinator
         self._limits_poller = limits_poller
         self._startup = startup
 
@@ -563,6 +571,25 @@ class App:
         sink = LokiSink(cfg.sink.loki, loki_http, metrics=metrics)
 
         state = _build_state(cfg)
+
+        # Leadership coordinator: noop (standalone, always leader) or a real
+        # active-passive coordinator. The fence is wired into the state store
+        # ONLY for a real coordinator, so a stale leader cannot commit
+        # checkpoints; standalone deployments stay entirely unfenced.
+        coordinator: Coordinator
+        fence: Callable[[], None] | None = None
+        if cfg.coordinate.type == "file_lease":
+            fl_cfg = cfg.coordinate.file_lease
+            holder = fl_cfg.holder_id or f"{socket.gethostname()}-{os.getpid()}"
+            file_lease = FileLeaseCoordinator(fl_cfg, holder=holder)
+            coordinator = file_lease
+            fence = file_lease.check_fence
+        else:
+            coordinator = NoopCoordinator()
+        set_fence = getattr(state, "set_fence", None)
+        if set_fence is not None and fence is not None:
+            set_fence(fence)
+
         sm_fields = cfg.sink.loki.structured_metadata_fields
         transform_salt = (
             cfg.sources.transform_salt.get_secret_value() if cfg.sources.transform_salt else ""
@@ -731,6 +758,7 @@ class App:
             metrics=metrics,
             health=health,
             closers=closers,
+            coordinator=coordinator,
             limits_poller=limits_poller,
             startup=_StartupInfo(
                 pubsub_topics=pubsub_topics,
@@ -790,34 +818,97 @@ class App:
             )
         )
 
-        coordinator = NoopCoordinator()
         grace = self._cfg.service.shutdown_grace.total_seconds()
 
+        # Leadership lifecycle. on_acquire/on_lose are driven by the coordinator
+        # and may fire REPEATEDLY (a passive replica can acquire, lose, and
+        # re-acquire leadership over its lifetime). Each acquisition gets its own
+        # pipeline-run stop event so the pipeline can be started and torn down
+        # per acquisition; the global ``stop`` still shuts everything down.
+        crash: list[BaseException] = []
+        current: dict[str, Any] = {}
+
+        def _on_pipeline_done(task: asyncio.Task[None], run_stop: asyncio.Event) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                # A real pipeline crash (e.g. a checkpoint write failure): take
+                # the whole process down and exit nonzero so it restarts.
+                crash.append(exc)
+                stop.set()
+                return
+            # Clean completion while we never asked it to stop means the sources
+            # exhausted on their own (a finite run) -> shut down. If run_stop was
+            # set this was a deliberate leadership loss/shutdown -> stay up.
+            if not run_stop.is_set():
+                stop.set()
+
         async def on_acquire() -> None:
+            self._metrics.leader.set(1)
             self._health.set_ready()
             log.info("sf2loki ready — streaming to Loki")
+            run_stop = asyncio.Event()
             poller_task: asyncio.Task[None] | None = None
             if self._limits_poller is not None:
-                poller_task = asyncio.create_task(self._limits_poller.run(stop))
-            try:
-                await _drain_with_grace(self._pipeline.run(stop), stop, grace)
-            finally:
-                if poller_task is not None:
-                    poller_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await poller_task
+                poller_task = asyncio.create_task(self._limits_poller.run(run_stop))
+            pipeline_task = asyncio.create_task(self._run_pipeline(run_stop, grace))
+            pipeline_task.add_done_callback(lambda t: _on_pipeline_done(t, run_stop))
+            current["run_stop"] = run_stop
+            current["pipeline_task"] = pipeline_task
+            current["poller_task"] = poller_task
 
         async def on_lose() -> None:
-            self._health.set_not_ready()
+            self._metrics.leader.set(0)
+            log.info("leadership lost — standing by")
+            await self._stop_acquisition(current)
+            self._health.set_not_ready("standby")
 
         try:
-            await coordinator.run(on_acquire=on_acquire, on_lose=on_lose, stop=stop)
+            await self._coordinator.run(on_acquire=on_acquire, on_lose=on_lose, stop=stop)
         finally:
+            # Drain the active acquisition (if any) even when the coordinator
+            # returns without an on_lose (e.g. NoopCoordinator on global stop).
+            await self._stop_acquisition(current)
+            self._metrics.leader.set(0)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._shutdown(), timeout=_CLOSE_TIMEOUT)
             self._health.set_not_ready()
             await self._health.stop()
             self._metrics.shutdown()
+
+        # Surface a pipeline crash after clean resource shutdown so the process
+        # exits nonzero (and is restarted) rather than exiting 0 on a failure.
+        if crash:
+            raise crash[0]
+
+    async def _run_pipeline(self, run_stop: asyncio.Event, grace: float) -> None:
+        """Run one leadership acquisition's pipeline until *run_stop* and drained.
+
+        A :class:`StateFenceError` (we were fenced mid-commit because leadership
+        was lost) is absorbed here: it is a leadership transition, not a fatal
+        crash — the coordinator drives the move back to standby. Any other
+        exception propagates so the pipeline-done callback can crash the process.
+        """
+        try:
+            await _drain_with_grace(self._pipeline.run(run_stop), run_stop, grace)
+        except StateFenceError:
+            log.warning("checkpoint commit fenced — leadership lost; standing by")
+
+    @staticmethod
+    async def _stop_acquisition(current: dict[str, Any]) -> None:
+        """Stop and drain the current acquisition's pipeline + poller (idempotent)."""
+        run_stop = current.pop("run_stop", None)
+        pipeline_task = current.pop("pipeline_task", None)
+        poller_task = current.pop("poller_task", None)
+        if run_stop is not None:
+            run_stop.set()
+        if pipeline_task is not None:
+            # Exceptions are captured by the done callback; drain quietly here.
+            await asyncio.gather(pipeline_task, return_exceptions=True)
+        if poller_task is not None:
+            poller_task.cancel()
+            await asyncio.gather(poller_task, return_exceptions=True)
 
     async def _shutdown(self) -> None:
         for close in self._closers:

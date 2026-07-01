@@ -336,3 +336,127 @@ async def test_drain_with_grace_propagates_exception_from_finished_task() -> Non
     stop = asyncio.Event()
     with pytest.raises(ValueError, match="boom"):
         await asyncio.wait_for(_drain_with_grace(fails(), stop, grace=10.0), timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator wiring + repeated leadership cycles (issue #29, file-lease HA)
+# ---------------------------------------------------------------------------
+
+
+from sf2loki.coordinate.base import NoopCoordinator  # noqa: E402
+from sf2loki.coordinate.file_lease import FileLeaseCoordinator  # noqa: E402
+
+
+def test_build_defaults_to_noop_coordinator_unfenced() -> None:
+    """Default config: standalone NoopCoordinator, and the state store is NOT
+    fenced (a single instance must never fence its own commits)."""
+    appn = App.build(_cfg())
+    assert isinstance(appn._coordinator, NoopCoordinator)
+    assert appn._pipeline._state._fence is None  # type: ignore[attr-defined]
+
+
+def test_build_file_lease_coordinator_wires_fence(tmp_path: Any) -> None:
+    cfg = _cfg(
+        coordinate={"type": "file_lease", "file_lease": {"path": str(tmp_path / "leader.lease")}},
+    )
+    appn = App.build(cfg)
+    assert isinstance(appn._coordinator, FileLeaseCoordinator)
+    # The state store's pre-commit fence is the coordinator's check_fence.
+    assert appn._pipeline._state._fence == appn._coordinator.check_fence  # type: ignore[attr-defined]
+
+
+def test_build_file_lease_holder_defaults_to_hostname_pid(tmp_path: Any) -> None:
+    cfg = _cfg(
+        coordinate={"type": "file_lease", "file_lease": {"path": str(tmp_path / "leader.lease")}},
+    )
+    appn = App.build(cfg)
+    assert isinstance(appn._coordinator, FileLeaseCoordinator)
+    assert "-" in appn._coordinator.holder  # hostname-pid
+
+
+class _FakeTokens:
+    async def token(self) -> object:
+        return object()
+
+    async def org_id(self) -> str:
+        return "00Dxxx"
+
+
+class _CountingPipeline:
+    """Records how many times run() is invoked (one per leadership acquisition)."""
+
+    def __init__(self) -> None:
+        self.runs = 0
+
+    def set_static_labels(self, labels: Any) -> None:
+        pass
+
+    async def run(self, stop: asyncio.Event) -> None:
+        self.runs += 1
+        await stop.wait()  # hold leadership until this acquisition's stop fires
+
+
+class _CyclingCoordinator:
+    """Drives on_acquire/on_lose for a fixed number of cycles, then stops."""
+
+    def __init__(self, cycles: int) -> None:
+        self._cycles = cycles
+
+    async def run(self, *, on_acquire: Any, on_lose: Any, stop: asyncio.Event) -> None:
+        for _ in range(self._cycles):
+            await on_acquire()
+            await asyncio.sleep(0)  # let the pipeline task start
+            await on_lose()
+        stop.set()
+
+
+async def test_repeated_acquire_lose_cycles_run_the_pipeline_each_time() -> None:
+    """The restructured lifecycle must start a fresh pipeline run per acquisition
+    so a replica that loses and re-acquires leadership resumes streaming."""
+    cfg = _cfg(
+        salesforce={
+            "client_id": "cid",
+            "username": "svc@example.com",
+            "private_key": "DUMMY",
+            "org_id": "00D000000000001",
+        },
+        service={"health_addr": "127.0.0.1:0"},
+    )
+    appn = App.build(cfg)
+    pipeline = _CountingPipeline()
+    appn._pipeline = pipeline  # type: ignore[assignment]
+    appn._tokens = _FakeTokens()  # type: ignore[assignment]
+    appn._coordinator = _CyclingCoordinator(3)  # type: ignore[assignment]
+
+    await asyncio.wait_for(appn.run(), timeout=5)
+
+    assert pipeline.runs == 3
+    # Leadership gauge is back to 0 after shutdown.
+    assert appn._metrics.registry.get_sample_value("sf2loki_leader") == 0.0
+
+
+async def test_pipeline_crash_propagates_and_exits_nonzero() -> None:
+    """A pipeline crash (non-fence) surfaces out of run() so the process exits
+    nonzero and is restarted, even though the pipeline runs as a task."""
+
+    class _CrashingPipeline(_CountingPipeline):
+        async def run(self, stop: asyncio.Event) -> None:
+            self.runs += 1
+            raise RuntimeError("checkpoint write failed")
+
+    cfg = _cfg(
+        salesforce={
+            "client_id": "cid",
+            "username": "svc@example.com",
+            "private_key": "DUMMY",
+            "org_id": "00D000000000001",
+        },
+        service={"health_addr": "127.0.0.1:0"},
+    )
+    appn = App.build(cfg)
+    appn._pipeline = _CrashingPipeline()  # type: ignore[assignment]
+    appn._tokens = _FakeTokens()  # type: ignore[assignment]
+    appn._coordinator = NoopCoordinator()
+
+    with pytest.raises(RuntimeError, match="checkpoint write failed"):
+        await asyncio.wait_for(appn.run(), timeout=5)

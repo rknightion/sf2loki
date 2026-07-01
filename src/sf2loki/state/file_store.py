@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -43,6 +44,20 @@ class FileCheckpointStore:
         self._lock = asyncio.Lock()
         self._cache: dict[str, str] | None = None  # None = not yet loaded
         self._lock_fd: int | None = None  # exclusive-instance flock, held once acquired
+        # Optional pre-commit fence (installed by the app when a leader-election
+        # coordinator is configured). Called before every commit; it raises
+        # StateFenceError when this instance is not the leader, so a stale
+        # leader cannot advance checkpoints. None = unfenced (single instance).
+        self._fence: Callable[[], None] | None = None
+
+    def set_fence(self, fence: Callable[[], None]) -> None:
+        """Install a pre-commit fence, evaluated before every :meth:`commit`.
+
+        *fence* must raise (:class:`~sf2loki.coordinate.base.StateFenceError`)
+        to veto a commit. A fenced commit raises **before** any state is
+        mutated or written.
+        """
+        self._fence = fence
 
     def close(self) -> None:
         """Release the exclusive instance lock (idempotent).
@@ -140,6 +155,9 @@ class FileCheckpointStore:
 
     async def commit(self, key: str, value: str) -> None:
         async with self._lock:
+            # Fence first: a non-leader must raise before touching any state.
+            if self._fence is not None:
+                self._fence()
             self._ensure_loaded()
             assert self._cache is not None
             self._cache[key] = value

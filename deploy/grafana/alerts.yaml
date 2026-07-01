@@ -581,6 +581,58 @@ groups:
         \ to isolate which path (Pub/Sub real-time vs EventLogFile batch) is lagging, then check queue\
         \ depth / Loki push health for backpressure."
     isPaused: false
+  - uid: sf2loki-leadership-anomaly
+    title: 'sf2loki: leadership anomaly (leaderless or split-brain)'
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 300
+        to: 0
+      datasourceUid: ${DS_PROMETHEUS}
+      model:
+        editorMode: code
+        expr: sum(sf2loki_leader) != 1
+        instant: true
+        range: false
+        refId: A
+    - refId: B
+      relativeTimeRange:
+        from: 300
+        to: 0
+      datasourceUid: __expr__
+      model:
+        type: reduce
+        expression: A
+        reducer: count
+        refId: B
+    - refId: C
+      relativeTimeRange:
+        from: 300
+        to: 0
+      datasourceUid: __expr__
+      model:
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+        refId: C
+    noDataState: OK
+    execErrState: Error
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "sum(sf2loki_leader) != 1 \u2014 no leader is ingesting, or two are."
+      description: "Across all sf2loki replicas exactly one should hold leadership (sf2loki_leader ==\
+        \ 1); a standalone instance always reports 1. Sustained 0 means no replica is ingesting (leaderless\
+        \ \u2014 check lease-file storage reachability and replica logs); sustained 2+ means split-brain\
+        \ (two leaders double-ingesting \u2014 check that both replicas point at the SAME lease file on\
+        \ shared storage and that host clocks are NTP-synced)."
+    isPaused: false
 - orgId: 1
   name: sf2loki-hygiene
   folder: sf2loki

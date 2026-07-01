@@ -20,17 +20,24 @@ import asyncio
 from collections.abc import Callable
 
 
-def decide(path: str, *, ready: bool, degraded_reason: str | None = None) -> tuple[int, str]:
+def decide(
+    path: str,
+    *,
+    ready: bool,
+    degraded_reason: str | None = None,
+    not_ready_reason: str = "not ready",
+) -> tuple[int, str]:
     """Return (status_code, body) for the given request path and readiness state.
 
     ``degraded_reason`` only affects /readyz, and only once the service went
-    ready at all (startup "not ready" wins over degradation).
+    ready at all (startup "not ready" wins over degradation). ``not_ready_reason``
+    is the /readyz body while not ready (e.g. "standby" for a passive replica).
     """
     if path == "/healthz":
         return 200, "ok"
     if path == "/readyz":
         if not ready:
-            return 503, "not ready"
+            return 503, not_ready_reason
         if degraded_reason:
             return 503, degraded_reason
         return 200, "ready"
@@ -54,6 +61,7 @@ class Health:
 
     def __init__(self, *, read_timeout: float = 5.0) -> None:
         self._ready: bool = False
+        self._not_ready_reason: str = "not ready"
         self._server: asyncio.Server | None = None
         self._read_timeout: float = read_timeout
         self._degraded_check: Callable[[], str | None] | None = None
@@ -74,8 +82,10 @@ class Health:
     def set_ready(self) -> None:
         self._ready = True
 
-    def set_not_ready(self) -> None:
+    def set_not_ready(self, reason: str = "not ready") -> None:
+        """Mark not ready; *reason* becomes the /readyz body (e.g. "standby")."""
         self._ready = False
+        self._not_ready_reason = reason
 
     async def start(self, addr: str) -> None:
         """Start listening on *addr* (e.g. ':8080' or '0.0.0.0:8080').
@@ -122,7 +132,12 @@ class Health:
             path = parts[1].decode("utf-8", errors="replace") if len(parts) >= 2 else "/"
 
             degraded = self._degraded_check() if self._degraded_check is not None else None
-            status, body = decide(path, ready=self._ready, degraded_reason=degraded)
+            status, body = decide(
+                path,
+                ready=self._ready,
+                degraded_reason=degraded,
+                not_ready_reason=self._not_ready_reason,
+            )
             reason = _REASON_PHRASES.get(status, "")
             body_bytes = body.encode()
             response = (
