@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sf2loki.shaping import cap_line, extract_timestamp, promote_labels, route_fields
+import pytest
+
+from sf2loki.shaping import (
+    cap_line,
+    derive_level,
+    extract_timestamp,
+    promote_labels,
+    route_fields,
+)
 
 
 def test_route_fields_routes_only_listed_present_keys() -> None:
@@ -10,14 +18,76 @@ def test_route_fields_routes_only_listed_present_keys() -> None:
         {"UserId": "005", "SourceIp": "1.2.3.4", "n": 1},
         ["UserId", "Missing"],
     )
-    assert sm == {"UserId": "005"}  # Missing absent; SourceIp not promoted
+    # Missing absent; SourceIp not promoted; level always injected.
+    assert sm == {"UserId": "005", "level": "info"}
     # canonical sorted-key JSON: SourceIp sorts before UserId
     assert line.index('"SourceIp"') < line.index('"UserId"')
 
 
 def test_route_fields_skips_null_sm_values() -> None:
     _, sm = route_fields({"UserId": None, "Ip": "x"}, ["UserId", "Ip"])
-    assert sm == {"Ip": "x"}
+    assert sm == {"Ip": "x", "level": "info"}
+
+
+def test_route_fields_injects_derived_level() -> None:
+    # A failed REST call: Salesforce's own REQUEST_STATUS drives the level.
+    _, sm = route_fields({"REQUEST_STATUS": "F"}, [])
+    assert sm == {"level": "warn"}
+    # level is metadata only — never promoted into the log line body itself.
+    line, _ = route_fields({"REQUEST_STATUS": "F"}, [])
+    assert "level" not in line
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # No signal at all -> info (the common case).
+        ({}, "info"),
+        ({"DATABASE_STATEMENTS": "3"}, "info"),
+        # HTTP status code (ApiTotalUsage / RestApi STATUS_CODE).
+        ({"STATUS_CODE": "200"}, "info"),
+        ({"STATUS_CODE": "302"}, "info"),
+        ({"STATUS_CODE": "404"}, "warn"),
+        ({"STATUS_CODE": "429"}, "warn"),
+        ({"STATUS_CODE": "500"}, "error"),
+        ({"STATUS_CODE": "503"}, "error"),
+        ({"STATUS_CODE": ""}, "info"),  # blank -> ignored
+        ({"STATUS_CODE": "n/a"}, "info"),  # unparseable -> ignored
+        # REQUEST_STATUS (S/F).
+        ({"REQUEST_STATUS": "S"}, "info"),
+        ({"REQUEST_STATUS": "F"}, "warn"),
+        ({"REQUEST_STATUS": ""}, "info"),  # blank (seen on Login/OneCommerce)
+        # Explicit exceptions/errors -> error, and they win over a 2xx code.
+        ({"EXCEPTION_MESSAGE": "NullPointer", "STATUS_CODE": "200"}, "error"),
+        ({"EXCEPTION_TYPE": "System.LimitException"}, "error"),
+        ({"ERROR_MESSAGE": "boom"}, "error"),
+        ({"ERROR_CODE": "APEX_ERROR"}, "error"),
+        ({"ERROR_CODE": ""}, "info"),  # blank -> not an error
+        ({"ERROR_CODE": "0"}, "info"),  # zero -> not an error
+        # Login (ELF LOGIN_STATUS).
+        ({"LOGIN_STATUS": "LOGIN_NO_ERROR"}, "info"),
+        ({"LOGIN_STATUS": "LOGIN_ERROR_INVALID_PASSWORD"}, "warn"),
+        # OneCommerce OPERATION_STATUS.
+        ({"OPERATION_STATUS": "Success"}, "info"),
+        ({"OPERATION_STATUS": "Failed"}, "warn"),
+        # Streaming LoginEventStream.Status (free text).
+        ({"Status": "Success"}, "info"),
+        ({"Status": "Invalid password"}, "warn"),
+        # Fields that look status-ish but are NOT severity must be ignored.
+        ({"SessionLevel": "HIGH_ASSURANCE"}, "info"),
+        ({"SESSION_LEVEL": "1"}, "info"),
+        ({"LoginType": "Remote Access 2.0"}, "info"),
+        ({"UserType": "Guest"}, "info"),
+        ({"COUNTRY_CODE": "IN"}, "info"),
+    ],
+)
+def test_derive_level(payload: dict[str, object], expected: str) -> None:
+    assert derive_level(payload) == expected
+
+
+def test_derive_level_priority_error_beats_status() -> None:
+    # A 5xx with a success-ish REQUEST_STATUS is still an error.
+    assert derive_level({"STATUS_CODE": "500", "REQUEST_STATUS": "S"}) == "error"
 
 
 def test_promote_labels_present_and_stringified() -> None:

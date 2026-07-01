@@ -339,6 +339,16 @@ list, with sensible per-event defaults): `replay_id`, `schema_id`, `event_uuid`/
 `user_id`, `username`, `source_ip`, `session_key`, `request_id`/`api_id`, `related_event_id`.
 Queryable as `{event_type="LoginEventStream"} | user_id="005…"` with no stream-cardinality cost.
 
+**`level`** is injected on every entry (`shaping.derive_level`). Salesforce has no single level field,
+so it is derived from whatever status the event carries — explicit exceptions/errors and HTTP
+`STATUS_CODE` → `error`/`warn`, `REQUEST_STATUS`/`LOGIN_STATUS`/`OPERATION_STATUS`/streaming `Status`
+→ `info`/`warn` — defaulting to `info`. We emit `level` (a Loki-recognised level-field name) rather
+than `detected_level` directly: Loki's distributor normalises `level` and copies it into the
+`detected_level` structured metadata Grafana colours/filters by, and emitting `level` stays portable
+where Loki's `discover_log_levels` is off. Level is deliberately structured metadata, **not** a label
+— it varies row-to-row within a stream, so a label would fragment streams multiplicatively (current
+Loki labelling guidance lists log level as a field to keep off labels).
+
 **Log line**: the full decoded Avro/SOQL event as canonical JSON. **Entry timestamp = event
 `EventDate`/`CreatedDate`** (fallback: ingest time).
 

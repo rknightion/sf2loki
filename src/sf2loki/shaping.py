@@ -20,10 +20,96 @@ def route_fields(
     ``sm_fields`` that are present and non-null are promoted to structured
     metadata (stringified). High-cardinality fields therefore never become
     stream labels.
+
+    A ``level`` structured-metadata field is always injected (see
+    :func:`derive_level`) so Grafana/Loki colour and filter lines by severity
+    instead of falling back to ``unknown``. ``level`` is one of Loki's recognised
+    level-field names: its distributor normalises it and copies it into the
+    ``detected_level`` metadata Grafana keys off — emitting ``level`` (rather than
+    ``detected_level`` directly) is the portable convention and works even where
+    Loki's ``discover_log_levels`` is disabled. Metadata only — never added to the
+    log line body.
     """
     sm = {k: str(payload[k]) for k in sm_fields if payload.get(k) is not None}
+    sm["level"] = derive_level(payload)
     line = json.dumps(payload, sort_keys=True, default=str)
     return line, sm
+
+
+# Salesforce has no single "log level" field. Instead each event type carries
+# its own success/failure signal; derive_level maps whichever is present to a
+# Grafana-recognised level ("info" / "warn" / "error"), preferring Salesforce's
+# own value and only defaulting to "info" when nothing indicates otherwise.
+# Fields are an explicit allowlist (checked in priority order) so lookalikes
+# such as SessionLevel/SESSION_LEVEL, LoginType, or UserType are never mistaken
+# for a severity.
+_SUCCESS_TOKENS: frozenset[str] = frozenset(
+    {"s", "success", "successful", "ok", "complete", "completed", "true"}
+)
+# Values that mean "field is effectively empty" (so it carries no error signal).
+_ABSENT_TOKENS: frozenset[str] = frozenset({"", "0", "none", "null", "na", "n/a"})
+
+
+def _present(payload: Mapping[str, object], key: str) -> str | None:
+    """Return the stripped string value of *key* if meaningfully present, else None."""
+    value = payload.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text.lower() not in _ABSENT_TOKENS else None
+
+
+def _http_level(code_text: str) -> str | None:
+    """Map an HTTP-style status code to a level, or None if not a 3-digit code."""
+    if not code_text.isdigit():
+        return None
+    code = int(code_text)
+    if code >= 500:
+        return "error"
+    if code >= 400:
+        return "warn"
+    if 100 <= code < 400:
+        return "info"
+    return None
+
+
+def derive_level(payload: Mapping[str, object]) -> str:
+    """Best-effort severity for an event, as a Grafana-recognised level string.
+
+    Returns ``"error"``, ``"warn"``, or ``"info"``. Uses Salesforce's own status
+    fields where present (explicit exceptions/errors, HTTP status codes, and the
+    various per-type S/F status columns) and falls back to ``"info"`` otherwise.
+    """
+    # 1. An explicit exception or error field means it failed server-side.
+    for key in ("EXCEPTION_MESSAGE", "EXCEPTION_TYPE", "ERROR_MESSAGE", "ERROR_CODE"):
+        if _present(payload, key) is not None:
+            return "error"
+
+    # 2. HTTP status code (RestApi / ApiTotalUsage STATUS_CODE).
+    code_text = _present(payload, "STATUS_CODE")
+    if code_text is not None:
+        level = _http_level(code_text)
+        if level is not None:
+            return level
+
+    # 3. Generic request status (RestApi / API REQUEST_STATUS: "S" / "F").
+    request_status = _present(payload, "REQUEST_STATUS")
+    if request_status is not None:
+        return "info" if request_status.lower() in _SUCCESS_TOKENS else "warn"
+
+    # 4. Login outcome (ELF Login LOGIN_STATUS: "LOGIN_NO_ERROR" vs a failure).
+    login_status = _present(payload, "LOGIN_STATUS")
+    if login_status is not None:
+        return "info" if login_status.upper() == "LOGIN_NO_ERROR" else "warn"
+
+    # 5. Operation status (OneCommerceUsage OPERATION_STATUS) and streaming Status
+    #    (e.g. LoginEventStream.Status, free text like "Success" / a failure reason).
+    for key in ("OPERATION_STATUS", "Status"):
+        status = _present(payload, key)
+        if status is not None:
+            return "info" if status.lower() in _SUCCESS_TOKENS else "warn"
+
+    return "info"
 
 
 def promote_labels(payload: Mapping[str, object], label_fields: Sequence[str]) -> dict[str, str]:

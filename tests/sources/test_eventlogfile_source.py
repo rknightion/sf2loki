@@ -186,7 +186,8 @@ async def test_per_type_sm_fields_override_global(
     entries = [e async for e in source.events(store, stop)]
 
     assert len(entries) == 1
-    assert entries[0].structured_metadata == {"API_TYPE": "REST"}
+    # level is always injected; the per-type override drives the rest.
+    assert entries[0].structured_metadata == {"API_TYPE": "REST", "level": "info"}
     assert "USER_ID" not in entries[0].structured_metadata
 
 
@@ -210,7 +211,8 @@ async def test_empty_per_type_sm_fields_suppresses_global(
     stop = asyncio.Event()
     entries = [e async for e in source.events(store, stop)]
 
-    assert entries[0].structured_metadata == {}
+    # USER_ID suppressed by the empty per-type list; level still injected.
+    assert entries[0].structured_metadata == {"level": "info"}
 
 
 @pytest.mark.asyncio
