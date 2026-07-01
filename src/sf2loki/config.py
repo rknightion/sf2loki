@@ -298,10 +298,8 @@ class FileStateConfig(BaseModel):
 
 
 class StateConfig(BaseModel):
-    store: Literal["file", "configmap"] = "file"
+    store: Literal["file"] = "file"
     file: FileStateConfig = Field(default_factory=FileStateConfig)
-    configmap_name: str = "sf2loki-state"
-    namespace: str | None = None
 
 
 class TelemetryConfig(BaseModel):

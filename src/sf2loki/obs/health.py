@@ -46,7 +46,7 @@ class Health:
         Use ':0' to let the OS assign an ephemeral port; read it back from self.port.
         """
         host, _, port_str = addr.rpartition(":")
-        host = host or "0.0.0.0"  # bind all interfaces so k8s probes can reach it
+        host = host or "0.0.0.0"  # bind all interfaces so container health probes can reach it
         port = int(port_str)
 
         self._server = await asyncio.start_server(

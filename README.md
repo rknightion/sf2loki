@@ -25,8 +25,8 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - **Loki-safe lines**: one entry per ELF row (never a whole file as one line), plus a per-line byte cap
   (`batch.max_line_bytes`, default 256 KiB) that truncates an oversized line before push so one fat row
   can't get its whole batch rejected.
-- **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a file or a k8s
-  ConfigMap; at-least-once delivery, structural backpressure (no silent drops).
+- **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a local JSON file;
+  at-least-once delivery, structural backpressure (no silent drops).
 - **Self-observable (OTel-native)**: all metrics — connector self-observability **and** Salesforce org
   limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
@@ -70,7 +70,7 @@ openssl req -new -x509 -key server.key -out server.crt -days 3650 -subj "/CN=sf2
 
 | File | Secret? | Where it goes |
 |------|---------|---------------|
-| `server.key` | **yes** | k8s `Secret` → mounted into the pod → `salesforce.private_key_file` (or `salesforce.private_key`). Never upload it. |
+| `server.key` | **yes** | mounted read-only (e.g. `./secrets`) → `salesforce.private_key_file` (or `salesforce.private_key`). Never upload it. |
 | `server.crt` | no | uploaded to the External Client App (OAuth Settings → JWT Bearer Flow). Not deployed with the service. |
 
 The cert is self-signed on purpose — Salesforce only needs the public key to verify signatures; there's
@@ -246,12 +246,6 @@ they should probe `/readyz` — the Dockerfile `HEALTHCHECK` already does. For *
 definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || exit 1` with a
 `startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a fast-fail
 (e.g. bad Salesforce credentials → process exits) restarts the task.
-
-## Kubernetes deployment
-
-A Helm chart is planned. Until then, run the published container image
-(`ghcr.io/rknightion/sf2loki`) directly with the config mounted at `/etc/sf2loki/config.yaml`
-and secrets (Salesforce private key, Loki token) supplied via env or mounted files.
 
 **Run exactly one replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API delivers
 events independently per subscriber connection, so a second instance double-delivers. See

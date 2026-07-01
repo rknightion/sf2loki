@@ -2,8 +2,8 @@
 #
 # Precedence (highest first): env (SF2LOKI_* with __ nesting) > this file > defaults.
 # ${VAR} placeholders below are interpolated from the environment at load time
-# (missing var = fatal). Secrets are injected from *_file paths (k8s Secret
-# mounts); a missing/unreadable secret file is fatal at startup too (no silent
+# (missing var = fatal). Secrets are injected from *_file paths (mounted secret
+# files); a missing/unreadable secret file is fatal at startup too (no silent
 # blanks, in either case).
 
 salesforce:
@@ -105,11 +105,9 @@ sink:
       - session_key
 
 state:
-  store: configmap                                # configmap (k8s-native, no PVC) | file
-  configmap_name: sf2loki-state
-  namespace: null                                 # null -> read from the in-cluster service account
+  store: file                                     # local JSON file (the only backend)
   file:
-    path: /var/lib/sf2loki/state.json             # only used when store: file
+    path: /var/lib/sf2loki/state.json             # persist on a mounted volume for durable resume
 
 service:
   log_level: info

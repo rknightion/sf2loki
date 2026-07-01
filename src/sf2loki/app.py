@@ -33,7 +33,6 @@ from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.sources.overlap import check_overlap
 from sf2loki.sources.pubsub_source import PubSubSource
-from sf2loki.state.configmap_store import ConfigMapCheckpointStore
 from sf2loki.state.file_store import FileCheckpointStore
 
 if TYPE_CHECKING:
@@ -75,7 +74,7 @@ def build_static_labels(
 
 # Fixed budget for closing resources (http/grpc clients) during shutdown — kept
 # short and separate from shutdown_grace (which bounds the pipeline drain) so
-# the two don't stack past k8s's terminationGracePeriodSeconds.
+# the two don't stack past the container runtime's stop timeout.
 _CLOSE_TIMEOUT: float = 5.0
 
 
@@ -301,11 +300,6 @@ async def _drain_with_grace(awaitable: Awaitable[None], stop: asyncio.Event, gra
 
 
 def _build_state(cfg: Config) -> CheckpointStore:
-    if cfg.state.store == "configmap":
-        return ConfigMapCheckpointStore.from_service_account(
-            name=cfg.state.configmap_name,
-            namespace=cfg.state.namespace,
-        )
     return FileCheckpointStore(cfg.state.file.path)
 
 

@@ -4,8 +4,8 @@ A long-running Python service that ingests Salesforce Event Monitoring data — 
 Event Monitoring (RTEM) streaming events, stored RTEM/event objects, and (later) EventLogFile —
 and pushes it to Grafana Loki with strict label-cardinality discipline.
 
-Targets Grafana Cloud Loki and self-hosted Loki / local Alloy (`loki.source.api`). Runs in
-Kubernetes; the container is optimised first.
+Targets Grafana Cloud Loki and self-hosted Loki / local Alloy (`loki.source.api`). Ships as a
+single container image, run via Docker / Docker Compose.
 
 ---
 
@@ -134,15 +134,14 @@ class CheckpointStore(Protocol):
     async def load(self, key: str) -> str | None: ...
     async def commit(self, key: str, value: str) -> None: ...
 ```
-Implementations: `file_store` (default; JSON on emptyDir/PVC, atomic temp-then-rename) and
-`configmap_store` (k8s-native, no PVC; RMW with resource-version optimistic concurrency).
+Implementation: `file_store` (JSON on a mounted volume, atomic temp-then-rename).
 
 ### `coordinate/base.py` — leadership (no-op now, HA later)
 ```python
 class Coordinator(Protocol):
     async def run(self, *, on_acquire, on_lose, stop: asyncio.Event) -> None: ...
 ```
-`NoopCoordinator` acquires immediately (single replica = always leader). A k8s `Lease`-based
+`NoopCoordinator` acquires immediately (single instance = always leader). A lease-based
 implementation can be added later for active-passive failover with **zero** changes to sources/sink.
 
 ---
@@ -374,7 +373,7 @@ best-effort, dedup).
 ## 11. Config schema
 
 `pydantic-settings`: load from YAML and/or env (`SF2LOKI_…`, `__` nesting). Secrets injectable via
-`*_file` fields (k8s secret mounts) or `${ENV}` interpolation; missing/unreadable secret → fatal
+`*_file` fields (mounted secret files) or `${ENV}` interpolation; missing/unreadable secret → fatal
 (fail fast, no silent blanks).
 
 ```yaml
@@ -419,7 +418,7 @@ sink:
     structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]
 
 state:
-  store: file                                    # file | configmap
+  store: file                                    # local JSON file (the only backend)
   file: {path: /var/lib/sf2loki/state.json}
 
 service:
@@ -468,15 +467,15 @@ JSON or logfmt, level-configurable, instance id in context.
 - **Reconnect**: gRPC stream errors (UNAVAILABLE etc.) → backoff + reconnect, resume from committed
   `replay_id`.
 - **Graceful shutdown**: SIGTERM → set `stop` event → stop requesting events → flush in-flight batch
-  → commit checkpoints → close streams, all within `shutdown_grace` (k8s
-  `terminationGracePeriodSeconds` set above it).
+  → commit checkpoints → close streams, all within `shutdown_grace` (set the container runtime's
+  stop timeout above it).
 
-**HA / replica model.** The Pub/Sub API delivers events **independently per subscriber connection**
-(no consumer groups) — **two replicas both subscribing double-deliver events.** Therefore the default
-deployment is **`replicas: 1`, `strategy: Recreate`** with `replay_id` checkpointing so a
-restart/reschedule resumes without overlap; the brief restart gap is bounded by Pub/Sub retention and
-backfilled by Phase 2. The `Coordinator` seam (§4) lets active-passive leader election (k8s `Lease`)
-drop in later without reshaping sources or sink. Topic-sharding across replicas is a future scale path.
+**HA / single-instance model.** The Pub/Sub API delivers events **independently per subscriber
+connection** (no consumer groups) — **two instances both subscribing double-deliver events.**
+Therefore the deployment runs **exactly one instance** (stop-then-start, never overlapping) with
+`replay_id` checkpointing so a restart resumes without overlap; the brief restart gap is bounded by
+Pub/Sub retention and backfilled by Phase 2. The `Coordinator` seam (§4) lets active-passive leader
+election drop in later without reshaping sources or sink. Topic-sharding is a future scale path.
 
 ---
 
@@ -484,9 +483,9 @@ drop in later without reshaping sources or sink. Topic-sharding across replicas 
 
 - **Dockerfile**: multi-stage — `uv`-based builder (deps + already-committed stubs) → slim,
   non-root runtime (distroless-python or `python:3.12-slim`), `HEALTHCHECK` against `/healthz`.
-- **k8s** (`deploy/k8s/`): `Deployment` (replicas 1 / Recreate), `Secret` (private key + Loki token),
-  `ConfigMap` (config.yaml), `PodDisruptionBudget`. PVC only if
-  `state.store: file`; `configmap` store needs none. Helm chart optional (`deploy/helm/`).
+- **Docker Compose** (`docker-compose.yml`): the published image with `config.docker.yaml` +
+  `./secrets` mounted read-only and `./state` bind-mounted at `/var/lib/sf2loki` for durable
+  checkpoints. Single service, `restart: unless-stopped`.
 - **CI** (GitHub Actions): ruff → mypy → pytest → proto-drift check → multi-arch image build (buildx)
   → gitleaks. Mirrors `genai-otel-bridge`'s green-bar gate.
 - **`justfile`**: `setup`, `proto`, `lint`, `type`, `test`, `gate`, `image`, `run`.

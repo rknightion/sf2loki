@@ -1,7 +1,7 @@
 """The Coordinator seam: leadership for active-passive HA (future).
 
-Single-replica deployments use ``NoopCoordinator`` (always leader). A k8s
-Lease-based coordinator can be added later with no changes to sources/sink.
+Single-instance deployments use ``NoopCoordinator`` (always leader). A
+lease-based coordinator can be added later with no changes to sources/sink.
 """
 
 from __future__ import annotations
