@@ -4,8 +4,9 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `salesforce` | `SalesforceConfig` |  | yes | Salesforce org connection and authentication. |
-| `sources` | `SourcesConfig` |  | no | Event source selection and settings. |
+| `salesforce` | `SalesforceConfig` |  | no | Single-org Salesforce connection and authentication. Set this OR `orgs` (exactly one). Omit when using the multi-org `orgs` list. |
+| `orgs` | `list[OrgConfig]` |  | no | Multi-org list: ingest several Salesforce orgs from one process into one shared sink. Set this OR top-level `salesforce` (exactly one). Each entry carries its own salesforce + sources; the sink/state/service stay shared. |
+| `sources` | `SourcesConfig` |  | no | Single-org event source selection and settings. Ignored (and rejected if customized) when `orgs` is used — put per-org sources under each org. |
 | `sink` | `SinkConfig` |  | yes | Log sink settings. |
 | `state` | `StateConfig` |  | no | Checkpoint/state store settings. |
 | `coordinate` | `CoordinateConfig` |  | no | Leadership coordination for active-passive HA. |
@@ -35,6 +36,14 @@
 | --- | --- | --- | --- | --- |
 | `enabled` | `bool` | false | no | Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...). |
 | `poll_interval` | `Duration` | 5m | no | How often to poll the limits endpoint. |
+
+## OrgConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `str` | prod | yes | Org identifier: becomes the `org` stream label and the checkpoint key prefix. Letters, digits, underscore, hyphen only; must be unique. |
+| `salesforce` | `SalesforceConfig` |  | yes | This org's Salesforce connection and authentication. |
+| `sources` | `SourcesConfig` |  | no | This org's event source selection and settings. |
 
 ## SourcesConfig
 

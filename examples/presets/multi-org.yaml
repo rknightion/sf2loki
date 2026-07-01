@@ -1,0 +1,71 @@
+# Preset: multi-org ingestion — several Salesforce orgs, one sf2loki process,
+# one shared Loki sink (see the "Multi-org ingestion" section in README.md).
+#
+# Replace the single-org top-level `salesforce:`/`sources:` with an `orgs:`
+# list. Set EITHER top-level `salesforce:` (single-org) OR `orgs:` (multi-org),
+# never both. Each org carries its own salesforce connection + sources; the
+# sink, state store, coordinator, and service settings stay SHARED — one
+# pipeline, one queue, one Loki tenant.
+#
+# Every org's entries get an `org` stream label plus their own `sf_org_id` and
+# `environment` labels (they can differ per org — note `emea` is a sandbox
+# below). Checkpoint keys are namespaced `org=<name>:`; the FIRST org also
+# falls back to the old unprefixed keys, so an upgraded single-org deployment
+# migrates its existing state file transparently.
+#
+# The overlap guard runs per org, so the same category on two DIFFERENT orgs
+# is fine. API limits/allocations are per org (each has its own clients). If
+# one org's auth fails at startup the others keep streaming (readiness reports
+# `degraded: org <name> auth failing`); startup only fails fast if ALL fail.
+#
+# This is a fragment, not a runnable standalone file — merge into config.yaml
+# (see config.example.yaml for the full schema, auth, sink, state, service).
+
+orgs:
+  - name: prod                       # -> org="prod" label + org=prod: key prefix
+    salesforce:
+      environment: production
+      auth_mode: jwt_bearer
+      client_id: ${SF_PROD_CLIENT_ID}
+      username: svc@prod.example.com
+      private_key_file: /etc/sf2loki/secrets/prod.key
+      api_version: "60.0"
+      limits:
+        enabled: true                # per-org org-limit metrics (labelled org="prod")
+    sources:
+      pubsub:
+        enabled: true
+        topics:
+          - /event/LoginEventStream
+
+  - name: emea                       # -> org="emea" label + org=emea: key prefix
+    salesforce:
+      environment: sandbox           # per-org environment -> environment="sandbox" label
+      auth_mode: client_credentials
+      login_url: https://emea--sbx.my.salesforce.com
+      client_id: ${SF_EMEA_CLIENT_ID}
+      client_secret_file: /etc/sf2loki/secrets/emea-client-secret
+      api_version: "60.0"
+    sources:
+      eventlogfile:
+        enabled: true
+        interval: Daily
+        event_types:
+          - Login
+          - API
+
+# Shared across all orgs below this line.
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+
+state:
+  store: file
+  file:
+    path: /var/lib/sf2loki/state.json   # one shared store; keys namespaced org=<name>:
+
+service:
+  log_level: info

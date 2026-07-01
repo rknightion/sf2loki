@@ -297,12 +297,56 @@ See [`docs/configuring-sources.md`](docs/configuring-sources.md) for recipes —
 custom objects, ingesting login history / setup audit trail, the either/or-per-category rule,
 PII redaction & sampling, and cost controls (rate caps + the daily byte budget).
 
+### Multi-org ingestion
+
+One sf2loki process can ingest several Salesforce orgs into one shared sink — MSPs, ISV partners, and
+anyone running prod + sandboxes no longer need N containers, N configs, and N state volumes for what is
+logically one job. Replace the top-level `salesforce:`/`sources:` with an `orgs:` list; the sink, state
+store, coordinator, and service settings stay shared (one pipeline, one queue, one Loki tenant):
+
+```yaml
+orgs:
+  - name: prod                    # becomes the `org` label + checkpoint key prefix (org=prod:)
+    salesforce: { ... }           # exactly today's salesforce block, per org
+    sources: { ... }              # per-org source selection
+  - name: emea
+    salesforce: { ... }
+    sources: { ... }
+sink: { ... }                     # shared
+state: { ... }                    # shared store; keys are namespaced org=<name>:
+service: { ... }                  # shared
+```
+
+Set **either** top-level `salesforce:` (single-org) **or** `orgs:` (multi-org), never both — and org
+names must be unique (letters, digits, `_`, `-`). Every entry gets an `org` stream label plus its own
+`sf_org_id` and `environment` labels (they can differ per org); the overlap guard runs per org, so the
+same category on two *different* orgs is fine. Single-org configs are unchanged and bit-identical.
+
+Operational notes:
+
+- **Per-org API limits/allocations apply automatically** — each org has its own `TokenProvider` and
+  Salesforce clients, so the existing rate/throttle guardrails and (optional) org-limit metrics apply
+  per org. Set `salesforce.limits.enabled: true` under an org to poll that org's limits.
+- **One org's outage doesn't stop the others.** Startup fails fast only if *every* org's auth fails;
+  if some fail, the healthy orgs stream while each failing org is logged at ERROR, surfaces a
+  `degraded: org <name> auth failing` readiness reason, and retries auth reactively — recovering on its
+  own without a restart.
+- **Checkpoint migration is transparent.** Keys are namespaced `org=<name>:`; the **first** configured
+  org also falls back to the old unprefixed keys on load, so a deployment upgraded from single-org to
+  multi-org resumes from its existing state file and migrates forward with no manual step.
+- **`doctor` and `backfill` operate on one org** — they default to the first configured org; pass
+  `--org <name>` to pick another (they print a note when multiple orgs are configured).
+
+See [`examples/presets/multi-org.yaml`](examples/presets/multi-org.yaml) for a full two-org example.
+
 ### Presets
 
 [`examples/presets/`](examples/presets/) has ready-to-merge config fragments for common setups (merge
 the relevant keys into your `config.yaml` alongside sink/state/service — see
 [`config.example.yaml`](config.example.yaml) for the full schema):
 
+- [`multi-org.yaml`](examples/presets/multi-org.yaml) — ingest two Salesforce orgs (prod + emea) from
+  one process into one shared sink via the `orgs:` list.
 - [`custom-object-polling.yaml`](examples/presets/custom-object-polling.yaml) — SOQL-poll an
   arbitrary custom object (e.g. `MyAudit__c`) via `sources.eventlog_objects`.
 - [`login-history.yaml`](examples/presets/login-history.yaml) — ingest login activity via

@@ -12,7 +12,7 @@ are unchanged.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -117,6 +117,80 @@ class _Histogram:
 
     def observe(self, value: float) -> None:
         self._instr.record(value, _NO_ATTRS)
+
+
+# ---------------------------------------------------------------------------
+# Per-org proxies: inject an ``org=<name>`` attribute into every measurement of a
+# per-org component (token provider, clients, sources, limits poller) without
+# touching a single call-site. Built once per org in _OrgMetrics.__init__.
+
+
+class _OrgCounter:
+    __slots__ = ("_inner", "_org")
+
+    def __init__(self, inner: _Counter, org: str) -> None:
+        self._inner = inner
+        self._org = org
+
+    def labels(self, **kwargs: str) -> _BoundCounter:
+        return self._inner.labels(org=self._org, **kwargs)
+
+    def inc(self, amount: float = 1) -> None:
+        self._inner.labels(org=self._org).inc(amount)
+
+
+class _OrgGauge:
+    __slots__ = ("_inner", "_org")
+
+    def __init__(self, inner: _Gauge, org: str) -> None:
+        self._inner = inner
+        self._org = org
+
+    def labels(self, **kwargs: str) -> _BoundGauge:
+        return self._inner.labels(org=self._org, **kwargs)
+
+    def set(self, value: float) -> None:
+        self._inner.labels(org=self._org).set(value)
+
+
+class _OrgHistogram:
+    __slots__ = ("_inner", "_org")
+
+    def __init__(self, inner: _Histogram, org: str) -> None:
+        self._inner = inner
+        self._org = org
+
+    def labels(self, **kwargs: str) -> _BoundHistogram:
+        return self._inner.labels(org=self._org, **kwargs)
+
+    def observe(self, value: float) -> None:
+        self._inner.labels(org=self._org).observe(value)
+
+
+class _OrgMetrics:
+    """A ``Metrics``-shaped facade that stamps ``org=<name>`` onto every instrument.
+
+    Wraps each ``_Counter``/``_Gauge``/``_Histogram`` attribute of the shared
+    ``Metrics`` with an org-injecting proxy (built once, here — not per call).
+    Any non-instrument attribute or method (``registry``, ``force_flush``,
+    ``shutdown``, ...) delegates to the wrapped instance via ``__getattr__``.
+    """
+
+    def __init__(self, inner: Metrics, org: str) -> None:
+        self._inner = inner
+        self._org = org
+        for attr_name, attr in vars(inner).items():
+            if isinstance(attr, _Counter):
+                setattr(self, attr_name, _OrgCounter(attr, org))
+            elif isinstance(attr, _Gauge):
+                setattr(self, attr_name, _OrgGauge(attr, org))
+            elif isinstance(attr, _Histogram):
+                setattr(self, attr_name, _OrgHistogram(attr, org))
+
+    def __getattr__(self, name: str) -> object:
+        # Only reached for attributes NOT set in __init__ (the instrument
+        # proxies above shadow the originals); delegates registry/force_flush/etc.
+        return getattr(self._inner, name)
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +554,20 @@ class Metrics:
             )
         )
         self.build_info.labels(version=version).set(1)
+
+    def for_org(self, org: str) -> Metrics:
+        """Return a view that stamps ``org=<name>`` onto every measurement.
+
+        ``org == ""`` (single-org / legacy mode) returns ``self`` — zero overhead
+        and no ``org`` label, so single-org metrics are bit-identical. A non-empty
+        name returns an :class:`_OrgMetrics` facade (cast to ``Metrics`` for the
+        call-sites, which are unchanged). Give it to per-org components (token
+        provider, Salesforce clients, sources, limits poller); keep the raw
+        ``Metrics`` for the deployment-wide pipeline/sink.
+        """
+        if not org:
+            return self
+        return cast("Metrics", _OrgMetrics(self, org))
 
     def force_flush(self, timeout_millis: int = 5000) -> None:
         """Flush any pending exports (best-effort; safe to call when disabled)."""

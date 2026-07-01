@@ -686,7 +686,12 @@ async def run_backfill(
     ingest_timestamps: bool,
     concurrency: int,
 ) -> int:
-    """Backfill ELF history for [since, until) into Loki; return an exit code."""
+    """Backfill ELF history for [since, until) into Loki; return an exit code.
+
+    ``cfg`` must be a single-org view (see ``config.as_single_org_view``): the CLI
+    resolves ``--org`` to one org before calling, so ``cfg.salesforce`` is set.
+    """
+    assert cfg.salesforce is not None, "run_backfill needs a single-org config view"
     _warn_retention(since, ingest_timestamps)
 
     sf_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)

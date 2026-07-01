@@ -10,7 +10,7 @@
 # key + cert, no shared secret) or ``client_credentials`` (consumer key +
 # secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
 # compatibility.
-salesforce:  # Salesforce org connection and authentication.
+salesforce:  # Single-org Salesforce connection and authentication. Set this OR `orgs` (exactly one). Omit when using the multi-org `orgs` list.
   login_url: ""  # Optional: derived from `environment` when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.
   environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
   auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
@@ -29,6 +29,144 @@ salesforce:  # Salesforce org connection and authentication.
   limits:  # Org-limits metric poller settings.
     enabled: false  # Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).
     poll_interval: 5m  # How often to poll the limits endpoint.
+# ``name`` becomes the ``org`` stream label value and the checkpoint-key prefix
+# (``org=<name>:``), so it must be a short slug (letters, digits, ``_``,
+# ``-``). Each org carries its own ``salesforce`` connection and its own
+# ``sources`` selection; the sink, state store, coordinator, and service
+# settings stay deployment-wide (one shared pipeline).
+orgs:  # Multi-org list: ingest several Salesforce orgs from one process into one shared sink. Set this OR top-level `salesforce` (exactly one). Each entry carries its own salesforce + sources; the sink/state/service stay shared.
+  - name: prod  # Org identifier: becomes the `org` stream label and the checkpoint key prefix. Letters, digits, underscore, hyphen only; must be unique. (required)
+    # Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
+    # key + cert, no shared secret) or ``client_credentials`` (consumer key +
+    # secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
+    # compatibility.
+    salesforce:  # This org's Salesforce connection and authentication.
+      login_url: ""  # Optional: derived from `environment` when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.
+      environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
+      auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
+      client_id: ${SF_CLIENT_ID}  # External Client App consumer key. (required)
+      # client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
+      client_secret_file: /etc/sf2loki/secrets/client-secret  # File path to the client_credentials secret; required when auth_mode: client_credentials.
+      username: svc@example.com  # Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials.
+      private_key_file: /etc/sf2loki/secrets/server.key  # File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.
+      # private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
+      api_version: "60.0"  # Salesforce REST/SOAP API version to target.
+      org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
+      token_ttl: 1h  # Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence.
+      # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
+      # limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...).
+      # Cheap (one REST call per interval) and useful product telemetry.
+      limits:  # Org-limits metric poller settings.
+        enabled: false  # Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).
+        poll_interval: 5m  # How often to poll the limits endpoint.
+    # Either/or per event category: by default ingest each category (Login, API,
+    # Report, ...) from exactly ONE source. Streaming ``/event/LoginEventStream``
+    # AND polling ``LoginEvent`` AND pulling the "Login" EventLogFile are the SAME
+    # activity via different channels. A fail-fast guard refuses to start on an
+    # EXPLICIT overlap, and the ELF "*" wildcard auto-excludes categories a
+    # stream/object source already owns. Set ``allow_overlap: true`` to ingest a
+    # category via MULTIPLE sources on purpose — e.g. the real-time-but-lean stream
+    # AND the slower-but-richer EventLogFile rows for the same category (they are
+    # NOT byte-identical, so both flow — build dashboards on whichever fits).
+    sources:  # This org's event source selection and settings.
+      pubsub:  # Pub/Sub API streaming source.
+        enabled: true  # Enable the Pub/Sub streaming source.
+        endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.
+        default_num_requested: 100  # Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked).
+        replay_preset: CUSTOM  # Replay position; falls back to LATEST when no stored replay_id.
+        topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
+        include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
+        exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
+        rediscovery_interval: 1h  # How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).
+        sample: {/event/ApiEventStream: 0.25}  # Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints.
+        # Rules run on the decoded payload BEFORE field routing, label promotion,
+        # and timestamp extraction — so redacting the timestamp column triggers the
+        # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+        # is rejected at load time (it would silently drop the label).
+        transforms:  # Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule).
+          - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+            fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+            match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+            pattern: null  # regex_replace only: the regular expression to replace (must compile).
+            replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+            name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+      # Use for categories you'd rather poll than stream (or that have no stream).
+      # Do NOT also stream the same category.
+      eventlog_objects:  # Event-object SOQL polling source.
+        enabled: false  # Enable the event-object polling source.
+        objects:  # Event objects to poll.
+          - name: ""  # The event object API name to poll (e.g. LoginEvent). (required)
+            timestamp_field: EventDate  # The field used as the per-row event time for polling/checkpointing.
+            poll_interval: 5m  # How often to poll this object.
+            lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+            sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+        # Rules run on the decoded payload BEFORE field routing, label promotion,
+        # and timestamp extraction — so redacting the timestamp column triggers the
+        # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+        # is rejected at load time (it would silently drop the label).
+        transforms:  # Redaction/filter rules applied to each polled record before shaping (see TransformRule).
+          - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+            fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+            match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+            pattern: null  # regex_replace only: the regular expression to replace (must compile).
+            replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+            name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+      # Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
+      # EventLogFile``, or the EventType picklist, to see which your org actually
+      # produces); schema is read per-file. This is the workhorse for breadth —
+      # most activity only surfaces here, not as a streaming event.
+      #
+      # Ingest exactly ONE interval (``Hourly`` or ``Daily``); hourly and daily
+      # files are redundant copies of the same events (Salesforce), so ingesting
+      # both double-counts. ``Daily`` is settled (~1 day lag) and works for every
+      # org; ``Hourly`` is fresher but needs the Event Monitoring hourly opt-in in
+      # Setup, and some orgs generate ONLY Daily files — check before choosing
+      # Hourly.
+      #
+      # Use ``event_types: ["*"]`` to DISCOVER and ingest every EventType the org
+      # produces for the configured interval (re-checked each poll, so newly
+      # enabled types appear with no restart), then use ``exclude`` to drop
+      # categories owned by another source or high-volume types you don't want. Or
+      # list types explicitly — each item is a bare string (uses the global
+      # structured_metadata_fields, promotes no labels) or a per-type object (name
+      # + optional structured_metadata_fields/labels overrides). Explicit entries
+      # always win over discovered ones.
+      eventlogfile:  # EventLogFile (CSV) ingestion source.
+        enabled: false  # Enable the EventLogFile ingestion source.
+        interval: Hourly  # Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; check before Hourly.
+        # A bare string in ``eventlogfile.event_types`` coerces to ``{name:
+        # <string>}`` (backward compatible). ``structured_metadata_fields``
+        # defaults to ``None``, meaning "fall back to the global
+        # ``sink.loki.structured_metadata_fields``"; set it to a list (including
+        # ``[]``) to override per type. ``labels`` lists columns promoted to stream
+        # labels — keep these LOW cardinality.
+        event_types:  # ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.
+          - name: ""  # The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. (required)
+            structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
+            labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
+            sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything.
+        exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
+        poll_interval: 1h  # How often to list new files (Daily files land ~once/day).
+        lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
+        timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
+        page_size: 1000  # SOQL LIMIT for the file-listing query.
+        settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly.
+        download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
+        # Rules run on the decoded payload BEFORE field routing, label promotion,
+        # and timestamp extraction — so redacting the timestamp column triggers the
+        # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+        # is rejected at load time (it would silently drop the label).
+        transforms:  # Redaction/filter rules applied to each CSV row before shaping (see TransformRule).
+          - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+            fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+            match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+            pattern: null  # regex_replace only: the regular expression to replace (must compile).
+            replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+            name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+        concurrency: 4  # Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.
+      allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
+      # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
+      transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
 # Either/or per event category: by default ingest each category (Login, API,
 # Report, ...) from exactly ONE source. Streaming ``/event/LoginEventStream``
 # AND polling ``LoginEvent`` AND pulling the "Login" EventLogFile are the SAME
@@ -38,7 +176,7 @@ salesforce:  # Salesforce org connection and authentication.
 # category via MULTIPLE sources on purpose — e.g. the real-time-but-lean stream
 # AND the slower-but-richer EventLogFile rows for the same category (they are
 # NOT byte-identical, so both flow — build dashboards on whichever fits).
-sources:  # Event source selection and settings.
+sources:  # Single-org event source selection and settings. Ignored (and rejected if customized) when `orgs` is used — put per-org sources under each org.
   pubsub:  # Pub/Sub API streaming source.
     enabled: true  # Enable the Pub/Sub streaming source.
     endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.

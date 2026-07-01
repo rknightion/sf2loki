@@ -148,6 +148,14 @@ class TokenProvider:
         """Clear the cached token (call when a downstream caller receives a 401)."""
         self._cached = None
 
+    def has_token(self) -> bool:
+        """True if a currently-valid (non-near-expiry) token is cached.
+
+        Used by the multi-org readiness check to tell whether an org that failed
+        the startup auth probe has since recovered (its sources mint reactively).
+        """
+        return self._is_valid(self._cached)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

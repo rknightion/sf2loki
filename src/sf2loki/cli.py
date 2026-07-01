@@ -59,6 +59,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="json_output",
         help="Emit machine-readable JSON instead of the table (for CI).",
     )
+    doctor_parser.add_argument(
+        "--org",
+        default=None,
+        help="For a multi-org config, which org to check (default: the first "
+        "configured org). Ignored for single-org configs.",
+    )
 
     backfill_parser = subparsers.add_parser(
         "backfill",
@@ -98,6 +104,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=2,
         help="Concurrent file downloads (each spools up to 8 MiB).",
     )
+    backfill_parser.add_argument(
+        "--org",
+        default=None,
+        help="For a multi-org config, which org to backfill (default: the first "
+        "configured org). Ignored for single-org configs.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -108,18 +120,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "doctor":
         from sf2loki.doctor import run_doctor
 
-        return uvloop.run(run_doctor(args.config, json_output=args.json_output))
+        return uvloop.run(run_doctor(args.config, json_output=args.json_output, org_name=args.org))
 
     if args.command == "backfill":
         from sf2loki.backfill import parse_backfill_date, run_backfill
+        from sf2loki.config import as_single_org_view, select_org
 
         try:
             since = parse_backfill_date(args.since)
             until = parse_backfill_date(args.until) if args.until else None
             cfg = load(args.config)
+            org, note = select_org(cfg, args.org)
+            cfg = as_single_org_view(cfg, org)
         except (ConfigError, ValueError) as exc:
             print(f"sf2loki: {exc}", file=sys.stderr)
             return 2
+        if note:
+            print(f"sf2loki: {note}", file=sys.stderr)
         event_types = (
             [t.strip() for t in args.event_types.split(",") if t.strip()]
             if args.event_types

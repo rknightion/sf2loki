@@ -29,7 +29,16 @@ import httpx
 
 from sf2loki.app import App
 from sf2loki.auth.jwt_auth import AccessToken, AuthError, TokenProvider
-from sf2loki.config import EVENT_TYPE_WILDCARD, Config, ConfigError, PubSubConfig, load
+from sf2loki.config import (
+    EVENT_TYPE_WILDCARD,
+    Config,
+    ConfigError,
+    PubSubConfig,
+    SalesforceConfig,
+    as_single_org_view,
+    load,
+    select_org,
+)
 from sf2loki.model import Batch, CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.eventlogfile_client import EventLogFileClient, EventLogFileError
@@ -117,18 +126,18 @@ def _auth_failure_hint(auth_mode: str, login_url: str, message: str) -> str:
 
 
 async def _check_auth(
-    cfg: Config, tokens: TokenProvider
+    sf: SalesforceConfig, tokens: TokenProvider
 ) -> tuple[AccessToken | None, str | None, CheckResult]:
     """Mint a token and resolve the org id; report the flow, instance, and org."""
     try:
         tok = await tokens.token()
-        org_id = cfg.salesforce.org_id or await tokens.org_id()
+        org_id = sf.org_id or await tokens.org_id()
     except AuthError as exc:
-        hint = _auth_failure_hint(cfg.salesforce.auth_mode, cfg.salesforce.login_url, str(exc))
+        hint = _auth_failure_hint(sf.auth_mode, sf.login_url, str(exc))
         detail = f"{exc} — {hint}" if hint else str(exc)
         return None, None, CheckResult("auth", "FAIL", detail)
 
-    detail = f"flow={cfg.salesforce.auth_mode} instance_url={tok.instance_url} org_id={org_id}"
+    detail = f"flow={sf.auth_mode} instance_url={tok.instance_url} org_id={org_id}"
     return tok, org_id, CheckResult("auth", "PASS", detail)
 
 
@@ -139,16 +148,14 @@ async def _check_auth(
 
 async def _check_permissions(
     cfg: Config,
+    sf: SalesforceConfig,
     tok: AccessToken,
     http_client: httpx.AsyncClient,
     tokens: TokenProvider,
     metrics: Metrics,
 ) -> CheckResult:
     """Prove 'View Event Log Files' via describe; optionally probe one stored object."""
-    url = (
-        f"{tok.instance_url}/services/data/v{cfg.salesforce.api_version}"
-        "/sobjects/EventLogFile/describe"
-    )
+    url = f"{tok.instance_url}/services/data/v{sf.api_version}/sobjects/EventLogFile/describe"
     try:
         resp = await http_client.get(url, headers={"Authorization": f"Bearer {tok.value}"})
     except httpx.HTTPError as exc:
@@ -172,7 +179,7 @@ async def _check_permissions(
     eventlog_objects = cfg.sources.eventlog_objects
     if eventlog_objects.enabled and eventlog_objects.objects:
         obj_name = eventlog_objects.objects[0].name
-        soql = SoqlClient(cfg.salesforce, tokens, http_client, metrics=metrics)
+        soql = SoqlClient(sf, tokens, http_client, metrics=metrics)
         try:
             async for _ in soql.query(f"SELECT Id FROM {obj_name} LIMIT 1"):
                 pass
@@ -263,14 +270,18 @@ async def _check_pubsub(cfg: Config, tokens: TokenProvider, metrics: Metrics) ->
 
 
 async def _check_entitlement(
-    cfg: Config, tokens: TokenProvider, http_client: httpx.AsyncClient, metrics: Metrics
+    cfg: Config,
+    sf: SalesforceConfig,
+    tokens: TokenProvider,
+    http_client: httpx.AsyncClient,
+    metrics: Metrics,
 ) -> CheckResult:
     """Report configured explicit EventTypes that have produced no files."""
     elf_cfg = cfg.sources.eventlogfile
     if not elf_cfg.enabled:
         return CheckResult("entitlement", "SKIP", "eventlogfile source disabled")
 
-    client = EventLogFileClient(cfg.salesforce, tokens, http_client, metrics=metrics)
+    client = EventLogFileClient(sf, tokens, http_client, metrics=metrics)
     try:
         produced = await client.list_event_types(elf_cfg.interval)
     except EventLogFileError as exc:
@@ -377,10 +388,10 @@ def _check_state(cfg: Config) -> CheckResult:
 
 
 async def _check_limits(
-    cfg: Config, tokens: TokenProvider, http_client: httpx.AsyncClient
+    sf: SalesforceConfig, tokens: TokenProvider, http_client: httpx.AsyncClient
 ) -> CheckResult:
     """Report DailyApiRequests remaining/max; WARN below 20% remaining."""
-    client = LimitsClient(cfg.salesforce, tokens, http_client)
+    client = LimitsClient(sf, tokens, http_client)
     try:
         limits = await client.fetch()
     except LimitsError as exc:
@@ -447,11 +458,16 @@ _CHECKS_AFTER_CONFIG: tuple[str, ...] = (
 )
 
 
-async def run_doctor(config_path: Path | None, *, json_output: bool = False) -> int:
+async def run_doctor(
+    config_path: Path | None, *, json_output: bool = False, org_name: str | None = None
+) -> int:
     """Run all preflight checks; return 0 (no FAIL) or 1 (any FAIL).
 
     Loads the config itself (a config problem is check #1's FAIL row, not a
-    crash before the doctor starts).
+    crash before the doctor starts). For a multi-org config the per-org checks
+    (auth/permissions/pubsub/entitlement/limits) run against ONE org — the first
+    configured, or ``--org``; a note names which. The config check validates the
+    WHOLE multi-org config regardless.
     """
     results: list[CheckResult] = []
 
@@ -461,19 +477,31 @@ async def run_doctor(config_path: Path | None, *, json_output: bool = False) -> 
         _skip_remaining(results, _CHECKS_AFTER_CONFIG, "config failed")
         return _finish(results, json_output)
 
+    try:
+        org, note = select_org(cfg, org_name)
+    except ConfigError as exc:
+        results.append(CheckResult("org", "FAIL", str(exc)))
+        _skip_remaining(results, _CHECKS_AFTER_CONFIG, "org selection failed")
+        return _finish(results, json_output)
+    if note:
+        results.append(CheckResult("org", "WARN", note))
+    # Scope the per-org checks to the selected org (cfg.sources/salesforce -> org's).
+    cfg = as_single_org_view(cfg, org)
+    sf = org.salesforce
+
     metrics = Metrics()
     sf_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
     try:
-        tokens = TokenProvider(cfg.salesforce, sf_http, metrics=metrics)
-        tok, _, auth_result = await _check_auth(cfg, tokens)
+        tokens = TokenProvider(sf, sf_http, metrics=metrics)
+        tok, _, auth_result = await _check_auth(sf, tokens)
         results.append(auth_result)
 
         if tok is None:
             _skip_remaining(results, ("permissions", "pubsub", "entitlement"), "auth failed")
         else:
-            results.append(await _check_permissions(cfg, tok, sf_http, tokens, metrics))
+            results.append(await _check_permissions(cfg, sf, tok, sf_http, tokens, metrics))
             results.extend(await _check_pubsub(cfg, tokens, metrics))
-            results.append(await _check_entitlement(cfg, tokens, sf_http, metrics))
+            results.append(await _check_entitlement(cfg, sf, tokens, sf_http, metrics))
 
         results.append(await _check_loki(cfg))
         results.append(_check_state(cfg))
@@ -481,7 +509,7 @@ async def run_doctor(config_path: Path | None, *, json_output: bool = False) -> 
         if tok is None:
             _skip_remaining(results, ("limits",), "auth failed")
         else:
-            results.append(await _check_limits(cfg, tokens, sf_http))
+            results.append(await _check_limits(sf, tokens, sf_http))
     finally:
         await sf_http.aclose()
 

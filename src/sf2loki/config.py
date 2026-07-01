@@ -450,7 +450,7 @@ class EventLogObjectsConfig(StrictModel):
 # must not reuse these (it would clobber source identity or be silently
 # overridden by the injected static labels in app._produce).
 _RESERVED_LABEL_KEYS: frozenset[str] = frozenset(
-    {"source", "event_type", "job", "sf_org_id", "environment"}
+    {"source", "event_type", "job", "sf_org_id", "environment", "org"}
 )
 _LABEL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -1086,6 +1086,36 @@ class ServiceConfig(StrictModel):
     )
 
 
+_ORG_NAME_PATTERN = r"^[A-Za-z0-9_-]+$"
+
+
+class OrgConfig(StrictModel):
+    """One Salesforce org in a multi-org deployment.
+
+    ``name`` becomes the ``org`` stream label value and the checkpoint-key
+    prefix (``org=<name>:``), so it must be a short slug (letters, digits,
+    ``_``, ``-``). Each org carries its own ``salesforce`` connection and its
+    own ``sources`` selection; the sink, state store, coordinator, and service
+    settings stay deployment-wide (one shared pipeline).
+    """
+
+    name: str = Field(
+        min_length=1,
+        pattern=_ORG_NAME_PATTERN,
+        description=(
+            "Org identifier: becomes the `org` stream label and the checkpoint "
+            "key prefix. Letters, digits, underscore, hyphen only; must be unique."
+        ),
+        examples=["prod"],
+    )
+    salesforce: SalesforceConfig = Field(
+        description="This org's Salesforce connection and authentication."
+    )
+    sources: SourcesConfig = Field(
+        default_factory=SourcesConfig, description="This org's event source selection and settings."
+    )
+
+
 class Config(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SF2LOKI_",
@@ -1093,11 +1123,27 @@ class Config(BaseSettings):
         extra="forbid",
     )
 
-    salesforce: SalesforceConfig = Field(
-        description="Salesforce org connection and authentication."
+    salesforce: SalesforceConfig | None = Field(
+        default=None,
+        description=(
+            "Single-org Salesforce connection and authentication. Set this OR `orgs` "
+            "(exactly one). Omit when using the multi-org `orgs` list."
+        ),
+    )
+    orgs: list[OrgConfig] = Field(
+        default_factory=list,
+        description=(
+            "Multi-org list: ingest several Salesforce orgs from one process into one "
+            "shared sink. Set this OR top-level `salesforce` (exactly one). Each entry "
+            "carries its own salesforce + sources; the sink/state/service stay shared."
+        ),
     )
     sources: SourcesConfig = Field(
-        default_factory=SourcesConfig, description="Event source selection and settings."
+        default_factory=SourcesConfig,
+        description=(
+            "Single-org event source selection and settings. Ignored (and rejected if "
+            "customized) when `orgs` is used — put per-org sources under each org."
+        ),
     )
     sink: SinkConfig = Field(description="Log sink settings.")
     state: StateConfig = Field(
@@ -1123,6 +1169,98 @@ class Config(BaseSettings):
         # env overrides the YAML-derived init values (env first = highest priority).
         return (env_settings, init_settings, dotenv_settings, file_secret_settings)
 
+    @model_validator(mode="after")
+    def _validate_org_topology(self) -> Config:
+        """Enforce exactly-one-of (top-level salesforce | non-empty orgs) + unique names.
+
+        The old single-org shape (top-level ``salesforce:``) stays valid; the new
+        multi-org shape uses ``orgs:``. Setting both, or neither, is fatal — with a
+        message as actionable as the old "missing salesforce" error. When ``orgs`` is
+        used, top-level ``sources`` must be left at its default (per-org sources live
+        under each org, so a top-level block would be silently ignored otherwise).
+        """
+        has_top = self.salesforce is not None
+        has_orgs = bool(self.orgs)
+        if has_top and has_orgs:
+            raise ValueError(
+                "set EITHER top-level 'salesforce' (single-org) OR 'orgs' (multi-org), not both"
+            )
+        if not has_top and not has_orgs:
+            raise ValueError(
+                "no Salesforce org configured: set top-level 'salesforce' (single-org) "
+                "or a non-empty 'orgs' list (multi-org)"
+            )
+        if has_orgs:
+            names = [o.name for o in self.orgs]
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            if dupes:
+                raise ValueError(
+                    f"duplicate org name(s) {dupes}; each orgs[].name must be unique "
+                    "(it is the 'org' label value and checkpoint key prefix)"
+                )
+            if self.sources != SourcesConfig():
+                raise ValueError(
+                    "top-level 'sources' cannot be combined with 'orgs'; move per-org "
+                    "source config under each entry's 'sources' key"
+                )
+        return self
+
+    def resolved_orgs(self) -> list[OrgConfig]:
+        """Normalise single-org and multi-org configs into one org list.
+
+        A single-org config (top-level ``salesforce``) yields exactly one entry with
+        an EMPTY name — the legacy/no-prefix mode: no ``org`` label is added and
+        checkpoint keys stay unprefixed, so existing state files and streams are
+        bit-identical. A multi-org config returns its ``orgs`` list verbatim.
+        """
+        if self.orgs:
+            return list(self.orgs)
+        assert self.salesforce is not None  # guaranteed by _validate_org_topology
+        # model_construct: bypass validation for the empty-name legacy sentinel
+        # (name="" violates OrgConfig's min_length/pattern by design).
+        return [
+            OrgConfig.model_construct(name="", salesforce=self.salesforce, sources=self.sources)
+        ]
+
+
+def select_org(cfg: Config, name: str | None) -> tuple[OrgConfig, str | None]:
+    """Pick one org for the single-org CLI commands (``doctor``/``backfill``).
+
+    ``name`` None selects the first configured org (the legacy empty-name org for
+    single-org configs). Returns ``(org, note)`` where ``note`` is a human message
+    printed when more than one org is configured (so the operator knows the command
+    scoped to one). Raises :class:`ConfigError` for an unknown ``--org`` name.
+    """
+    orgs = cfg.resolved_orgs()
+    chosen: OrgConfig
+    if not name:
+        chosen = orgs[0]
+    else:
+        match = next((o for o in orgs if o.name == name), None)
+        if match is None:
+            available = [o.name for o in orgs if o.name] or ["<single-org>"]
+            raise ConfigError(f"--org {name!r} is not configured; available orgs: {available}")
+        chosen = match
+    note = None
+    if len([o for o in orgs if o.name]) > 1:
+        names = [o.name for o in orgs]
+        note = (
+            f"multiple orgs configured {names}; this command operates on org "
+            f"'{chosen.name}' only (use --org to choose another)"
+        )
+    return chosen, note
+
+
+def as_single_org_view(cfg: Config, org: OrgConfig) -> Config:
+    """Return a single-org ``Config`` view scoped to *org* for the CLI commands.
+
+    ``doctor`` and ``backfill`` consume ``cfg.salesforce``/``cfg.sources`` directly;
+    this hands them the selected org's connection + sources with a guaranteed
+    non-None ``salesforce`` (shared sink/state/service/coordinate untouched). Uses
+    ``model_copy`` so no re-validation runs on the already-resolved secrets.
+    """
+    return cfg.model_copy(update={"salesforce": org.salesforce, "sources": org.sources, "orgs": []})
+
 
 def _resolve_secret_file(
     file: Path | None, existing: SecretStr | None, what: str
@@ -1145,21 +1283,20 @@ def _resolve_secret_file(
         raise ConfigError(f"cannot read {what} from {file}: {exc}") from exc
 
 
-def resolve_secrets(cfg: Config) -> Config:
-    """Load file-injected secrets in place; fail fast on missing required secrets.
+def _resolve_salesforce_secrets(sf: SalesforceConfig, *, where: str = "") -> None:
+    """Resolve one Salesforce config's required secret in place (auth_mode-dependent).
 
-    The required Salesforce secret depends on ``auth_mode``: ``client_credentials``
-    needs ``client_secret``; ``jwt_bearer`` needs ``private_key``.
+    ``where`` (e.g. ``"org 'prod': "``) is prefixed to the error so a multi-org
+    misconfiguration names the offending org.
     """
-    sf = cfg.salesforce
     if sf.auth_mode == "client_credentials":
         sf.client_secret = _resolve_secret_file(
             sf.client_secret_file, sf.client_secret, "salesforce client secret"
         )
         if sf.client_secret is None:
             raise ConfigError(
-                "salesforce client secret required for auth_mode=client_credentials "
-                "(set client_secret or client_secret_file)"
+                f"{where}salesforce client secret required for "
+                "auth_mode=client_credentials (set client_secret or client_secret_file)"
             )
     else:  # jwt_bearer
         sf.private_key = _resolve_secret_file(
@@ -1167,20 +1304,34 @@ def resolve_secrets(cfg: Config) -> Config:
         )
         if sf.private_key is None:
             raise ConfigError(
-                "salesforce private key required for auth_mode=jwt_bearer "
+                f"{where}salesforce private key required for auth_mode=jwt_bearer "
                 "(set private_key or private_key_file)"
             )
+
+
+def resolve_secrets(cfg: Config) -> Config:
+    """Load file-injected secrets in place; fail fast on missing required secrets.
+
+    The required Salesforce secret depends on ``auth_mode``: ``client_credentials``
+    needs ``client_secret``; ``jwt_bearer`` needs ``private_key``. Per-org configs
+    resolve each org's salesforce secret and each org's transform hash salt (both
+    live under the org); the legacy single-org path resolves the same objects via
+    the one-entry ``resolved_orgs()`` view.
+    """
+    for org in cfg.resolved_orgs():
+        where = f"org {org.name!r}: " if org.name else ""
+        _resolve_salesforce_secrets(org.salesforce, where=where)
+        # Transform hash salt is optional (hash rules work unsalted, with a documented
+        # rainbow-table caveat), so resolve a file if given but never require it.
+        org.sources.transform_salt = _resolve_secret_file(
+            org.sources.transform_salt_file,
+            org.sources.transform_salt,
+            "transform hash salt",
+        )
     cfg.sink.loki.auth_token = _resolve_secret_file(
         cfg.sink.loki.auth_token_file,
         cfg.sink.loki.auth_token,
         "loki auth token",
-    )
-    # Transform hash salt is optional (hash rules work unsalted, with a documented
-    # rainbow-table caveat), so resolve a file if given but never require it.
-    cfg.sources.transform_salt = _resolve_secret_file(
-        cfg.sources.transform_salt_file,
-        cfg.sources.transform_salt,
-        "transform hash salt",
     )
     # Telemetry basic-auth token is optional (falls back to the Loki token when
     # left unset), so resolve it if a file is given but never require it here.

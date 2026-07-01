@@ -23,11 +23,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from sf2loki.auth.jwt_auth import TokenProvider
+from sf2loki.auth.jwt_auth import AuthError, TokenProvider
 from sf2loki.config import (
     EVENT_TYPE_WILDCARD,
     Config,
     LokiBatchConfig,
+    OrgConfig,
     telemetry_headers,
 )
 from sf2loki.coordinate.base import Coordinator, NoopCoordinator, StateFenceError
@@ -41,6 +42,7 @@ from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.sink import LokiSink
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
+from sf2loki.sources.org_adapter import OrgSource
 from sf2loki.sources.overlap import (
     category_of_elf,
     category_of_pubsub,
@@ -517,10 +519,176 @@ def _composite_degraded_check(
     return check
 
 
+def deployment_static_labels(operator_labels: Mapping[str, str]) -> dict[str, str]:
+    """Deployment-wide labels for MULTI-org mode (``sf_org_id``/``environment`` are per-org).
+
+    In multi-org mode each org's :class:`~sf2loki.sources.org_adapter.OrgSource`
+    injects ``org`` + ``sf_org_id`` + ``environment`` per entry (they differ per
+    org), so the shared pipeline sets only ``job``/``service_name`` plus the
+    operator's ``sink.loki.labels``. (Single-org keeps :func:`build_static_labels`
+    unchanged.)
+    """
+    return {"job": "sf2loki", "service_name": "sf2loki", **operator_labels}
+
+
+@dataclass(frozen=True, slots=True)
+class _OrgAuth:
+    """Per-org auth handle used by the startup probe and the degraded-org check."""
+
+    name: str
+    tokens: TokenProvider
+    environment: str
+
+
+@dataclass
+class _OrgSources:
+    """Raw (unwrapped) sources + identity for one org, produced by _build_org_sources."""
+
+    sources: list[Source]
+    closers: list[Callable[[], Awaitable[None]]]
+    pubsub_topics: list[str]
+    stored_objects: list[str]
+    elf_event_types: list[str]
+
+
+def _build_org_sources(
+    org: OrgConfig,
+    *,
+    tokens: TokenProvider,
+    metrics: Metrics,
+    sf_http: httpx.AsyncClient,
+    sm_fields: Sequence[str],
+) -> _OrgSources:
+    """Construct one org's enabled sources (raw, pre-OrgSource wrapping).
+
+    Factored out of :meth:`App.build` so single-org and every multi-org entry
+    share identical per-source construction. ``metrics`` is the org-scoped proxy
+    (``Metrics.for_org``), so every instrument these components touch gains the
+    ``org`` label; ``sm_fields`` is the deployment-wide sink setting.
+    """
+    sf_cfg = org.salesforce
+    transform_salt = (
+        org.sources.transform_salt.get_secret_value() if org.sources.transform_salt else ""
+    )
+    sources: list[Source] = []
+    closers: list[Callable[[], Awaitable[None]]] = []
+    pubsub_topics: list[str] = []
+
+    stored_objects: list[str] = (
+        [o.name for o in org.sources.eventlog_objects.objects]
+        if org.sources.eventlog_objects.enabled
+        else []
+    )
+    elf_event_types: list[str] = (
+        [t.name for t in org.sources.eventlogfile.event_types if t.name != EVENT_TYPE_WILDCARD]
+        if org.sources.eventlogfile.enabled
+        else []
+    )
+
+    if org.sources.pubsub.enabled:
+        from sf2loki.salesforce.metadata_client import MetadataClient
+        from sf2loki.salesforce.pubsub_client import PubSubClient
+
+        if org.sources.allow_overlap:
+            pubsub_owned: frozenset[str] = frozenset()
+        else:
+            pubsub_owned = frozenset(
+                [category_of_stored_object(o) for o in stored_objects]
+                + [category_of_elf(t) for t in elf_event_types]
+            )
+
+        pubsub_client = PubSubClient(org.sources.pubsub, tokens, metrics=metrics)
+        pubsub_src = PubSubSource(
+            org.sources.pubsub,
+            pubsub_client,
+            sm_fields=sm_fields,
+            metrics=metrics,
+            topic_discoverer=MetadataClient(sf_cfg, tokens, sf_http),
+            owned_categories=pubsub_owned,
+            transform_salt=transform_salt,
+        )
+        sources.append(pubsub_src)
+        pubsub_topics = pubsub_src.resolve_topics()
+        closers.append(pubsub_client.aclose)
+
+    if org.sources.eventlog_objects.enabled:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, sf_http, metrics=metrics)
+        sources.append(
+            EventLogObjectsSource(
+                org.sources.eventlog_objects,
+                soql,
+                sm_fields=sm_fields,
+                metrics=metrics,
+                transform_salt=transform_salt,
+            )
+        )
+
+    if org.sources.eventlogfile.enabled:
+        from sf2loki.salesforce.eventlogfile_client import EventLogFileClient
+
+        if org.sources.allow_overlap:
+            elf_owned: frozenset[str] = frozenset()
+        else:
+            elf_owned = frozenset(
+                [category_of_pubsub(t) for t in pubsub_topics]
+                + [category_of_stored_object(o) for o in stored_objects]
+            )
+
+        elf_client = EventLogFileClient(sf_cfg, tokens, sf_http, metrics=metrics)
+        sources.append(
+            EventLogFileSource(
+                org.sources.eventlogfile,
+                elf_client,
+                sm_fields=sm_fields,
+                metrics=metrics,
+                exclude_categories=elf_owned,
+                transform_salt=transform_salt,
+            )
+        )
+
+    # Fail fast if one event category is fed by more than one source WITHIN this
+    # org (cross-org overlap is fine — different orgs, different events).
+    check_overlap(
+        pubsub_topics=pubsub_topics,
+        stored_objects=stored_objects,
+        elf_event_types=elf_event_types,
+        allow_overlap=org.sources.allow_overlap,
+    )
+    return _OrgSources(
+        sources=sources,
+        closers=closers,
+        pubsub_topics=pubsub_topics,
+        stored_objects=stored_objects,
+        elf_event_types=elf_event_types,
+    )
+
+
+def _org_auth_degraded_check(
+    failed: Mapping[str, TokenProvider],
+) -> Callable[[], str | None]:
+    """Readiness predicate: degrade while a startup-failed org still lacks a token.
+
+    ``failed`` is populated by the startup probe (multi-org). An org that later
+    mints a token reactively (its sources retry on auth) drops out of the reason,
+    so readiness recovers on its own.
+    """
+
+    def check() -> str | None:
+        for name, tokens in failed.items():
+            if not tokens.has_token():
+                return f"degraded: org {name} auth failing"
+        return None
+
+    return check
+
+
 @dataclass(frozen=True, slots=True)
 class _StartupInfo:
     """Summary of what the app is configured to run, for the startup banner."""
 
+    orgs: list[str]
     pubsub_topics: list[str]
     eventlog_objects: list[str]
     eventlogfile_event_types: list[str]
@@ -537,21 +705,31 @@ class App:
         cfg: Config,
         pipeline: Pipeline,
         tokens: TokenProvider,
+        orgs: Sequence[_OrgAuth],
         metrics: Metrics,
         health: Health,
         closers: Sequence[Callable[[], Awaitable[None]]],
         coordinator: Coordinator,
-        limits_poller: LimitsPoller | None = None,
+        limits_pollers: Sequence[LimitsPoller] = (),
+        degraded_orgs: dict[str, TokenProvider] | None = None,
         startup: _StartupInfo | None = None,
     ) -> None:
         self._cfg = cfg
         self._pipeline = pipeline
+        # Primary org's token provider. For single-org (legacy) this is the only
+        # org and drives the fail-fast startup probe (tests replace it directly).
         self._tokens = tokens
+        self._orgs = list(orgs)
+        # Multi-org unless the single resolved org is the legacy empty-name one.
+        self._multi_org = not (len(self._orgs) == 1 and self._orgs[0].name == "")
         self._metrics = metrics
         self._health = health
         self._closers = list(closers)
         self._coordinator = coordinator
-        self._limits_poller = limits_poller
+        self._limits_pollers = list(limits_pollers)
+        # Populated by the multi-org startup probe; read by the degraded-org
+        # readiness check wired in build().
+        self._degraded_orgs = degraded_orgs if degraded_orgs is not None else {}
         self._startup = startup
 
     @classmethod
@@ -565,7 +743,6 @@ class App:
         health = Health()
 
         sf_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
-        tokens = TokenProvider(cfg.salesforce, sf_http, metrics=metrics)
 
         loki_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         sink = LokiSink(cfg.sink.loki, loki_http, metrics=metrics)
@@ -591,112 +768,62 @@ class App:
             set_fence(fence)
 
         sm_fields = cfg.sink.loki.structured_metadata_fields
-        transform_salt = (
-            cfg.sources.transform_salt.get_secret_value() if cfg.sources.transform_salt else ""
-        )
 
+        # One TokenProvider + client set + source set per org. Single-org (legacy)
+        # resolves to a single empty-name org: sources are used raw, no org label,
+        # unprefixed checkpoints — bit-identical to pre-multi-org behaviour.
+        resolved = cfg.resolved_orgs()
         sources: list[Source] = []
         closers: list[Callable[[], Awaitable[None]]] = []
-        pubsub_topics: list[str] = []
+        org_auths: list[_OrgAuth] = []
+        limits_pollers: list[LimitsPoller] = []
+        agg_topics: list[str] = []
+        agg_objects: list[str] = []
+        agg_elf: list[str] = []
 
-        # Identifiers for the polling sources come straight from config, so
-        # extract them before any source is constructed: the Pub/Sub source
-        # (built first) needs to know which categories they own.
-        stored_objects: list[str] = (
-            [o.name for o in cfg.sources.eventlog_objects.objects]
-            if cfg.sources.eventlog_objects.enabled
-            else []
-        )
-        # ELF wildcard expands at poll time, so its discovered types aren't
-        # known here; the overlap guard and category ownership see only the
-        # explicit types (use exclude to keep a discovered category off ELF
-        # when another source owns it).
-        elf_event_types: list[str] = (
-            [t.name for t in cfg.sources.eventlogfile.event_types if t.name != EVENT_TYPE_WILDCARD]
-            if cfg.sources.eventlogfile.enabled
-            else []
-        )
+        for index, org in enumerate(resolved):
+            org_metrics = metrics.for_org(org.name)
+            org_tokens = TokenProvider(org.salesforce, sf_http, metrics=org_metrics)
+            org_auths.append(
+                _OrgAuth(name=org.name, tokens=org_tokens, environment=org.salesforce.environment)
+            )
+            built = _build_org_sources(
+                org, tokens=org_tokens, metrics=org_metrics, sf_http=sf_http, sm_fields=sm_fields
+            )
+            closers.extend(built.closers)
+            agg_topics.extend(built.pubsub_topics)
+            agg_objects.extend(built.stored_objects)
+            agg_elf.extend(built.elf_event_types)
 
-        if cfg.sources.pubsub.enabled:
-            from sf2loki.salesforce.metadata_client import MetadataClient
-            from sf2loki.salesforce.pubsub_client import PubSubClient
-
-            # Categories another source already owns (stored event objects +
-            # explicit ELF event types): Pub/Sub wildcard discovery auto-excludes
-            # these so the same events aren't ingested twice — unless
-            # allow_overlap, where the operator wants both (pass empty set).
-            if cfg.sources.allow_overlap:
-                pubsub_owned: frozenset[str] = frozenset()
+            if org.name:
+                # Multi-org: scope each source (org label, sf_org_id/environment
+                # per entry, prefixed checkpoints). The FIRST org falls back to
+                # unprefixed legacy checkpoint keys so an upgraded single-org
+                # deployment migrates its existing state transparently.
+                for src in built.sources:
+                    sources.append(
+                        OrgSource(
+                            src,
+                            org=org.name,
+                            environment=org.salesforce.environment,
+                            org_id_provider=org_tokens.org_id,
+                            legacy_fallback=(index == 0),
+                        )
+                    )
             else:
-                pubsub_owned = frozenset(
-                    [category_of_stored_object(o) for o in stored_objects]
-                    + [category_of_elf(t) for t in elf_event_types]
+                sources.extend(built.sources)
+
+            if org.salesforce.limits.enabled:
+                from sf2loki.obs.limits_poller import LimitsPoller
+                from sf2loki.salesforce.limits_client import LimitsClient
+
+                limits_pollers.append(
+                    LimitsPoller(
+                        LimitsClient(org.salesforce, org_tokens, sf_http),
+                        org_metrics,
+                        org.salesforce.limits.poll_interval,
+                    )
                 )
-
-            pubsub_client = PubSubClient(cfg.sources.pubsub, tokens, metrics=metrics)
-            pubsub_src = PubSubSource(
-                cfg.sources.pubsub,
-                pubsub_client,
-                sm_fields=sm_fields,
-                metrics=metrics,
-                topic_discoverer=MetadataClient(cfg.salesforce, tokens, sf_http),
-                owned_categories=pubsub_owned,
-                transform_salt=transform_salt,
-            )
-            sources.append(pubsub_src)
-            pubsub_topics = pubsub_src.resolve_topics()
-            closers.append(pubsub_client.aclose)
-
-        if cfg.sources.eventlog_objects.enabled:
-            from sf2loki.salesforce.soql_client import SoqlClient
-
-            soql = SoqlClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
-            sources.append(
-                EventLogObjectsSource(
-                    cfg.sources.eventlog_objects,
-                    soql,
-                    sm_fields=sm_fields,
-                    metrics=metrics,
-                    transform_salt=transform_salt,
-                )
-            )
-
-        if cfg.sources.eventlogfile.enabled:
-            from sf2loki.salesforce.eventlogfile_client import EventLogFileClient
-
-            # Mirror image of pubsub_owned: categories the higher-priority
-            # sources feed. The ELF wildcard auto-excludes these discovered
-            # types so the same events aren't ingested twice — unless
-            # allow_overlap, where the operator wants both the real-time-lean
-            # stream and the richer ELF rows (pass empty set).
-            if cfg.sources.allow_overlap:
-                elf_owned: frozenset[str] = frozenset()
-            else:
-                elf_owned = frozenset(
-                    [category_of_pubsub(t) for t in pubsub_topics]
-                    + [category_of_stored_object(o) for o in stored_objects]
-                )
-
-            elf_client = EventLogFileClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
-            sources.append(
-                EventLogFileSource(
-                    cfg.sources.eventlogfile,
-                    elf_client,
-                    sm_fields=sm_fields,
-                    metrics=metrics,
-                    exclude_categories=elf_owned,
-                    transform_salt=transform_salt,
-                )
-            )
-
-        # Fail fast if one event category is fed by more than one source (which
-        # would ingest duplicate events). Bypass with sources.allow_overlap.
-        check_overlap(
-            pubsub_topics=pubsub_topics,
-            stored_objects=stored_objects,
-            elf_event_types=elf_event_types,
-            allow_overlap=cfg.sources.allow_overlap,
-        )
 
         # Egress guardrails (rate caps + daily byte budget). Only wired in when a
         # control is actually configured; otherwise the pipeline runs governor-free
@@ -714,31 +841,22 @@ class App:
         )
 
         # Readiness degradation: a composite of independent predicates, first
-        # non-None reason wins. The budget-pause reason is checked first (an
-        # exhausted budget is a deliberate, operator-visible state), then the
-        # sink-failing reason. Liveness (/healthz) is deliberately unaffected —
-        # data is checkpointed and retried, so a restart would not help.
+        # non-None reason wins. Order: budget-pause (a deliberate operator-visible
+        # state) > a failing org's auth (multi-org) > the sink failing. Liveness
+        # (/healthz) is deliberately unaffected — data is checkpointed and retried.
+        degraded_orgs: dict[str, TokenProvider] = {}
         degraded_checks: list[Callable[[], str | None]] = []
         if governor is not None:
             # degraded_reason() self-gates to pause mode, so it is inert for
             # rate-cap-only or drop-mode configurations.
             degraded_checks.append(governor.degraded_reason)
+        if len(resolved) > 1 or (resolved and resolved[0].name):
+            degraded_checks.append(_org_auth_degraded_check(degraded_orgs))
         unready_after = cfg.service.unready_after_sink_failing.total_seconds()
         if unready_after > 0:
             degraded_checks.append(_sink_degradation_check(pipeline, unready_after))
         if degraded_checks:
             health.set_degraded_check(_composite_degraded_check(degraded_checks))
-
-        limits_poller: LimitsPoller | None = None
-        if cfg.salesforce.limits.enabled:
-            from sf2loki.obs.limits_poller import LimitsPoller
-            from sf2loki.salesforce.limits_client import LimitsClient
-
-            limits_poller = LimitsPoller(
-                LimitsClient(cfg.salesforce, tokens, sf_http),
-                metrics,
-                cfg.salesforce.limits.poll_interval,
-            )
 
         closers.extend([sink.aclose, sf_http.aclose, loki_http.aclose])
 
@@ -754,18 +872,21 @@ class App:
         return cls(
             cfg=cfg,
             pipeline=pipeline,
-            tokens=tokens,
+            tokens=org_auths[0].tokens,
+            orgs=org_auths,
             metrics=metrics,
             health=health,
             closers=closers,
             coordinator=coordinator,
-            limits_poller=limits_poller,
+            limits_pollers=limits_pollers,
+            degraded_orgs=degraded_orgs,
             startup=_StartupInfo(
-                pubsub_topics=pubsub_topics,
-                eventlog_objects=stored_objects,
-                eventlogfile_event_types=elf_event_types,
+                orgs=[o.name for o in resolved],
+                pubsub_topics=agg_topics,
+                eventlog_objects=agg_objects,
+                eventlogfile_event_types=agg_elf,
                 sink_url=cfg.sink.loki.url,
-                limits_enabled=cfg.salesforce.limits.enabled,
+                limits_enabled=any(o.salesforce.limits.enabled for o in resolved),
             ),
         )
 
@@ -774,12 +895,12 @@ class App:
         s = self._startup
         log.info(
             "sf2loki starting",
+            orgs=[o.name for o in self._orgs] if self._multi_org else "single",
             pubsub_topics=s.pubsub_topics if s else [],
             eventlog_objects=s.eventlog_objects if s else [],
             eventlogfile_event_types=s.eventlogfile_event_types if s else [],
             sink=s.sink_url if s else "",
             org_limit_metrics=s.limits_enabled if s else False,
-            environment=self._cfg.salesforce.environment,
             log_level=self._cfg.service.log_level,
             health_addr=self._cfg.service.health_addr,
         )
@@ -796,27 +917,33 @@ class App:
 
         await self._health.start(self._cfg.service.health_addr)
 
-        # Startup auth probe: mint a token in EVERY configuration (even when
-        # salesforce.org_id is set, in which case org_id() never touches the
-        # network) so bad credentials fail fast and exit nonzero here, before
-        # readiness — instead of every source loop retrying forever while the
-        # process reports healthy.
-        await self._tokens.token()
-
-        # Resolve the org id once and assemble deployment-wide labels.
-        org_id = self._cfg.salesforce.org_id or await self._tokens.org_id()
-        log.info(
-            "authenticated to salesforce org",
-            org_id=org_id,
-            environment=self._cfg.salesforce.environment,
-        )
-        self._pipeline.set_static_labels(
-            build_static_labels(
-                environment=self._cfg.salesforce.environment,
+        # Startup auth probe.
+        if not self._multi_org:
+            # Single-org (legacy): mint a token in EVERY configuration (even when
+            # salesforce.org_id is set, so org_id() never touches the network) so
+            # bad credentials fail fast and exit nonzero here, before readiness —
+            # instead of every source loop retrying forever while healthy.
+            await self._tokens.token()
+            assert self._cfg.salesforce is not None  # single-org => top-level set
+            org_id = self._cfg.salesforce.org_id or await self._tokens.org_id()
+            log.info(
+                "authenticated to salesforce org",
                 org_id=org_id,
-                operator_labels=self._cfg.sink.loki.labels,
+                environment=self._cfg.salesforce.environment,
             )
-        )
+            self._pipeline.set_static_labels(
+                build_static_labels(
+                    environment=self._cfg.salesforce.environment,
+                    org_id=org_id,
+                    operator_labels=self._cfg.sink.loki.labels,
+                )
+            )
+        else:
+            await self._probe_orgs()
+            # Multi-org: sf_org_id + environment are injected per entry by each
+            # org's OrgSource, so the shared pipeline carries only deployment-wide
+            # labels (job/service_name + operator sink.loki.labels).
+            self._pipeline.set_static_labels(deployment_static_labels(self._cfg.sink.loki.labels))
 
         grace = self._cfg.service.shutdown_grace.total_seconds()
 
@@ -849,14 +976,14 @@ class App:
             self._health.set_ready()
             log.info("sf2loki ready — streaming to Loki")
             run_stop = asyncio.Event()
-            poller_task: asyncio.Task[None] | None = None
-            if self._limits_poller is not None:
-                poller_task = asyncio.create_task(self._limits_poller.run(run_stop))
+            poller_tasks = [
+                asyncio.create_task(poller.run(run_stop)) for poller in self._limits_pollers
+            ]
             pipeline_task = asyncio.create_task(self._run_pipeline(run_stop, grace))
             pipeline_task.add_done_callback(lambda t: _on_pipeline_done(t, run_stop))
             current["run_stop"] = run_stop
             current["pipeline_task"] = pipeline_task
-            current["poller_task"] = poller_task
+            current["poller_tasks"] = poller_tasks
 
         async def on_lose() -> None:
             self._metrics.leader.set(0)
@@ -895,20 +1022,51 @@ class App:
         except StateFenceError:
             log.warning("checkpoint commit fenced — leadership lost; standing by")
 
+    async def _probe_orgs(self) -> None:
+        """Mint each org's startup token; fail fast only if EVERY org fails.
+
+        Some-fail is a deliberate multi-org semantic (unlike single-org's absolute
+        fail-fast): the healthy orgs stream while each failing org is logged at
+        ERROR, recorded for the degraded-org readiness reason, and left to retry
+        auth reactively (its sources mint on their own API calls). All-fail means
+        nothing can run, so we re-raise (exit nonzero → restart), as before.
+        """
+        failed: list[tuple[str, BaseException]] = []
+        for org in self._orgs:
+            try:
+                await org.tokens.token()
+                log.info(
+                    "authenticated to salesforce org",
+                    org=org.name,
+                    environment=org.environment,
+                )
+            except AuthError as exc:
+                failed.append((org.name, exc))
+                self._degraded_orgs[org.name] = org.tokens
+                log.error(
+                    "org auth failed at startup; continuing with healthy orgs "
+                    "(this org will retry auth reactively)",
+                    org=org.name,
+                    error=str(exc),
+                )
+        if len(failed) == len(self._orgs):
+            raise failed[0][1]
+
     @staticmethod
     async def _stop_acquisition(current: dict[str, Any]) -> None:
-        """Stop and drain the current acquisition's pipeline + poller (idempotent)."""
+        """Stop and drain the current acquisition's pipeline + pollers (idempotent)."""
         run_stop = current.pop("run_stop", None)
         pipeline_task = current.pop("pipeline_task", None)
-        poller_task = current.pop("poller_task", None)
+        poller_tasks = current.pop("poller_tasks", None)
         if run_stop is not None:
             run_stop.set()
         if pipeline_task is not None:
             # Exceptions are captured by the done callback; drain quietly here.
             await asyncio.gather(pipeline_task, return_exceptions=True)
-        if poller_task is not None:
-            poller_task.cancel()
-            await asyncio.gather(poller_task, return_exceptions=True)
+        if poller_tasks:
+            for poller_task in poller_tasks:
+                poller_task.cancel()
+            await asyncio.gather(*poller_tasks, return_exceptions=True)
 
     async def _shutdown(self) -> None:
         for close in self._closers:
