@@ -24,6 +24,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --- Runtime: slim, non-root --------------------------------------------------
 FROM python:3.14-slim AS runtime
 
+# Injected by the shared container-publish pipeline (release tag or short SHA).
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
+
 RUN groupadd --system --gid 10001 sf2loki \
     && useradd --system --uid 10001 --gid sf2loki --no-create-home sf2loki
 

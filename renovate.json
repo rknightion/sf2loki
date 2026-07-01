@@ -1,3 +1,16 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json"
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "packageRules": [
+    {
+      "description": "Rebase GitHub Actions PRs only when conflicted (override the fleet default)",
+      "matchManagers": ["github-actions"],
+      "rebaseWhen": "conflicted"
+    },
+    {
+      "description": "Track OpenTelemetry pre-release versions",
+      "ignoreUnstable": false,
+      "labels": ["dep:opentelemetry"],
+      "matchPackageNames": ["/^opentelemetry/"]
+    }
+  ]
 }
