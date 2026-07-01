@@ -213,6 +213,24 @@ class PubSubClient:
             raise
         return resp.schema_json  # type: ignore[no-any-return]
 
+    async def get_topic(self, topic: str) -> None:
+        """Probe *topic* via the GetTopic RPC without subscribing.
+
+        Used by ``sf2loki doctor`` to verify per-topic Pub/Sub reachability
+        (a missing RTEM entitlement or a mistyped channel name surfaces as a
+        gRPC error here, e.g. ``NOT_FOUND``, instead of only being discovered
+        once a real subscription is attempted). Raises the underlying
+        :class:`grpc.aio.AioRpcError` on failure; callers handle it.
+        """
+        try:
+            await self._stub().GetTopic(
+                pb.TopicRequest(topic_name=topic),  # type: ignore[attr-defined]
+                metadata=await self._metadata(),
+            )
+        except grpc.aio.AioRpcError as exc:
+            self._handle_rpc_error(exc)
+            raise
+
     async def subscribe(
         self,
         topic: str,

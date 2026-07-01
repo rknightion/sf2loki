@@ -847,3 +847,97 @@ async def test_generator_close_cancels_rpc(
         assert fake_call.cancelled, "RPC was not cancelled on generator close"
     finally:
         await channel.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: get_topic (used by `sf2loki doctor` to probe per-topic reachability)
+# ---------------------------------------------------------------------------
+
+
+class GetTopicFakeServicer(pb_grpc.PubSubServicer):
+    """Servicer exercising only GetTopic: returns TopicInfo or aborts.
+
+    Records the metadata and topic_name supplied by the client for inspection.
+    """
+
+    def __init__(
+        self,
+        topic_info: pb.TopicInfo | None = None,
+        abort_code: grpc.StatusCode | None = None,
+    ) -> None:
+        self._topic_info = topic_info
+        self._abort_code = abort_code
+        self.received_metadata: list[tuple[str, str]] = []
+        self.received_topic_name: str | None = None
+
+    async def GetTopic(  # type: ignore[override]
+        self, request: pb.TopicRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.TopicInfo:
+        self.received_metadata = list(context.invocation_metadata())
+        self.received_topic_name = request.topic_name
+        if self._abort_code is not None:
+            await context.abort(self._abort_code, "rejected")
+            return pb.TopicInfo()  # pragma: no cover - abort() never returns
+        assert self._topic_info is not None
+        return self._topic_info
+
+
+@pytest.mark.asyncio
+async def test_get_topic_returns_none_and_sends_metadata(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """get_topic() succeeds (returns None) and sends the topic name + auth metadata."""
+    topic = "/event/ApexCalloutEventStream"
+    servicer = GetTopicFakeServicer(
+        topic_info=pb.TopicInfo(topic_name=topic, can_subscribe=True, schema_id=_SCHEMA_ID)
+    )
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        result = await client.get_topic(topic)
+        assert result is None
+        assert servicer.received_topic_name == topic
+        meta = dict(servicer.received_metadata)
+        assert meta.get("accesstoken") == token_provider._token.value
+        assert meta.get("instanceurl") == token_provider._token.instance_url
+        assert meta.get("tenantid") == token_provider._org
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_topic_raises_and_invalidates_on_unauthenticated(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """An UNAUTHENTICATED GetTopic rejection invalidates the cached token."""
+    servicer = GetTopicFakeServicer(abort_code=grpc.StatusCode.UNAUTHENTICATED)
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            await client.get_topic("/event/DoesNotExist")
+        assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        assert token_provider.invalidate_calls == 1
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_topic_propagates_non_auth_error_without_invalidating(
+    pubsub_cfg: PubSubConfig, token_provider: FakeTokenProvider
+) -> None:
+    """A non-auth GetTopic error (e.g. NOT_FOUND: missing RTEM entitlement/channel)
+    propagates without invalidating the token."""
+    servicer = GetTopicFakeServicer(abort_code=grpc.StatusCode.NOT_FOUND)
+    server, client = await _make_server_and_client(servicer, pubsub_cfg, token_provider)
+
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            await client.get_topic("/event/DoesNotExist")
+        assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
+        assert token_provider.invalidate_calls == 0
+    finally:
+        await server.stop(None)
+        await client.aclose()
