@@ -29,8 +29,9 @@ from sf2loki.salesforce.pubsub_client import (
     PubSubClient,
     preset_for,
 )
-from sf2loki.shaping import extract_timestamp, route_fields
+from sf2loki.shaping import extract_timestamp, route_fields, should_keep
 from sf2loki.sources.overlap import category_of_pubsub
+from sf2loki.transforms import compile_rules
 
 if TYPE_CHECKING:
     from sf2loki.state.base import CheckpointStore
@@ -106,6 +107,7 @@ class PubSubSource:
         metrics: Metrics | None = None,
         topic_discoverer: _StreamDiscovererLike | None = None,
         owned_categories: frozenset[str] = frozenset(),
+        transform_salt: str = "",
     ) -> None:
         self._cfg = cfg
         self._client = client
@@ -116,6 +118,10 @@ class PubSubSource:
         self._metrics = metrics if metrics is not None else Metrics()
         self._topic_discoverer = topic_discoverer
         self._owned_categories = owned_categories
+        # Precompiled redaction/filter pipeline (empty when no transforms).
+        self._transforms = compile_rules(
+            cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -426,8 +432,9 @@ class PubSubSource:
                             preset = preset_for("CUSTOM")
                             await queue.put(self._keepalive_entry(topic, ev.latest_replay_id))
                             continue
-                        entry = self._to_log_entry(topic, ev)
-                        # Update resume position for reconnect.
+                        entry = self._shape_event(topic, ev)
+                        # Update resume position for reconnect (even for a
+                        # dropped/sampled-out event — its checkpoint still commits).
                         replay_id = ev.replay_id
                         preset = preset_for("CUSTOM")
                         await queue.put(entry)  # blocks when full = backpressure
@@ -511,6 +518,36 @@ class PubSubSource:
             isinstance(exc, grpc.aio.AioRpcError) and exc.code() == grpc.StatusCode.INVALID_ARGUMENT
         )
 
+    @staticmethod
+    def _event_type(topic: str) -> str:
+        """The event-type label / metric dimension: the topic's trailing segment."""
+        return topic.rstrip("/").rsplit("/", 1)[-1]
+
+    def _sample_rate(self, topic: str) -> float:
+        """Keep rate for *topic*: the first ``cfg.sample`` glob that matches, else 1.0."""
+        for pattern, rate in self._cfg.sample.items():
+            if fnmatch.fnmatchcase(topic, pattern):
+                return rate
+        return 1.0
+
+    def _shape_event(self, topic: str, ev: DecodedEvent) -> LogEntry:
+        """Apply transforms then sampling, returning a full or checkpoint-only entry.
+
+        Transforms mutate ``ev.payload`` in place. A ``drop_row`` match or a
+        deterministic sampling drop yields a checkpoint_only entry (built exactly
+        like a keepalive) so the event's replay id STILL commits — dropping it
+        without committing would replay it forever.
+        """
+        if self._transforms.apply(ev.payload) is None:
+            # drop_row matched (rows_filtered already counted in the pipeline).
+            return self._keepalive_entry(topic, ev.replay_id)
+        if not should_keep(ev.replay_id.hex(), self._sample_rate(topic)):
+            self._metrics.entries_sampled_out.labels(
+                source=self.name, event_type=self._event_type(topic)
+            ).inc()
+            return self._keepalive_entry(topic, ev.replay_id)
+        return self._to_log_entry(topic, ev)
+
     def _keepalive_entry(self, topic: str, latest_replay_id: bytes) -> LogEntry:
         """A checkpoint_only LogEntry carrying a keepalive ``latest_replay_id``.
 
@@ -554,7 +591,7 @@ class PubSubSource:
 
     def _to_log_entry(self, topic: str, ev: DecodedEvent) -> LogEntry:
         """Convert a DecodedEvent to a LogEntry ready for the pipeline."""
-        event_type = topic.rstrip("/").rsplit("/", 1)[-1]
+        event_type = self._event_type(topic)
         labels: dict[str, str] = {"source": "pubsub", "event_type": event_type}
         line, sm = route_fields(ev.payload, self._sm_fields)
         timestamp = self._event_timestamp(ev.payload)

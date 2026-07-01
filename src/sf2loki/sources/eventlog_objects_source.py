@@ -48,8 +48,9 @@ from sf2loki.salesforce.soql_client import (
     SoqlThrottledError,
     to_soql_datetime_literal,
 )
-from sf2loki.shaping import extract_timestamp_checked, route_fields
+from sf2loki.shaping import extract_timestamp_checked, route_fields, should_keep
 from sf2loki.state.base import CheckpointStore
+from sf2loki.transforms import compile_rules
 
 # FIELDS(ALL) requires LIMIT <=200 (Salesforce documented constraint).
 _PAGE_LIMIT = 200
@@ -120,6 +121,7 @@ class EventLogObjectsSource:
         sm_fields: Sequence[str],
         metrics: Metrics | None = None,
         poll_once: bool = False,
+        transform_salt: str = "",
     ) -> None:
         self._cfg = cfg
         self._soql = soql
@@ -130,6 +132,10 @@ class EventLogObjectsSource:
         self._poll_once = poll_once
         self._consecutive_failures: dict[str, int] = {}
         self._cycle_throttled = False
+        # Precompiled redaction/filter pipeline (empty when no transforms).
+        self._transforms = compile_rules(
+            cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
+        )
 
     async def events(
         self,
@@ -310,13 +316,44 @@ class EventLogObjectsSource:
                 if stop.is_set():
                     return
 
+                # Advance the watermark + id window from the ORIGINAL record,
+                # BEFORE transforms — the watermark is the SOQL query cursor and
+                # the id is the dedup key, so both must use the real Salesforce
+                # values even when a transform redacts them. This runs for
+                # dropped/sampled-out records too, so their Id enters the dedup
+                # window and a later emitted entry commits it (else every poll
+                # re-fetches and re-drops them). Advance the watermark only on a
+                # VALID timestamp value; a null/garbage one keeps the previous
+                # good watermark so the committed checkpoint can't poison the
+                # next query.
+                ts_field_val = str(record.get(obj.timestamp_field) or "")
+                if _is_valid_watermark(ts_field_val):
+                    watermark = ts_field_val
+                record_id = str(record.get("Id") or "")
+                if record_id:
+                    window = [*window, record_id][-_MAX_CARRIED_IDS:]
+
+                # Redaction/filter transforms run BEFORE shaping/timestamp
+                # extraction. A drop_row match, or a deterministic sampling drop,
+                # emits no entry — but the watermark/window advanced above still
+                # land via the next emitted record's checkpoint.
+                if self._transforms.apply(record) is None:
+                    continue
+                if obj.sample < 1.0 and not should_keep(
+                    record_id or json.dumps(record, sort_keys=True, default=str), obj.sample
+                ):
+                    self._metrics.entries_sampled_out.labels(
+                        source="eventlog_objects", event_type=obj.name
+                    ).inc()
+                    continue
+
                 # Prefer the configured timestamp field (e.g. LoginTime) so the
                 # entry time is the event time, not ingest time; fall back to the
                 # generic EventDate/CreatedDate names for objects without it.
-                # When nothing parses, the PREVIOUS watermark (mirroring the
-                # checkpoint-carry behavior below) is the stable fallback:
-                # replayed rows then keep byte-identical timestamps and dedup
-                # in Loki, instead of getting a fresh now() every replay.
+                # When nothing parses (incl. a redacted ts column), the PREVIOUS
+                # watermark is the stable fallback: replayed rows keep
+                # byte-identical timestamps and dedup in Loki, instead of getting
+                # a fresh now() every replay.
                 ts, used_fallback = extract_timestamp_checked(
                     record,
                     field_names=(obj.timestamp_field, "EventDate", "CreatedDate"),
@@ -332,16 +369,6 @@ class EventLogObjectsSource:
                     "source": "eventlog_objects",
                     "event_type": obj.name,
                 }
-
-                # Advance the watermark only on a VALID timestamp value; a
-                # null/garbage one keeps the previous good watermark so the
-                # committed checkpoint can never poison the next query.
-                ts_field_val = str(record.get(obj.timestamp_field) or "")
-                if _is_valid_watermark(ts_field_val):
-                    watermark = ts_field_val
-                record_id = str(record.get("Id") or "")
-                if record_id:
-                    window = [*window, record_id][-_MAX_CARRIED_IDS:]
 
                 checkpoint = CheckpointToken(
                     key=key,

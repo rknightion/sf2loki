@@ -11,6 +11,7 @@ from sf2loki.shaping import (
     extract_timestamp_checked,
     promote_labels,
     route_fields,
+    should_keep,
 )
 
 
@@ -232,3 +233,32 @@ def test_extract_timestamp_accepts_fallback_kwarg() -> None:
     # Back-compat wrapper: same fallback semantics, plain datetime return.
     fb = datetime.now(UTC) - timedelta(minutes=5)
     assert extract_timestamp({}, fallback=fb) == fb
+
+
+# ---------------------------------------------------------------------------
+# should_keep — deterministic per-row sampling
+
+
+def test_should_keep_rate_one_always_true() -> None:
+    for key in ("a", "b", "replay-xyz", ""):
+        assert should_keep(key, 1.0) is True
+
+
+def test_should_keep_is_deterministic_across_calls() -> None:
+    key = "replay:00ff"
+    first = should_keep(key, 0.5)
+    for _ in range(100):
+        assert should_keep(key, 0.5) is first
+
+
+def test_should_keep_distribution_within_tolerance() -> None:
+    # Over 10k distinct keys, the kept fraction should track the rate closely.
+    rate = 0.3
+    kept = sum(should_keep(f"row-{i}", rate) for i in range(10_000))
+    assert abs(kept / 10_000 - rate) < 0.05  # within ±5%
+
+
+def test_should_keep_rate_zero_bound_keeps_almost_nothing() -> None:
+    # A tiny rate keeps a tiny fraction (never everything).
+    kept = sum(should_keep(f"row-{i}", 0.001) for i in range(10_000))
+    assert kept < 100  # ~10 expected, comfortably under everything

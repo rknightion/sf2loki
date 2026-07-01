@@ -1351,3 +1351,120 @@ async def test_stream_up_gauge_transitions_across_stream_failure() -> None:
     stop.set()
     await asyncio.wait_for(task, timeout=5.0)
     assert gauge() == 0.0  # down on task exit
+
+
+# ---------------------------------------------------------------------------
+# Transforms + deterministic sampling (issues #27 / #26)
+
+
+from sf2loki.config import TransformRule  # noqa: E402
+from sf2loki.shaping import should_keep  # noqa: E402
+
+
+def _dropped_replay_id(rate: float) -> bytes:
+    """A single-byte replay id that deterministic sampling DROPS at *rate*."""
+    return next(bytes([i]) for i in range(256) if not should_keep(bytes([i]).hex(), rate))
+
+
+def _kept_replay_id(rate: float) -> bytes:
+    """A single-byte replay id that deterministic sampling KEEPS at *rate*."""
+    return next(bytes([i]) for i in range(256) if should_keep(bytes([i]).hex(), rate))
+
+
+@pytest.mark.asyncio
+async def test_sampled_out_event_commits_replay_id_via_checkpoint_only() -> None:
+    """A sampled-out event emits a checkpoint_only entry so its replay id STILL commits.
+
+    Dropping the event without committing would replay it forever (load-bearing).
+    """
+    rate = 0.5
+    rid = _dropped_replay_id(rate)
+    stop = asyncio.Event()
+    ev = make_event(replay_id=rid)
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    cfg = PubSubConfig(topics=[TOPIC], replay_preset="LATEST", sample={TOPIC: rate})
+    metrics = Metrics()
+    src = PubSubSource(cfg, client, sm_fields=[], reconnect_backoff=0.01, metrics=metrics)
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.checkpoint_only is True
+    assert entry.line == ""
+    assert dict(entry.labels) == {}
+    assert entry.checkpoint.key == f"pubsub:{TOPIC}"
+    assert entry.checkpoint.value == base64.b64encode(rid).decode("ascii")
+    val = metrics.registry.get_sample_value(
+        "sf2loki_entries_sampled_out_total",
+        {"source": "pubsub", "event_type": "LoginEventStream"},
+    )
+    assert val == 1.0
+
+
+@pytest.mark.asyncio
+async def test_kept_event_is_a_full_entry() -> None:
+    """An event the sampler KEEPS still becomes a normal (non-checkpoint-only) entry."""
+    rate = 0.5
+    rid = _kept_replay_id(rate)
+    stop = asyncio.Event()
+    ev = make_event(replay_id=rid)
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    cfg = PubSubConfig(topics=[TOPIC], replay_preset="LATEST", sample={TOPIC: rate})
+    src = PubSubSource(cfg, client, sm_fields=[], reconnect_backoff=0.01)
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is False
+    assert entries[0].line != ""
+
+
+@pytest.mark.asyncio
+async def test_drop_row_transform_commits_replay_id_via_checkpoint_only() -> None:
+    """A drop_row transform match drops the event but still commits its replay id."""
+    stop = asyncio.Event()
+    ev = make_event(replay_id=REPLAY_ID_1)  # payload has UserId
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    cfg = PubSubConfig(
+        topics=[TOPIC],
+        replay_preset="LATEST",
+        transforms=[TransformRule(action="drop_row", match={"UserId": "005000000000001"})],
+    )
+    metrics = Metrics()
+    src = PubSubSource(cfg, client, sm_fields=[], reconnect_backoff=0.01, metrics=metrics)
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is True
+    assert entries[0].checkpoint.value == base64.b64encode(REPLAY_ID_1).decode("ascii")
+    val = metrics.registry.get_sample_value(
+        "sf2loki_rows_filtered_total", {"source": "pubsub", "rule": "drop_row-0"}
+    )
+    assert val == 1.0
+
+
+@pytest.mark.asyncio
+async def test_hash_transform_redacts_payload_in_line() -> None:
+    """A hash transform redacts the field before it is serialised into the log line."""
+    stop = asyncio.Event()
+    ev = make_event(replay_id=REPLAY_ID_1, user_id="005SENSITIVE")
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    cfg = PubSubConfig(
+        topics=[TOPIC],
+        replay_preset="LATEST",
+        transforms=[TransformRule(action="hash", fields=["UserId"])],
+    )
+    src = PubSubSource(cfg, client, sm_fields=[], reconnect_backoff=0.01, transform_salt="salt")
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert "005SENSITIVE" not in entries[0].line
+    parsed = json.loads(entries[0].line)
+    assert parsed["UserId"] != "005SENSITIVE"
+    assert len(parsed["UserId"]) == 16

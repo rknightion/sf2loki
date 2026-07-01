@@ -68,9 +68,10 @@ from sf2loki.salesforce.eventlogfile_client import (
     EventLogFileMeta,
     EventLogFileThrottledError,
 )
-from sf2loki.shaping import extract_timestamp_checked, promote_labels, route_fields
+from sf2loki.shaping import extract_timestamp_checked, promote_labels, route_fields, should_keep
 from sf2loki.sources.overlap import category_of_elf
 from sf2loki.state.base import CheckpointStore
+from sf2loki.transforms import compile_rules
 
 # Cap for carried (id, created_date) pairs OLDER than the current watermark.
 # Pairs AT the watermark are always all kept — the next listing is
@@ -228,12 +229,17 @@ class EventLogFileSource:
         metrics: Metrics | None = None,
         poll_once: bool = False,
         exclude_categories: frozenset[str] = frozenset(),
+        transform_salt: str = "",
     ) -> None:
         self._cfg = cfg
         self._client = client
         self._sm_fields = sm_fields
         self._metrics = metrics if metrics is not None else Metrics()
         self._poll_once = poll_once
+        # Precompiled redaction/filter pipeline (empty when no transforms).
+        self._transforms = compile_rules(
+            cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
+        )
         # Categories already owned by a higher-priority source (a Pub/Sub stream or
         # a stored-event poll). Discovered wildcard types in these categories are
         # skipped so the same events aren't ingested twice — unless the operator set
@@ -319,6 +325,10 @@ class EventLogFileSource:
         exclude = set(self._cfg.exclude)
         resolved = list(explicit)
         names = {t.name for t in explicit}
+        # Discovered (wildcard) types inherit the "*" entry's sample rate, so a
+        # single `sample` on the wildcard applies to every discovered type.
+        wildcard = next((t for t in self._cfg.event_types if t.name == EVENT_TYPE_WILDCARD), None)
+        wildcard_sample = wildcard.sample if wildcard is not None else 1.0
         for name in discovered:
             if name in names or name in exclude:
                 continue
@@ -327,7 +337,7 @@ class EventLogFileSource:
             if category_of_elf(name) in self._exclude_categories:
                 continue
             names.add(name)
-            resolved.append(EventLogFileTypeConfig(name=name))
+            resolved.append(EventLogFileTypeConfig(name=name, sample=wildcard_sample))
         return resolved
 
     def _compute_cycle_skew(self) -> timedelta:
@@ -500,7 +510,7 @@ class EventLogFileSource:
                     try:
                         nxt = await anext(row_iter)
                     except StopAsyncIteration:
-                        yield self._make_entry(
+                        last_entry = self._make_entry(
                             pending,
                             event_type=event_type,
                             key=key,
@@ -508,8 +518,11 @@ class EventLogFileSource:
                             label_fields=label_fields,
                             carried_last_created=advanced_last_created,
                             carried_ids=advanced_ids,
+                            sample=type_cfg.sample,
                             ts_fallback=created,
                         )
+                        if last_entry is not None:
+                            yield last_entry
                         break
                     except EventLogFileError as exc:
                         # Mid-file failure (e.g. CSV parse error): rows emitted so
@@ -520,7 +533,7 @@ class EventLogFileSource:
                             event_type, f"download of {file_meta.id} (mid-file)", exc
                         )
                         return
-                    yield self._make_entry(
+                    entry = self._make_entry(
                         pending,
                         event_type=event_type,
                         key=key,
@@ -528,8 +541,11 @@ class EventLogFileSource:
                         label_fields=label_fields,
                         carried_last_created=current_last_created,
                         carried_ids=current_ids,
+                        sample=type_cfg.sample,
                         ts_fallback=created,
                     )
+                    if entry is not None:
+                        yield entry
                     pending = nxt
             finally:
                 # Async generators expose aclose(); close eagerly on every exit
@@ -554,8 +570,24 @@ class EventLogFileSource:
         label_fields: Sequence[str],
         carried_last_created: str,
         carried_ids: Sequence[_CarriedId],
+        sample: float,
         ts_fallback: datetime | None = None,
-    ) -> LogEntry:
+    ) -> LogEntry | None:
+        # Redaction/filter transforms run BEFORE shaping (route_fields, label
+        # promotion, timestamp extraction) so redacting the timestamp column
+        # triggers the fallback below. A drop_row match returns None (the row is
+        # not emitted; the file's checkpoint still advances via later rows).
+        if self._transforms.apply(row) is None:
+            return None
+        # Deterministic per-type sampling: a sampled-out row emits no entry but
+        # the file still counts as processed and the checkpoint/watermark
+        # advances exactly as for a kept row (rows never checkpoint individually).
+        if sample < 1.0 and not should_keep(
+            row.get("REQUEST_ID") or json.dumps(row, sort_keys=True), sample
+        ):
+            self._metrics.entries_sampled_out.labels(source=self.name, event_type=event_type).inc()
+            return None
+
         # An unparseable row timestamp falls back to the FILE's CreatedDate
         # (stable across replays, so re-emitted rows stay byte-identical and
         # dedup in Loki) rather than now(UTC); extract_timestamp_checked clamps

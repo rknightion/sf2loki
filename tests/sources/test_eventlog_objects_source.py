@@ -826,3 +826,99 @@ async def test_parseable_timestamps_never_count_fallback(
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Transforms + deterministic sampling (issues #27 / #26)
+
+
+from sf2loki.config import TransformRule  # noqa: E402
+from sf2loki.shaping import should_keep  # noqa: E402
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sampled_out_record_enters_id_window(tmp_path: pytest.TempPathFactory) -> None:
+    """A sampled-out record emits no entry but its Id STILL enters the dedup id
+    window (committed by a later kept record) so the next poll does not re-fetch
+    and re-drop it forever."""
+    rate = 0.5
+    dropped_id = next(f"005A{i}" for i in range(1000) if not should_keep(f"005A{i}", rate))
+    kept_id = next(f"005B{i}" for i in range(1000) if should_keep(f"005B{i}", rate))
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"EventDate": "2026-06-30T10:00:00Z", "Id": dropped_id, "UserId": "u1"},
+                    {"EventDate": "2026-06-30T10:01:00Z", "Id": kept_id, "UserId": "u2"},
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    cfg.objects[0].sample = rate
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+    metrics = Metrics()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], metrics=metrics, poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # Only the kept record is emitted...
+    assert len(entries) == 1
+    assert entries[0].line.find(kept_id) != -1
+    # ...but its committed checkpoint window includes the sampled-out record's Id.
+    window = json.loads(entries[0].checkpoint.value)["ids"]
+    assert dropped_id in window
+    assert kept_id in window
+    sampled = metrics.registry.get_sample_value(
+        "sf2loki_entries_sampled_out_total",
+        {"source": "eventlog_objects", "event_type": "LoginEvent"},
+    )
+    assert sampled == 1.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_watermark_uses_original_timestamp_despite_redaction(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A transform redacting the timestamp column must NOT corrupt the SOQL
+    watermark cursor: the checkpoint keeps the real EventDate value."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [{"EventDate": "2026-06-30T10:00:00Z", "Id": "005x", "UserId": "u"}],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    cfg.transforms.append(TransformRule(action="drop_field", fields=["EventDate"]))
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    # EventDate redacted from the emitted line...
+    assert "EventDate" not in entries[0].line
+    # ...but the checkpoint watermark keeps the real value (query cursor intact).
+    assert json.loads(entries[0].checkpoint.value)["last_ts"] == "2026-06-30T10:00:00Z"

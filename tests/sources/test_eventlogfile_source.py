@@ -1143,3 +1143,87 @@ async def test_small_clock_skew_is_ignored(tmp_path) -> None:
     # Fresh file stays unsettled: 20s of skew is within the ignore threshold.
     assert client.download_calls == []
     assert entries == []
+
+
+# ---------------------------------------------------------------------------
+# Transforms + deterministic sampling (issues #27 / #26)
+
+
+from sf2loki.config import TransformRule  # noqa: E402
+from sf2loki.shaping import should_keep  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_discovered_type_inherits_wildcard_sample() -> None:
+    """A wildcard-discovered EventType inherits the "*" entry's sample rate."""
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",
+        event_types=[EventLogFileTypeConfig(name="*", sample=0.25)],
+    )
+    client = FakeEventLogFileClient(
+        files=[], rows_by_id={}, discovered_types=["Login", "ApiTotalUsage"]
+    )
+    src = EventLogFileSource(cfg, client, sm_fields=[])
+
+    resolved = await src._resolve_event_types()
+
+    assert {t.name for t in resolved} == {"Login", "ApiTotalUsage"}
+    assert all(t.sample == 0.25 for t in resolved)
+
+
+@pytest.mark.asyncio
+async def test_transform_redacting_timestamp_column_triggers_fallback(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A transform that drops the timestamp column makes the row fall back to the
+    file's CreatedDate — proving transforms run BEFORE timestamp extraction."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    created = _created_ago(timedelta(minutes=1))
+    file_meta = make_file_meta(id="f1", created_date=created)
+    # Row has ONLY TIMESTAMP_DERIVED as a time source; dropping it forces fallback.
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "USER": "x"}]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = make_elf_cfg(event_types=["Login"], poll_interval=timedelta(0))
+    cfg.transforms.append(TransformRule(action="drop_field", fields=["TIMESTAMP_DERIVED"]))
+    metrics = Metrics()
+    src = EventLogFileSource(cfg, client, sm_fields=[], metrics=metrics, poll_once=True)
+
+    entries = await _run_cycle(src, store)
+
+    assert len(entries) == 1
+    assert "TIMESTAMP_DERIVED" not in entries[0].line
+    fallbacks = metrics.registry.get_sample_value(
+        "sf2loki_timestamp_fallbacks_total", {"source": "eventlogfile"}
+    )
+    assert fallbacks == 1.0
+
+
+@pytest.mark.asyncio
+async def test_sampled_out_row_not_emitted_but_others_flow(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A sampled-out row emits no entry (counted) while kept rows still flow."""
+    rate = 0.5
+    dropped_req = next(f"req-{i}" for i in range(1000) if not should_keep(f"req-{i}", rate))
+    kept_req = next(f"req-{i}" for i in range(1000) if should_keep(f"req-{i}", rate))
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    file_meta = make_file_meta(id="f1", created_date=_created_ago(timedelta(minutes=1)))
+    rows = [
+        {"TIMESTAMP_DERIVED": "20260630010000.000", "REQUEST_ID": dropped_req},
+        {"TIMESTAMP_DERIVED": "20260630010001.000", "REQUEST_ID": kept_req},
+    ]
+    client = FakeEventLogFileClient(files=[file_meta], rows_by_id={"f1": rows})
+    cfg = make_elf_cfg(poll_interval=timedelta(0))
+    cfg.event_types[0].sample = rate
+    metrics = Metrics()
+    src = EventLogFileSource(cfg, client, sm_fields=[], metrics=metrics, poll_once=True)
+
+    entries = await _run_cycle(src, store)
+
+    assert len(entries) == 1
+    assert entries[0].line.find(kept_req) != -1
+    sampled = metrics.registry.get_sample_value(
+        "sf2loki_entries_sampled_out_total", {"source": "eventlogfile", "event_type": "Login"}
+    )
+    assert sampled == 1.0

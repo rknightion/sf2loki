@@ -6,9 +6,28 @@ produce identically-shaped entries.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+
+# Sampling resolution: keep rates are quantised to 1/10_000 (0.01%), fine enough
+# for any realistic volume-control fraction and cheap to compute.
+_SAMPLE_BUCKETS = 10_000
+
+
+def should_keep(row_key: str, rate: float) -> bool:
+    """Deterministic keep/drop decision for a row, given a keep *rate* in (0, 1].
+
+    NEVER random: the decision is a pure function of *row_key* (a stable per-row
+    identity — a replay_id, record Id, or canonical JSON), so a replay samples
+    identically and Loki's byte-identical dedup stays intact. ``rate >= 1.0``
+    short-circuits to True (keep everything).
+    """
+    if rate >= 1.0:
+        return True
+    bucket = int.from_bytes(hashlib.sha256(row_key.encode()).digest()[:8], "big") % _SAMPLE_BUCKETS
+    return bucket < rate * _SAMPLE_BUCKETS
 
 
 def route_fields(
