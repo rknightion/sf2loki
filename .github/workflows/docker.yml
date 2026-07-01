@@ -1,0 +1,35 @@
+name: Build and Push Docker Image
+
+# Thin caller over the shared container-publish reusable: ONE pipeline for both
+# edge (push to main) and release (release-please -> workflow_call with a tag).
+# Native amd64+arm64 runners, push-by-digest + manifest merge, cosign keyless
+# signing, SBOM, and Trivy scan all live in the reusable. merge_group builds
+# both arches as a validation gate without pushing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
+  workflow_call:
+    inputs:
+      release-tag:
+        description: "Release tag (vX.Y.Z) to publish semver + latest tags for; empty for edge builds."
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  publish:
+    permissions:
+      contents: write        # gh release upload (SBOMs on a release)
+      packages: write        # push image to GHCR
+      id-token: write        # cosign keyless signing + provenance attestation
+      attestations: write    # build-provenance attestation
+      security-events: write # Trivy SARIF upload
+    uses: rknightion/.github/.github/workflows/container-publish.yml@f31690684f4292d1fe8e528618f7c8306fe27d9a # v1.3.1
+    with:
+      release-tag: ${{ inputs.release-tag }}
