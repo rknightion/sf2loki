@@ -33,12 +33,15 @@ sources:
   allow_overlap: true
 ```
 
-> **Wildcard caveat — the guard only sees what's configured at startup.** Identifiers discovered
-> at *runtime* are not visible to the startup guard. ELF wildcard discovery
-> (`event_types: ["*"]`) compensates by skipping discovered types whose category another source
-> already owns, but wildcard-discovered **Pub/Sub topics** (`topics: ["*"]`) get no such runtime
-> check — combining `topics: ["*"]` with `event_types: ["*"]` (or with explicit types) can still
-> double-ingest a category the guard never saw. Prefer an explicit list on at least one side.
+> **Wildcard caveat — discovered identifiers are filtered at discovery time.** Identifiers
+> discovered at *runtime* are not visible to the startup guard, so both wildcards filter
+> themselves: ELF discovery (`event_types: ["*"]`) skips discovered types whose category another
+> source already owns, and wildcard-discovered **Pub/Sub topics** (`topics: ["*"]`) are likewise
+> checked against the categories owned by the other configured sources — at startup *and* on every
+> periodic re-discovery pass (`sources.pubsub.rediscovery_interval`); each skip is logged at INFO.
+> What remains: **explicit-vs-explicit** collisions are caught only by the startup guard, and
+> **explicitly listed Pub/Sub topics are never runtime-filtered** — an explicit topic either
+> trips the guard at startup or (under `allow_overlap: true`) is knowingly double-ingested.
 
 > **Change Data Capture caveat.** `/data/…ChangeEvent` topics are subscribable, but the
 > `ChangeEventHeader.changedFields` / `nulledFields` bitmap fields are shipped as their raw

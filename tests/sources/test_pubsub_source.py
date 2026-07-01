@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import grpc
 import grpc.aio
@@ -1056,3 +1056,298 @@ async def test_discovery_transient_failure_retries_then_succeeds() -> None:
 def test_resolve_topics_sync_excludes_wildcard_marker() -> None:
     src = _resolver_src(["*", "/event/LoginEventStream"])
     assert src.resolve_topics() == ["/event/LoginEventStream"]
+
+
+# ---------------------------------------------------------------------------
+# Periodic re-discovery (#14)
+
+
+class SequenceDiscoverer:
+    """Discoverer whose Nth call returns (or raises) the Nth batch; last repeats."""
+
+    def __init__(self, batches: list[list[str] | Exception]) -> None:
+        self.batches = batches
+        self.calls = 0
+
+    async def list_event_stream_topics(self) -> list[str]:
+        batch = self.batches[min(self.calls, len(self.batches) - 1)]
+        self.calls += 1
+        if isinstance(batch, Exception):
+            raise batch
+        return list(batch)
+
+
+def _rediscovery_cfg(interval: timedelta, topics: list[str] | None = None) -> PubSubConfig:
+    return PubSubConfig(
+        topics=topics or ["*"],
+        include=["/event/*"],
+        rediscovery_interval=interval,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_spawns_new_topic_and_its_events_flow() -> None:
+    """A topic discovered on a later discovery pass is subscribed and yields events,
+    and the source still terminates cleanly on stop with the late-added producer."""
+    topic_b = "/event/ApiEventStream"
+    disc = SequenceDiscoverer([[TOPIC], [TOPIC, topic_b]])
+    client = FakePubSubClient(
+        {
+            TOPIC: [make_event()],
+            topic_b: [make_event(topic=topic_b, replay_id=REPLAY_ID_2)],
+        }
+    )
+    src = PubSubSource(
+        _rediscovery_cfg(timedelta(milliseconds=30)),
+        client,
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        topic_discoverer=disc,
+    )
+    state = FakeCheckpointStore()
+    stop = asyncio.Event()
+    entries: list = []
+
+    async def consume() -> None:
+        async for entry in src.events(state, stop):
+            entries.append(entry)
+            if entry.labels.get("event_type") == "ApiEventStream":
+                stop.set()
+
+    # wait_for proves clean termination with a late-spawned producer in play.
+    await asyncio.wait_for(consume(), timeout=5.0)
+
+    assert disc.calls >= 2, "periodic re-discovery never ran"
+    assert {e.labels.get("event_type") for e in entries} >= {"LoginEventStream", "ApiEventStream"}
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_interval_zero_discovers_exactly_once() -> None:
+    """rediscovery_interval=0 disables the loop: discovery runs only at startup."""
+    disc = SequenceDiscoverer([[TOPIC]])
+    client = FakePubSubClient({TOPIC: [make_event()]})
+    src = PubSubSource(
+        _rediscovery_cfg(timedelta(0)),
+        client,
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        topic_discoverer=disc,
+    )
+    state = FakeCheckpointStore()
+    stop = asyncio.Event()
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.2)  # several would-be rediscovery intervals elapse
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert disc.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_failure_only_logs_and_source_survives() -> None:
+    """A discovery failure mid-run logs (ERROR after retries) but never kills the source."""
+    disc = SequenceDiscoverer([[TOPIC], RuntimeError("discovery down")])
+    client = FakePubSubClient({TOPIC: [make_event()]})
+    src = PubSubSource(
+        _rediscovery_cfg(timedelta(milliseconds=20)),
+        client,
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        topic_discoverer=disc,
+    )
+    state = FakeCheckpointStore()
+    stop = asyncio.Event()
+    entries: list = []
+
+    async def consume() -> None:
+        async for entry in src.events(state, stop):
+            entries.append(entry)
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.create_task(consume())
+        # initial call + one full failed rediscovery pass (3 retry attempts)
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while disc.calls < 4:
+            assert asyncio.get_running_loop().time() < deadline, "rediscovery retries never ran"
+            await asyncio.sleep(0.01)
+        assert not task.done(), "a rediscovery failure must not kill the source"
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert len(entries) >= 1  # explicit stream kept flowing throughout
+    errors = [e for e in captured if e["log_level"] == "error"]
+    assert errors, "persistent rediscovery failure must be logged at ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Owned-category filtering of discovered topics (#15)
+
+
+@pytest.mark.asyncio
+async def test_discovered_topic_in_owned_category_is_skipped_and_logged() -> None:
+    disc = FakeStreamDiscoverer(["/event/LoginEventStream", "/event/ApiEventStream"])
+    cfg = PubSubConfig(topics=["*"], include=["/event/*"])
+    src = PubSubSource(
+        cfg,
+        object(),  # type: ignore[arg-type]
+        sm_fields=[],
+        topic_discoverer=disc,
+        reconnect_backoff=0.01,
+        owned_categories=frozenset({"login"}),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        topics = await src._resolve_topics()
+
+    assert topics == ["/event/ApiEventStream"]
+    skips = [e for e in captured if e.get("topic") == "/event/LoginEventStream"]
+    assert skips, "owned-category skip was not logged"
+    assert skips[0]["log_level"] == "info"
+    assert skips[0]["category"] == "login"
+
+
+@pytest.mark.asyncio
+async def test_explicit_topic_in_owned_category_is_not_filtered() -> None:
+    """The runtime filter applies only to DISCOVERED topics; explicit ones passed the
+    startup guard (or the operator opted into overlap) and are never dropped."""
+    disc = FakeStreamDiscoverer(["/event/LoginEventStream", "/event/ApiEventStream"])
+    cfg = PubSubConfig(topics=["*", "/event/LoginEventStream"], include=["/event/*"])
+    src = PubSubSource(
+        cfg,
+        object(),  # type: ignore[arg-type]
+        sm_fields=[],
+        topic_discoverer=disc,
+        reconnect_backoff=0.01,
+        owned_categories=frozenset({"login"}),
+    )
+
+    topics = await src._resolve_topics()
+
+    assert sorted(topics) == ["/event/ApiEventStream", "/event/LoginEventStream"]
+
+
+@pytest.mark.asyncio
+async def test_empty_owned_categories_means_no_filtering() -> None:
+    disc = FakeStreamDiscoverer(["/event/LoginEventStream", "/event/ApiEventStream"])
+    cfg = PubSubConfig(topics=["*"], include=["/event/*"])
+    src = PubSubSource(
+        cfg,
+        object(),  # type: ignore[arg-type]
+        sm_fields=[],
+        topic_discoverer=disc,
+        reconnect_backoff=0.01,
+        owned_categories=frozenset(),
+    )
+
+    topics = await src._resolve_topics()
+
+    assert sorted(topics) == ["/event/ApiEventStream", "/event/LoginEventStream"]
+
+
+@pytest.mark.asyncio
+async def test_rediscovered_topic_in_owned_category_is_never_subscribed() -> None:
+    """The owned-category filter also applies at periodic re-discovery time."""
+    topic_b = "/event/ApiEventStream"
+    owned_topic = "/event/ReportEventStream"
+    disc = SequenceDiscoverer([[TOPIC], [TOPIC, topic_b, owned_topic]])
+    client = FakePubSubClient(
+        {
+            TOPIC: [make_event()],
+            topic_b: [make_event(topic=topic_b, replay_id=REPLAY_ID_2)],
+        }
+    )
+    src = PubSubSource(
+        _rediscovery_cfg(timedelta(milliseconds=30)),
+        client,
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        topic_discoverer=disc,
+        owned_categories=frozenset({"report"}),
+    )
+    state = FakeCheckpointStore()
+    stop = asyncio.Event()
+
+    async def consume() -> None:
+        async for entry in src.events(state, stop):
+            if entry.labels.get("event_type") == "ApiEventStream":
+                stop.set()
+
+    await asyncio.wait_for(consume(), timeout=5.0)
+
+    assert disc.calls >= 2
+    assert not any(c["topic"] == owned_topic for c in client.calls), (
+        "a rediscovered topic in an owned category must never be subscribed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-topic stream-up gauge (#17)
+
+
+@pytest.mark.asyncio
+async def test_stream_up_gauge_transitions_across_stream_failure() -> None:
+    """Gauge is 1 once a connection proves healthy (first event received), 0 after a
+    stream failure (before the reconnect sleep), and 0 on task exit."""
+    stop = asyncio.Event()
+    release = asyncio.Event()
+    second_call = asyncio.Event()
+
+    class OneEventThenErrorClient:
+        """First subscribe yields one event, stays open until released, then fails.
+        Later subscribes are empty streams."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def subscribe(
+            self,
+            topic: str,
+            *,
+            replay_preset: int,
+            replay_id: bytes = b"",
+            num_requested: int | None = None,
+        ) -> AsyncIterator[DecodedEvent]:
+            self.calls += 1
+            if self.calls == 1:
+                yield make_event()
+                await release.wait()
+                raise _rpc_error(grpc.StatusCode.UNAVAILABLE)
+            second_call.set()
+
+        async def aclose(self) -> None:
+            pass
+
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        OneEventThenErrorClient(),  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        metrics=metrics,
+    )
+    state = FakeCheckpointStore()
+    got_entry = asyncio.Event()
+
+    def gauge() -> float | None:
+        return metrics.registry.get_sample_value("sf2loki_pubsub_stream_up", {"topic": TOPIC})
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):
+            got_entry.set()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(got_entry.wait(), timeout=5.0)
+    assert gauge() == 1.0  # healthy: first event received, stream still open
+
+    release.set()  # stream now fails
+    await asyncio.wait_for(second_call.wait(), timeout=5.0)
+    assert gauge() == 0.0  # down across the reconnect
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+    assert gauge() == 0.0  # down on task exit

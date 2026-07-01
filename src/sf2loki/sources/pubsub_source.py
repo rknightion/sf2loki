@@ -12,7 +12,7 @@ import asyncio
 import base64
 import fnmatch
 import random
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -30,6 +30,7 @@ from sf2loki.salesforce.pubsub_client import (
     preset_for,
 )
 from sf2loki.shaping import extract_timestamp, route_fields
+from sf2loki.sources.overlap import category_of_pubsub
 
 if TYPE_CHECKING:
     from sf2loki.state.base import CheckpointStore
@@ -82,6 +83,13 @@ class PubSubSource:
         *max_backoff*).
     max_backoff:
         Upper bound for reconnect backoff (seconds).
+    owned_categories:
+        Canonical event categories (see :mod:`sf2loki.sources.overlap`) owned by
+        *other* enabled sources.  Wildcard-DISCOVERED topics in these categories
+        are dropped at discovery time (startup and periodic) so ``topics: ["*"]``
+        can't double-ingest a category the startup guard never saw.  EXPLICITLY
+        configured topics are never filtered — the startup guard already
+        validated those and the operator was explicit.
     """
 
     name: str = "pubsub"
@@ -97,6 +105,7 @@ class PubSubSource:
         max_backoff: float = 30.0,
         metrics: Metrics | None = None,
         topic_discoverer: _StreamDiscovererLike | None = None,
+        owned_categories: frozenset[str] = frozenset(),
     ) -> None:
         self._cfg = cfg
         self._client = client
@@ -106,6 +115,7 @@ class PubSubSource:
         self._max_backoff = max_backoff
         self._metrics = metrics if metrics is not None else Metrics()
         self._topic_discoverer = topic_discoverer
+        self._owned_categories = owned_categories
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,6 +148,40 @@ class PubSubSource:
         """
         return self._filter(self._cfg.topics)
 
+    def _filter_owned(self, discovered: Sequence[str]) -> list[str]:
+        """Drop DISCOVERED topics whose category another enabled source owns.
+
+        Applies only to wildcard-discovered topics (callers must exclude the
+        explicit list first); each skip is logged at INFO with the owning
+        reason so the operator can see why a stream isn't being ingested.
+        """
+        if not self._owned_categories:
+            return list(discovered)
+        kept: list[str] = []
+        for topic in discovered:
+            category = category_of_pubsub(topic)
+            if category in self._owned_categories:
+                log.info(
+                    "pubsub discovered topic skipped: its event category is already "
+                    "ingested by another configured source (overlap guard)",
+                    topic=topic,
+                    category=category,
+                )
+                continue
+            kept.append(topic)
+        return kept
+
+    def _discovered_additions(
+        self, discovered: Sequence[str], have: set[str] | Sequence[str]
+    ) -> list[str]:
+        """New subscribable topics from a discovery pass.
+
+        Applies include/exclude globs, drops topics already in *have* (explicit
+        or already subscribed), then the owned-category filter (#15).
+        """
+        new = [t for t in self._filter(discovered) if t not in have]
+        return self._filter_owned(new)
+
     async def _resolve_topics(self) -> list[str]:
         """Topics to subscribe to this run, expanding the ``"*"`` wildcard.
 
@@ -149,7 +193,7 @@ class PubSubSource:
         topics = list(self._cfg.topics)
         if TOPIC_WILDCARD in topics and self._topic_discoverer is not None:
             discovered = await self._discover_with_retry()
-            topics += [t for t in discovered if t not in topics]
+            topics += self._discovered_additions(discovered, set(topics))
         return self._filter(topics)
 
     async def _discover_with_retry(self) -> list[str]:
@@ -168,8 +212,9 @@ class PubSubSource:
             except Exception as exc:
                 if attempt == _DISCOVERY_ATTEMPTS:
                     log.error(
-                        "pubsub stream discovery failed; wildcard topics DROPPED for this run "
-                        "(explicit topics unaffected) — restart to retry",
+                        "pubsub stream discovery failed; wildcard topics DROPPED for this pass "
+                        "(explicit topics unaffected) — retried at the next periodic "
+                        "re-discovery, or on restart when re-discovery is disabled",
                         attempts=attempt,
                         error=repr(exc),
                     )
@@ -192,20 +237,47 @@ class PubSubSource:
         Backpressure is structural: a full queue stalls the producer task,
         which stalls the gRPC receive loop, which stops Salesforce sending.
 
-        Each task puts exactly one ``None`` sentinel on the queue when it
-        finishes (normal or error), enabling deterministic termination.
+        Each producer task puts exactly one ``None`` sentinel on the queue when
+        it finishes (normal or error), enabling deterministic termination.  The
+        sentinel accounting is *dynamic*: when wildcard re-discovery is enabled
+        (``"*"`` in topics, discoverer wired, ``rediscovery_interval > 0``) a
+        background task re-runs discovery periodically and spawns a producer
+        for each newly appeared topic mid-run, incrementing the count — so the
+        drain loop terminates only once every producer (including late-spawned
+        ones and the re-discovery task itself) has sentinelled.
         """
         topics = await self._resolve_topics()
-        if not topics:
+        rediscovery_interval = (
+            self._cfg.rediscovery_interval.total_seconds()
+            if TOPIC_WILDCARD in self._cfg.topics and self._topic_discoverer is not None
+            else 0.0
+        )
+        if not topics and rediscovery_interval <= 0:
             return
 
         queue: asyncio.Queue[LogEntry | None] = asyncio.Queue(maxsize=self._queue_maxsize)
+        tasks: list[asyncio.Task[None]] = []
+        subscribed: set[str] = set(topics)
+        sentinels_remaining = 0
 
-        tasks = [
-            asyncio.create_task(self._run_topic(topic, state, stop, queue)) for topic in topics
-        ]
+        def _spawn_topic(topic: str) -> None:
+            nonlocal sentinels_remaining
+            sentinels_remaining += 1
+            tasks.append(asyncio.create_task(self._run_topic(topic, state, stop, queue)))
 
-        sentinels_remaining = len(tasks)
+        for topic in topics:
+            _spawn_topic(topic)
+
+        if rediscovery_interval > 0:
+            sentinels_remaining += 1  # the re-discovery task sentinels too
+            tasks.append(
+                asyncio.create_task(
+                    self._rediscover_loop(
+                        rediscovery_interval, subscribed, _spawn_topic, stop, queue
+                    )
+                )
+            )
+
         try:
             while sentinels_remaining > 0:
                 item = await queue.get()
@@ -222,6 +294,73 @@ class PubSubSource:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _rediscover_loop(
+        self,
+        interval: float,
+        subscribed: set[str],
+        spawn_topic: Callable[[str], None],
+        stop: asyncio.Event,
+        queue: asyncio.Queue[LogEntry | None],
+    ) -> None:
+        """Periodically re-run wildcard discovery and spawn newly appeared topics (#14).
+
+        A channel enabled in the org after startup (a new ``*EventStream``
+        entity, more Event Monitoring streams turned on) would otherwise stay
+        invisible until restart.  Additions go through the same glob and
+        owned-category filters as startup discovery; removals are ignored (a
+        deleted channel's stream just ends).  Stop-aware, and a discovery
+        failure only logs — it must never kill the source.
+        """
+        explicit = set(self._filter(self._cfg.topics))
+        try:
+            while not stop.is_set():
+                if await self._sleep_or_stop(stop, interval):
+                    return
+                try:
+                    discovered = await self._discover_with_retry()
+                    if not discovered:
+                        continue  # persistent failure already logged at ERROR
+                    additions = self._discovered_additions(discovered, subscribed)
+                    removed = subscribed - explicit - set(self._filter(discovered))
+                    if removed:
+                        log.debug(
+                            "pubsub rediscovery: previously discovered topics no longer "
+                            "listed; their streams will simply end",
+                            topics=sorted(removed),
+                        )
+                    for topic in additions:
+                        if stop.is_set():
+                            return
+                        log.info(
+                            "pubsub rediscovery: subscribing to newly discovered topic",
+                            topic=topic,
+                        )
+                        subscribed.add(topic)
+                        spawn_topic(topic)
+                except Exception as exc:  # never kill the source from here
+                    log.warning(
+                        "pubsub rediscovery pass failed; retrying at next interval",
+                        error=repr(exc),
+                    )
+        finally:
+            await self._put_sentinel(queue)
+
+    @staticmethod
+    async def _put_sentinel(queue: asyncio.Queue[LogEntry | None]) -> None:
+        """Always put a sentinel so the drain loop can terminate.
+
+        put_nowait first: on force-cancel, an awaited put on a full queue that
+        nobody drains would hang forever.
+        """
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            task = asyncio.current_task()
+            if task is None or not task.cancelling():
+                # Not being cancelled → the consumer is still draining, so a
+                # brief awaited put keeps termination deterministic.
+                await queue.put(None)
 
     async def _run_topic(
         self,
@@ -253,6 +392,7 @@ class PubSubSource:
 
         backoff = self._reconnect_backoff
         attempt = 0
+        stream_up = self._metrics.pubsub_stream_up.labels(topic=topic)
 
         log.info("pubsub subscribing", topic=topic, preset=preset, resuming=bool(stored))
         try:
@@ -278,6 +418,7 @@ class PubSubSource:
                             # session-expiry churn every few minutes) don't
                             # ratchet every topic to max_backoff permanently.
                             backoff = self._reconnect_backoff
+                            stream_up.set(1)
                         if isinstance(ev, KeepaliveEvent):
                             if ev.latest_replay_id == replay_id:
                                 continue  # unchanged — avoid checkpoint churn
@@ -292,6 +433,7 @@ class PubSubSource:
                         await queue.put(entry)  # blocks when full = backpressure
 
                     # Stream ended normally.
+                    stream_up.set(0)
                     if stop.is_set():
                         return
                     backoff = self._reconnect_backoff  # reset on clean close
@@ -299,6 +441,7 @@ class PubSubSource:
                     if await self._sleep_or_stop(stop, backoff):
                         return
                 except Exception as exc:
+                    stream_up.set(0)
                     if stop.is_set():
                         return
                     if self._is_invalid_argument(exc):
@@ -345,17 +488,8 @@ class PubSubSource:
                         return
                     backoff = min(backoff * 2, self._max_backoff)
         finally:
-            # Always put a sentinel so the drain loop can terminate. put_nowait
-            # first: on force-cancel, an awaited put on a full queue that nobody
-            # drains would hang forever.
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                task = asyncio.current_task()
-                if task is None or not task.cancelling():
-                    # Not being cancelled → the consumer is still draining, so a
-                    # brief awaited put keeps termination deterministic.
-                    await queue.put(None)
+            stream_up.set(0)  # task exiting: this topic is definitionally down
+            await self._put_sentinel(queue)
 
     async def _sleep_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
         """Sleep *delay* plus uniform jitter; return True if *stop* fired meanwhile."""
