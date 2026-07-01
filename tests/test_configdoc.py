@@ -1,3 +1,5 @@
+import json
+
 import yaml
 from pydantic import BaseModel, Field, SecretStr
 
@@ -68,3 +70,16 @@ def test_secret_leaf_marks_required_when_no_default():
 
     assert len(lines) == 1
     assert "(required)" in lines[0]
+
+
+def test_reference_markdown_has_a_section_per_model_and_lists_limits():
+    md = configdoc.reference_markdown()
+    assert md.startswith("# ")
+    assert "salesforce" in md and "limits" in md and "telemetry" in md
+    assert "| Field |" in md  # a table header
+
+
+def test_json_schema_is_valid_json_for_config():
+    obj = json.loads(configdoc.json_schema())
+    assert obj["title"] == "Config"
+    assert "properties" in obj

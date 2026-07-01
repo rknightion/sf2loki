@@ -1,14 +1,19 @@
-"""Generate an annotated example YAML document from the ``Config`` model.
+"""Generate an annotated example YAML document, a Markdown config reference,
+and a JSON schema from the ``Config`` model.
 
 Pure generator: no file I/O, no argparse. Walks ``model.model_fields``
 recursively (in model-declaration order) and renders each field as
 ``key: <value>  # <description>`` with nested models rendered as an indented
 block. Deliberately does NOT round-trip pydantic's ``model_dump()`` — that
 would drop comments and render durations/paths in the wrong shape.
+
+``reference_markdown()`` walks the same recursive set of nested models (via
+``_iter_models``) to emit one Markdown table per model.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 from types import UnionType
@@ -203,6 +208,96 @@ def _render_model(model: type[BaseModel], indent: str, lines: list[str]) -> None
         _render_field(name, field, indent, lines)
 
 
+def _iter_models(model: type[BaseModel]) -> list[type[BaseModel]]:
+    """Recursively collect every nested ``BaseModel`` reachable from ``model``.
+
+    Traversal order matches ``_render_model``'s (model-declaration order,
+    depth-first), including ``model`` itself first. Each model type appears
+    once, at its first-seen position, so a model reused in multiple places
+    (unlikely here) still gets a single section.
+    """
+    seen: dict[type[BaseModel], None] = {}
+
+    def visit(m: type[BaseModel]) -> None:
+        if m in seen:
+            return
+        seen[m] = None
+        for field in m.model_fields.values():
+            annotation = field.annotation
+            if _is_model_type(annotation):
+                inner = _unwrap_optional(annotation)
+                assert isinstance(inner, type) and issubclass(inner, BaseModel)
+                visit(inner)
+                continue
+            item_model = _list_item_model_type(annotation)
+            if item_model is not None:
+                visit(item_model)
+
+    visit(model)
+    return list(seen)
+
+
+def _fmt_type(annotation: Any) -> str:
+    """Render a field annotation as a short, human-readable type string."""
+    inner = _unwrap_optional(annotation)
+    origin = get_origin(inner)
+
+    if origin is not None:
+        args = get_args(inner)
+        if origin is list:
+            return f"list[{_fmt_type(args[0])}]" if args else "list"
+        if origin is dict:
+            if len(args) == 2:
+                return f"dict[{_fmt_type(args[0])}, {_fmt_type(args[1])}]"
+            return "dict"
+        # Literal[...] and other typing constructs: fall back to their repr,
+        # trimmed of the module-qualified prefix typing sometimes adds.
+        name = getattr(origin, "__name__", str(origin))
+        if name == "Literal":
+            return f"Literal[{', '.join(repr(a) for a in args)}]"
+        return str(inner)
+
+    if isinstance(inner, type):
+        if inner is timedelta:
+            return "Duration"
+        return inner.__name__
+
+    return str(inner)
+
+
+def _md_escape(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _render_field_row(name: str, field: FieldInfo) -> str:
+    annotation = field.annotation
+    type_str = _fmt_type(annotation)
+    is_required = field.is_required()
+
+    if _is_secret_field(name, annotation):
+        # Never render real secret material or a filesystem placeholder here.
+        default_str = "*(secret)*"
+    elif _is_model_type(annotation) or _list_item_model_type(annotation) is not None:
+        default_str = ""
+    else:
+        value = _resolve_value(field)
+        default_str = _fmt_scalar(value) if value is not None else "null"
+
+    description = _md_escape(_first_line(field.description))
+    required_str = "yes" if is_required else "no"
+    return f"| `{name}` | `{type_str}` | {default_str} | {required_str} | {description} |"
+
+
+def _render_model_section(model: type[BaseModel], lines: list[str]) -> None:
+    lines.append(f"## {model.__name__}")
+    lines.append("")
+    lines.append("| Field | Type | Default | Required | Description |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for name, field in model.model_fields.items():
+        lines.append(_render_field_row(name, field))
+    lines.append("")
+
+
 def example_yaml() -> str:
     """Render the full annotated example YAML body for ``Config``.
 
@@ -215,3 +310,27 @@ def example_yaml() -> str:
     _render_model(Config, "", lines)
     body = "\n".join(lines)
     return _HEADER + "\n" + body + "\n"
+
+
+def reference_markdown() -> str:
+    """Render a Markdown configuration reference for ``Config``.
+
+    One ``##`` section per model in the same recursive set ``example_yaml()``
+    walks (see ``_iter_models``), each with a ``Field | Type | Default |
+    Required | Description`` table. Durations render via ``_fmt_duration``
+    (through ``_resolve_value``/``_fmt_scalar``); secret fields show a
+    placeholder, never real values.
+    """
+    lines: list[str] = ["# sf2loki configuration reference", ""]
+    for model in _iter_models(Config):
+        _render_model_section(model, lines)
+    # Single trailing newline: strip any trailing blank lines from the last
+    # section, then join with newlines and end with exactly one "\n".
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def json_schema() -> str:
+    """Render the ``Config`` model's JSON schema as pretty-printed JSON."""
+    return json.dumps(Config.model_json_schema(), indent=2) + "\n"
