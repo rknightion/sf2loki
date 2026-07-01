@@ -258,3 +258,152 @@ sources:
 `sink.loki.structured_metadata_fields` list via the same field-routing logic, so a custom object's
 high-cardinality fields (e.g. a custom `User__c` lookup) should be added to that global list if you
 want them filterable rather than buried only in the JSON line.
+
+## 5. PII redaction & sampling
+
+Every source (`pubsub`, `eventlog_objects`, `eventlogfile`) can redact/filter each
+decoded payload with declarative **transform rules**, and shed volume with
+deterministic **sampling**. Both run at the source decode boundary — *before*
+field routing, label promotion, and timestamp extraction — so a redacted column
+is redacted everywhere downstream (the JSON log line, structured metadata, and
+the fallback timestamp).
+
+### Transform rules
+
+Configured per source under `sources.<source>.transforms`. Actions:
+
+- `hash` — salted SHA-256 → a stable 16-char pseudonym (correlatable within the
+  deployment, not reversible without the salt).
+- `mask` — format-aware: emails keep the domain (`alice@corp.com` → `***@corp.com`),
+  IPv4 truncates to /24 (`203.0.113.7` → `203.0.113.x`), anything else → `***`.
+- `drop_field` — remove the field entirely.
+- `regex_replace` — `pattern` → `replacement` (backreferences allowed); the
+  pattern is validated to compile at config load.
+- `drop_row` — drop the whole row/event when EVERY `match` entry matches
+  (`fnmatch` glob; a plain string is exact match). Counted in
+  `sf2loki_rows_filtered{source, rule}`.
+
+Worked (GDPR-ish) example — hash IPs, mask usernames, drop internal SOQL text:
+
+```yaml
+sources:
+  transform_salt_file: /etc/sf2loki/secrets/transform-salt   # STRONGLY recommended for hash
+  eventlogfile:
+    enabled: true
+    event_types: ["Login", "API", "ApexExecution"]
+    transforms:
+      - action: hash
+        fields: [SOURCE_IP, CLIENT_IP]
+      - action: mask
+        fields: [USER_NAME]
+      - action: drop_field
+        fields: [SOQL_QUERY]           # free-text SOQL can carry PII in literals
+      - action: drop_row
+        name: drop-monitoring-user     # -> rows_filtered{rule="drop-monitoring-user"}
+        match: {USER_NAME: "monitoring@*"}
+```
+
+**Salt recommendation:** always set `sources.transform_salt` (or
+`transform_salt_file`) when any `hash` rule is configured. Unsalted hashes of
+low-entropy values (IPs, usernames) are trivially reversible by rainbow table.
+The salt is deployment-wide, so the same input hashes identically across sources
+and restarts (correlation stays intact).
+
+**Label safety:** `drop_field` of a column promoted to an ELF stream label is
+rejected at config load (it would silently drop the label). Use `hash`/`mask`
+instead — a pseudonymised label is fine.
+
+### Sampling (deterministic volume control)
+
+Keep-fraction in `(0, 1]`, deterministic by a stable per-row key (replay_id /
+record Id / canonical JSON), so a **replay samples identically** and Loki's
+byte-identical dedup stays intact. Sampling is applied AFTER transforms. A
+sampled-out row is counted in `sf2loki_entries_sampled_out{source, event_type}`.
+
+- `sources.eventlogfile.event_types[].sample` — per ELF type. Wildcard-discovered
+  types (`event_types: ["*"]`) inherit the `*` entry's `sample`.
+- `sources.eventlog_objects.objects[].sample` — per polled object.
+- `sources.pubsub.sample` — `{topic-glob: rate}`, first matching glob wins.
+
+```yaml
+sources:
+  eventlogfile:
+    event_types:
+      - {name: "*", sample: 0.1}       # keep 10% of every discovered type
+      - {name: "Login", sample: 1.0}   # ...but 100% of Login (explicit wins)
+  pubsub:
+    sample: {"/event/ApiEventStream": 0.25}
+```
+
+**Caveats / invariants:**
+
+- Sampling and `drop_row` **still advance checkpoints**. A dropped Pub/Sub event
+  commits its replay id via a checkpoint-only entry; a dropped ELO record still
+  enters the dedup id-window; a dropped ELF row still lets the file's checkpoint
+  advance. Nothing gets stuck re-fetching dropped data.
+- Sampling is **lossy** — sampled-out data is gone, not delayed. Use rate caps /
+  the daily byte budget (below) for lossless volume control.
+- If a source's *entire* tail (the last file / page / stream chunk) is
+  dropped/sampled-out, that segment's advanced checkpoint isn't persisted until
+  the next emitted entry; on restart it is deterministically re-fetched and
+  re-dropped (no data loss, minor rework).
+- **Backfill:** the `backfill` command applies the same
+  `sources.eventlogfile.transforms` (backfilled history never leaks fields the
+  live path redacts) but does **not** sample — a backfill is an explicit,
+  bounded operation; narrow it with `--since/--until/--event-types` instead.
+
+## 6. Controlling cost
+
+sf2loki gives you three independent egress controls under `sink.loki.egress`
+(all OFF by default). They compose — you can run any combination.
+
+### Rate caps (lossless, delayed)
+
+`max_lines_per_second` and `max_bytes_per_second` are token buckets on what's
+pushed to Loki (bytes counted pre-compression, the closest proxy to what a
+Loki-based platform meters). When a flush would exceed a cap it sleeps the
+shortfall rather than dropping anything. That backpressure is structural: a
+throttled sink leaves the internal queue full, which suspends the source poll
+loops / Pub/Sub flow-control credits — so Salesforce simply isn't asked for more
+until the buckets refill. Nothing is lost; delivery is just paced. Set these to
+smooth spikes or stay under a contracted ingest rate. `0` disables a cap.
+
+### Daily byte budget (two modes)
+
+`daily_byte_budget` caps pre-compression bytes pushed per UTC day. The used
+counter is persisted in the state store (key `egress:budget`), so a restart
+resumes the same day's total instead of resetting the cap. It rolls over at
+00:00 UTC. sf2loki logs a WARNING at 80% and takes `budget_action` at 100%:
+
+- **`pause` (default — lossless, delayed):** hold all pushes *and* checkpoint
+  advances until the next UTC day. No data is lost — it stays unread on the
+  Salesforce side and flows once the budget resets — but delivery is delayed,
+  bounded only by Salesforce-side event retention (short for streaming/Pub/Sub;
+  longer for EventLogFile). While paused, `/readyz` reports **degraded** (503)
+  with a reason naming the resume date, so an orchestrator surfaces it; liveness
+  (`/healthz`) stays green because a restart wouldn't help. `egress_paused` = 1.
+- **`drop` (lossy, counted):** keep running and discard the over-budget batches.
+  Checkpoints still advance (the data is deliberately gone, never retried), and
+  every dropped entry is counted in `loki_entries_dropped{reason="budget"}`.
+  Readiness is NOT degraded — dropping is the configured steady state.
+
+### Sampling vs budget — pick the right lossiness
+
+These solve different problems and combine well:
+
+- **Sampling** (`sources.*.sample`, per event type) is *lossy and cheap*: it
+  keeps a deterministic fraction of rows up front, so you pay for a smaller,
+  representative stream continuously. Use it to permanently reduce volume of a
+  high-volume, low-value event type. Sampled-out rows still advance checkpoints
+  (they're gone by design).
+- **Budget-pause** is *lossless but delayed*: you keep everything, and overflow
+  is deferred to the next day rather than thinned. Use it as a hard daily cost
+  ceiling for the whole deployment when you'd rather delay than drop.
+- **Budget-drop** is the lossy sibling of pause — a ceiling that sheds load
+  instead of delaying it, with the loss counted.
+
+A common setup: sample the noisy types down to a sensible baseline, then put a
+`pause` budget behind everything as a backstop so a traffic spike delays rather
+than overspends. Rate caps sit underneath both, pacing the push so you never
+burst past a per-second ceiling. Metrics to watch: `egress_budget_used_bytes`,
+`egress_paused`, `entries_sampled_out`, `loki_entries_dropped{reason="budget"}`.

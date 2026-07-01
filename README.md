@@ -30,12 +30,22 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - **Self-observable (OTel-native)**: all metrics — connector self-observability **and** Salesforce org
   limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
+- **Operable from day one**: `sf2loki doctor` runs a live end-to-end preflight (auth, permissions,
+  entitlements, Pub/Sub reachability, a Loki test write); `sf2loki backfill` loads historical
+  EventLogFile data; a generated Grafana dashboard **and alert-rule pack** ship in
+  [`deploy/grafana/`](deploy/grafana/).
+- **Compliance & cost controls**: declarative PII transforms (hash / mask / drop field / drop row /
+  regex), deterministic per-type sampling, sink rate caps, and a daily byte budget with a lossless
+  pause mode — all opt-in.
 
 ## Documentation
 
 - [DESIGN.md](DESIGN.md) — full architecture, frozen seams, label strategy, phase plan, HA model.
 - [docs/configuring-sources.md](docs/configuring-sources.md) — source/config reference: custom
-  object polling, login history / setup audit trail recipes, the overlap rule, cardinality controls.
+  object polling, login history / setup audit trail recipes, the overlap rule, cardinality controls,
+  PII redaction & sampling, cost controls.
+- [docs/alerts.md](docs/alerts.md) — the shipped Grafana alert-rule pack: what each alert means and
+  the first response step.
 - [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard.
 - [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
   exercising a dev org's Event Monitoring pipeline.
@@ -246,10 +256,44 @@ What sf2loki needs from your Grafana Cloud stack, and where to find it:
   which 401s on Grafana Cloud; set it explicitly (see
   [`config.docker.yaml`](config.docker.yaml)'s `GC_OTLP_USER` vs `GC_LOKI_USER`).
 
+### Verify your setup
+
+`sf2loki --check` only validates configuration offline (secrets resolve, labels are legal, sources
+don't overlap) — it never touches the network. Once you have real credentials in place, run the live
+preflight instead:
+
+```console
+$ sf2loki doctor --config config.yaml
+name                            status  detail
+config                          PASS    configuration and wiring valid
+auth                            PASS    flow=jwt_bearer instance_url=https://myorg.my.salesforce.com org_id=00D5g000000ABCDEAU
+permissions                     PASS    EventLogFile describe OK (View Event Log Files granted)
+pubsub:/event/LoginEventStream  PASS    topic reachable
+entitlement                     WARN    org produces 42 Hourly EventType(s) total; no Hourly files found for ReportExport — check Event Monitoring entitlement or the type name
+loki                            PASS    pushed 1 test line in 87ms (the only write this command performs)
+state                           PASS    state directory /var/lib/sf2loki is writable and lockable
+limits                          PASS    DailyApiRequests 14312/15000 remaining
+
+7 passed, 1 warnings, 0 failed, 0 skipped
+```
+
+It authenticates for real, checks the integration user's permissions, probes Pub/Sub topic
+reachability, reports which configured EventLogFile types the org has actually produced files for,
+and pushes exactly **one** test log line to Loki (labelled `source=sf2loki-doctor`) to confirm the
+write path end-to-end — that Loki push is the only write `doctor` ever performs. Exits `0` if
+nothing FAILed (WARNs are fine — e.g. a configured EventType the org hasn't produced yet), `1` if
+anything FAILed. Add `--json` for machine-readable output in CI.
+
+Checks run in order, and later checks that depend on an earlier one SKIP automatically instead of
+failing confusingly — e.g. if `auth` FAILs, `permissions`/`pubsub`/`entitlement`/`limits` all report
+SKIP (they need a token), but `loki` and `state` still run since they don't depend on Salesforce
+auth at all.
+
 ### Source recipes
 
 See [`docs/configuring-sources.md`](docs/configuring-sources.md) for recipes — polling arbitrary
-custom objects, ingesting login history / setup audit trail, and the either/or-per-category rule.
+custom objects, ingesting login history / setup audit trail, the either/or-per-category rule,
+PII redaction & sampling, and cost controls (rate caps + the daily byte budget).
 
 ### Presets
 
@@ -273,7 +317,54 @@ local Alloy `http://alloy:4318/v1/metrics`). Basic auth defaults to the Loki sin
 `tenant_id`/`auth_token` (Grafana Cloud uses one stack credential for Loki and OTLP); use
 `service.telemetry.auth: none` for an unauthenticated in-cluster Alloy. Enable Salesforce org-limit
 metrics (API usage, storage, streaming events, …) with `salesforce.limits.enabled: true`. A ready-made
-Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/).
+Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/), alongside a generated
+**alert-rule pack** ([`deploy/grafana/alerts.yaml`](deploy/grafana/alerts.yaml)) covering every
+data-loss and degradation signal — see [docs/alerts.md](docs/alerts.md) for what each alert means
+and how to provision it.
+
+## Backfilling history
+
+`sf2loki backfill` is a one-shot CLI for pushing historical EventLogFile data into Loki — useful
+when you enable ingestion on an org that already has weeks of ELF history you want in Grafana, or
+to refill a gap after an outage. It reads the same config file as the daemon but keeps its own
+checkpoint file (a `-backfill` sibling of `state.file.path`), so it's safe to run alongside the
+running service and is resumable if interrupted.
+
+```bash
+sf2loki backfill --config config.yaml --since 2026-05-01 --until 2026-06-01 \
+  --event-types Login,API --interval Daily
+```
+
+`--since`/`--until` are `YYYY-MM-DD` (UTC); `--until` defaults to now. `--event-types` defaults to
+the types configured under `sources.eventlogfile.event_types` (or discovers all types the org
+produces if only `["*"]` is configured). `--concurrency` (default 2) bounds concurrent file
+downloads. Configured `sources.eventlogfile.transforms` (PII redaction) apply to backfilled rows
+too; sampling does not.
+
+Loki rejects samples with timestamps older than its out-of-order window
+(`reject_old_samples_max_age`, default 168h/7d), so there are two strategies for pushing history:
+
+**Default (label) strategy** — pushes the true event timestamps and tags every backfilled stream
+with `backfill="true"`, giving backfilled data its own set of Loki streams so old timestamps don't
+collide with the daemon's live streams. Raise Loki's `reject_old_samples_max_age` (or your Grafana
+Cloud stack's out-of-order window) to cover the `--since` date, or use `--ingest-timestamps`
+instead. The extra cardinality is one bit per stream — avoid stacking more per-run labels on top.
+
+**`--ingest-timestamps`** — pushes at ingest time (now) instead, so it always lands inside Loki's
+out-of-order window with no config changes needed. The true event time is preserved in structured
+metadata (`event_time`, ISO-8601) so it's still queryable, and no `backfill` label is added. Use
+this when you can't or don't want to touch Loki's ingestion limits.
+
+Resume semantics: progress checkpoints after every fully-pushed file, keyed per
+`(interval, event_type)`. Re-running the same command after an interruption picks up from the last
+successfully pushed file — already-pushed files are not re-downloaded. If a run does re-push a file
+(e.g. a retry landed some but not all of its batches), duplicate rows are harmless in the default
+label strategy (byte-identical lines dedup in Loki); in `--ingest-timestamps` mode a rare
+retry-related duplicate won't dedup — acceptable for a one-shot backfill tool.
+
+The command prints a summary on exit (files processed, rows pushed/dropped, bytes pushed, API calls
+used, elapsed time) and exits `1` only if Loki pushes fail persistently (10 consecutive failures) —
+a transient Salesforce or Loki hiccup is retried automatically.
 
 ## Run with Docker / docker-compose
 
