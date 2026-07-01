@@ -21,6 +21,10 @@ services:
     volumes:
       - ./config.docker.yaml:/etc/sf2loki/config.yaml:ro
       - ./secrets:/etc/sf2loki/secrets:ro
+      # Durable checkpoint state (replay_id / watermark per source) survives
+      # container recreation. The container runs as uid 10001, so ./state must
+      # be writable by it: `mkdir -p state && chmod 777 state` (or chown 10001).
+      - ./state:/var/lib/sf2loki
     command: ["--config", "/etc/sf2loki/config.yaml"]
     ports:
       - "8080:8080"   # /healthz, /readyz (metrics are OTLP-push, no scrape port)

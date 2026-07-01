@@ -7,6 +7,10 @@
 !.env.example
 secrets/
 
+# --- Runtime checkpoint state (bind-mounted into the container) ---
+state/*
+!state/.gitkeep
+
 # --- Python ---
 __pycache__/
 *.py[cod]

@@ -237,7 +237,9 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 secrets — env-driven via `${VAR}` + `*_file`) at `/etc/sf2loki/config.yaml` and `./secrets` (the
 private key + Loki token) read-only at `/etc/sf2loki/secrets`. Create `.env.dev` from the values in
 the config (Salesforce login URL / consumer key / username, Loki URL + tenant); `.env*`, `*.key`,
-`*.crt`, and `secrets/` are gitignored.
+`*.crt`, and `secrets/` are gitignored. Checkpoint state persists to `./state` (bind-mounted at
+`/var/lib/sf2loki`) so resume survives container recreation — the container runs as uid 10001, so
+make it writable first: `mkdir -p state && chmod 777 state`.
 
 **Health check target — use `/readyz`, not `/healthz`.** `/healthz` is *liveness* (200 whenever the
 process is up, even mid-startup before Salesforce auth); `/readyz` is *readiness* (200 only once auth

@@ -53,7 +53,7 @@ sink:
 state:
   store: file
   file:
-    path: /tmp/sf2loki/state.json                   # writable by the non-root container user
+    path: /var/lib/sf2loki/state.json               # bind-mounted from ./state (see docker-compose.yml)
 
 service:
   log_level: info
