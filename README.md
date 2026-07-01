@@ -31,6 +31,15 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
 
+## Documentation
+
+- [DESIGN.md](DESIGN.md) — full architecture, frozen seams, label strategy, phase plan, HA model.
+- [docs/configuring-sources.md](docs/configuring-sources.md) — source/config reference: custom
+  object polling, login history / setup audit trail recipes, the overlap rule, cardinality controls.
+- [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard.
+- [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
+  exercising a dev org's Event Monitoring pipeline.
+
 ## Salesforce setup (OAuth)
 
 The service authenticates server-to-server, no interactive login. Pick one flow via
@@ -42,7 +51,8 @@ The service authenticates server-to-server, no interactive login. Pick one flow 
   user pre-authorisation). See [Client Credentials flow](#alternative-client-credentials-flow).
 
 Both reuse the same External Client App shell and the same integration-user permissions (step 4); the
-JWT bearer walkthrough follows.
+JWT bearer walkthrough follows. See [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials)
+for the protocol-level detail (JWT claims, token endpoint, why each scope/toggle is set the way it is).
 
 ### 1. Generate the keypair and certificate
 
@@ -85,19 +95,13 @@ Field by field:
 - **Callback URL** — required field, but JWT bearer performs no redirect, so it's stored and never
   invoked. Use a placeholder: `https://login.salesforce.com/services/oauth2/callback`.
 - **OAuth Scopes** — move into *Selected*: **`Manage user data via APIs (api)`** and **`Perform requests
-  at any time (refresh_token, offline_access)`**. `api` covers REST/SOQL, the EventLogFile `/LogFile`
-  download, and the Pub/Sub API (which has no scope of its own — it just needs a valid access token).
-  Leave **everything else** in *Available*: `Access the identity URL service (id…)`, `web`,
-  `Full access (full)`, `chatter_api`, `visualforce`, and all Data Cloud / platform scopes
-  (`cdp_segment_api`, `cdp_identityresolution_api`, `cdp_calculated_insight_api`, `sfap_api`,
-  `interaction_api`, `cdp_api`).
-  - **`refresh_token` is required** even though JWT bearer never issues or uses a refresh token —
-    Salesforce's **pre-authorized** JWT bearer path refuses the grant without it
-    (`invalid_request: "refresh_token scope is required and the connected app should be installed and
-    preauthorized"`). Verified empirically against a dev org. The scope is present on the app; the
-    service never exercises it.
-  - `openid` is needed **only if** you leave `salesforce.org_id` unset (it authorises the `/userinfo`
-    org-id lookup). Set `org_id` in config to avoid needing it.
+  at any time (refresh_token, offline_access)`**. Leave **everything else** in *Available*: `Access the
+  identity URL service (id…)`, `web`, `Full access (full)`, `chatter_api`, `visualforce`, and all Data
+  Cloud / platform scopes (`cdp_segment_api`, `cdp_identityresolution_api`,
+  `cdp_calculated_insight_api`, `sfap_api`, `interaction_api`, `cdp_api`). `refresh_token` is required
+  even though this flow never issues or uses a refresh token — see
+  [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials) for why. `openid`
+  is needed only if you leave `salesforce.org_id` unset; set `org_id` in config to avoid needing it.
 - **Introspect all Tokens** — ❌ leave unticked (authorises introspecting *every* token in the org; the
   app can already introspect its own).
 - **Configure ID token** — ❌ leave unticked (only relevant when `openid` is requested and an ID token
@@ -109,17 +113,11 @@ Field by field:
   **Enable Device Flow** — ❌. **Enable Token Exchange Flow** — ❌.
   (Each disabled flow is one fewer way to mint a token from this app — least privilege.)
 
-**Security**
-- **Require secret for Web Server Flow** — leave **ticked** (default; guards an unused flow, harmless).
-- **Require secret for Refresh Token Flow** — leave **ticked** (default; unused flow, harmless).
-- **Require PKCE for Supported Authorization Flows** — leave **ticked** (default; applies to auth-code
-  flows we don't use).
-- **Enable Refresh Token Rotation** — ❌ (no refresh tokens in JWT bearer).
-- **Issue JSON Web Token (JWT)-based access tokens for named users** — ❌. *Not* JWT bearer auth despite
-  the name — it changes the issued access-token *format* to stateless JWTs. Opaque tokens are preferable
-  here (server-side revocable; the service re-mints on 401 anyway).
-- **Limit Idle Refresh Token TTL to 30 Days** — ❌ (no refresh tokens). **Enforce Refresh Token IP
-  Allowlist** — ❌ (no refresh tokens).
+**Security** — leave every default as-is (`Require secret for Web Server Flow` / `…Refresh Token Flow`
+/ `Require PKCE` ticked; refresh-token rotation/idle-TTL/IP-allowlist and named-user JWT access tokens
+unticked). These toggles govern flows and refresh-token behaviour this connector doesn't use — see
+[DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials) if you want the
+reasoning for each.
 
 Then: **OAuth Settings → JWT Bearer Flow → upload `server.crt`**, **Save**, and copy the **Consumer
 Key** (App Settings) → this is `salesforce.client_id`.
@@ -169,7 +167,8 @@ Simpler than JWT bearer — no keypair, certificate, or user pre-authorisation. 
 
 > Trade-off: client credentials transmits a shared secret (symmetric); JWT bearer never sends a secret
 > over the wire (asymmetric key). Both yield an access token that works identically for the Pub/Sub,
-> REST/SOQL, and EventLogFile paths.
+> REST/SOQL, and EventLogFile paths. See [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials)
+> for the protocol-level detail.
 
 ## Configuration
 
@@ -249,10 +248,10 @@ A Helm chart is planned. Until then, run the published container image
 (`ghcr.io/rknightion/sf2loki`) directly with the config mounted at `/etc/sf2loki/config.yaml`
 and secrets (Salesforce private key, Loki token) supplied via env or mounted files.
 
-**Why a single instance:** the Pub/Sub API delivers events independently per subscriber connection
-(no consumer groups), so two instances double-deliver. Run exactly one replica (with a stop-then-start
-rollout, not overlapping) + `replay_id` checkpointing to resume without overlap; the `Coordinator`
-seam allows active-passive leader election later (DESIGN §13).
+**Run exactly one replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API delivers
+events independently per subscriber connection, so a second instance double-delivers. See
+[DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha) for the full HA/replica model and the
+`Coordinator` seam that will allow active-passive failover later.
 
 > **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:
 > true`** (default on Grafana Cloud; must be enabled self-hosted / in Alloy's Loki).

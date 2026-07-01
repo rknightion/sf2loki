@@ -6,7 +6,9 @@ sf2loki connector's own
 self-observability (Loki push outcomes/latency, internal queue depth, auth refreshes/errors,
 Pub/Sub credits/reconnects, decode errors, replay/watermark staleness, build info). It uses a
 `Prometheus datasource` template variable plus a `$job` variable (defaults to `sf2loki`) so every
-panel is portable across environments.
+panel is portable across environments. See [DESIGN.md §12](../../DESIGN.md#12-self-observability)
+for the full metric list and how metrics reach Grafana (OTLP push, no scrape endpoint), and the main
+[README.md](../../README.md#metrics-otlp) for how to enable/configure telemetry.
 
 To import: either run `gcx dashboards push deploy/grafana/sf2loki-dashboard.json` (or the
 equivalent `gcx dashboards` import command for your target stack), or use Grafana's manual
