@@ -231,20 +231,14 @@ definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || e
 
 ## Kubernetes deployment
 
-Manifests live in [`deploy/k8s/`](deploy/k8s/): `Deployment` (replicas 1 / `Recreate`), `Service`,
-`PodDisruptionBudget`, RBAC + `ServiceAccount`, `ConfigMap` (config + state), and `Secret`. The default
-uses the **ConfigMap checkpoint store** (no PVC; survives reschedules); switch to `state.store: file`
-with a PVC if you prefer. (Metrics push via OTLP, so there is no `ServiceMonitor`.)
+A Helm chart is planned. Until then, run the published container image
+(`ghcr.io/rknightion/sf2loki`) directly with the config mounted at `/etc/sf2loki/config.yaml`
+and secrets (Salesforce private key, Loki token) supplied via env or mounted files.
 
-```bash
-# edit deploy/k8s/secret.yaml + configmap.yaml first (private key, Loki token, URLs)
-kubectl apply -f deploy/k8s/
-```
-
-**Why a single replica:** the Pub/Sub API delivers events independently per subscriber connection
-(no consumer groups), so two replicas double-deliver. `replicas: 1` + `Recreate` + `replay_id`
-checkpointing resumes without overlap; the `Coordinator` seam allows active-passive leader election
-later (DESIGN §13).
+**Why a single instance:** the Pub/Sub API delivers events independently per subscriber connection
+(no consumer groups), so two instances double-deliver. Run exactly one replica (with a stop-then-start
+rollout, not overlapping) + `replay_id` checkpointing to resume without overlap; the `Coordinator`
+seam allows active-passive leader election later (DESIGN §13).
 
 > **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:
 > true`** (default on Grafana Cloud; must be enabled self-hosted / in Alloy's Loki).
