@@ -55,6 +55,7 @@
 | `topics` | `list[str]` | [/event/LoginEventStream, /event/ApiAnomalyEvent] | no | Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude. |
 | `include` | `list[str]` | ["*"] | no | Operator inclusion globs applied to discovered/explicit topics. |
 | `exclude` | `list[str]` | [] | no | Operator exclusion globs applied to discovered/explicit topics. |
+| `rediscovery_interval` | `Duration` | 1h | no | How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup). |
 
 ## EventLogObjectsConfig
 
@@ -124,6 +125,8 @@
 | `max_bytes` | `int` | 1048576 | no | Flush the batch after this many bytes. |
 | `flush_interval` | `Duration` | 1s | no | Flush the batch after this much time, regardless of size. |
 | `max_line_bytes` | `int` | 262144 | no | Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables. |
+| `queue_maxsize` | `int` | 10000 | no | Entry-count bound of the internal source->sink queue. Producers block (structural backpressure) when full. |
+| `queue_max_bytes` | `int` | 268435456 | no | Approximate byte budget for queued entries (worst-case memory during a sink outage). Producers block when exceeded, even if the entry-count bound is not reached. Default 256 MiB; 0 disables byte accounting. |
 
 ## StateConfig
 
@@ -146,6 +149,7 @@
 | `log_format` | `Literal['json', 'logfmt']` | json | no | Application log output format. |
 | `health_addr` | `str` | ":8080" | no | Address to bind the health-check HTTP server. |
 | `shutdown_grace` | `Duration` | 25s | no | Grace period allowed for in-flight work to finish on shutdown. |
+| `unready_after_sink_failing` | `Duration` | 15m | no | /readyz reports 503 when Loki pushes have been failing continuously for this long (data is retried and safe, but the instance is degraded and an orchestrator should surface it). 0 disables the readiness degradation. |
 | `telemetry` | `TelemetryConfig` |  | no | OTLP metrics egress settings. |
 
 ## TelemetryConfig

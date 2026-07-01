@@ -241,6 +241,12 @@ class Metrics:
                 "sf2loki_loki_bytes_pushed", description="Total bytes pushed to Loki"
             )
         )
+        self.last_push_success_ts = _Gauge(
+            meter.create_gauge(
+                "sf2loki_last_push_success_timestamp_seconds",
+                description="Unix ts of the last successful Loki push",
+            )
+        )
         self.ingest_lag = _Gauge(
             meter.create_gauge(
                 "sf2loki_ingest_lag_seconds",
@@ -286,6 +292,15 @@ class Metrics:
             meter.create_counter(
                 "sf2loki_salesforce_api_throttled",
                 description=("Salesforce REST calls rejected with REQUEST_LIMIT_EXCEEDED, per api"),
+            )
+        )
+        self.pubsub_stream_up = _Gauge(
+            meter.create_gauge(
+                "sf2loki_pubsub_stream_up",
+                description=(
+                    "1 while a topic's subscribe stream is connected and healthy, "
+                    "0 while erroring/reconnecting, per topic"
+                ),
             )
         )
         self.watermark_ts = _Gauge(
@@ -336,6 +351,21 @@ class Metrics:
             meter.create_counter(
                 "sf2loki_eventlogfile_download_errors",
                 description="EventLogFile listing/download errors, per reason",
+            )
+        )
+        self.soql_poll_errors = _Counter(
+            meter.create_counter(
+                "sf2loki_soql_poll_errors",
+                description="Failed SOQL poll cycles, per source and object/event type",
+            )
+        )
+        self.timestamp_fallbacks = _Counter(
+            meter.create_counter(
+                "sf2loki_timestamp_fallbacks",
+                description=(
+                    "Entries whose event timestamp was missing/unparseable and a "
+                    "fallback was used, per source"
+                ),
             )
         )
         self.lines_truncated = _Counter(

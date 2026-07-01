@@ -288,6 +288,14 @@ class PubSubConfig(StrictModel):
         default_factory=list,
         description="Operator exclusion globs applied to discovered/explicit topics.",
     )
+    rediscovery_interval: Duration = Field(
+        default=timedelta(hours=1),
+        description=(
+            'How often to re-run wildcard ("*") topic discovery while running, so channels '
+            "enabled after startup are picked up without a restart. 0 disables (discovery "
+            "then runs only at startup)."
+        ),
+    )
 
 
 # SOQL identifier safety: object/field/EventType names are interpolated into
@@ -572,6 +580,23 @@ class LokiBatchConfig(StrictModel):
             "Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables."
         ),
     )
+    queue_maxsize: int = Field(
+        default=10_000,
+        ge=100,
+        description=(
+            "Entry-count bound of the internal source->sink queue. Producers block "
+            "(structural backpressure) when full."
+        ),
+    )
+    queue_max_bytes: int = Field(
+        default=268_435_456,
+        ge=0,
+        description=(
+            "Approximate byte budget for queued entries (worst-case memory during a sink "
+            "outage). Producers block when exceeded, even if the entry-count bound is not "
+            "reached. Default 256 MiB; 0 disables byte accounting."
+        ),
+    )
 
 
 class LokiConfig(StrictModel):
@@ -735,6 +760,14 @@ class ServiceConfig(StrictModel):
     shutdown_grace: Duration = Field(
         default=timedelta(seconds=25),
         description="Grace period allowed for in-flight work to finish on shutdown.",
+    )
+    unready_after_sink_failing: Duration = Field(
+        default=timedelta(minutes=15),
+        description=(
+            "/readyz reports 503 when Loki pushes have been failing continuously for this "
+            "long (data is retried and safe, but the instance is degraded and an "
+            "orchestrator should surface it). 0 disables the readiness degradation."
+        ),
     )
     telemetry: TelemetryConfig = Field(
         default_factory=TelemetryConfig, description="OTLP metrics egress settings."

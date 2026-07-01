@@ -47,6 +47,7 @@ sources:  # Event source selection and settings.
     topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
     include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
     exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
+    rediscovery_interval: 1h  # How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).
   # Use for categories you'd rather poll than stream (or that have no stream).
   # Do NOT also stream the same category.
   eventlog_objects:  # Event-object SOQL polling source.
@@ -115,6 +116,8 @@ sink:  # Log sink settings.
       max_bytes: 1048576  # Flush the batch after this many bytes.
       flush_interval: 1s  # Flush the batch after this much time, regardless of size.
       max_line_bytes: 262144  # Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
+      queue_maxsize: 10000  # Entry-count bound of the internal source->sink queue. Producers block (structural backpressure) when full.
+      queue_max_bytes: 268435456  # Approximate byte budget for queued entries (worst-case memory during a sink outage). Producers block when exceeded, even if the entry-count bound is not reached. Default 256 MiB; 0 disables byte accounting.
     labels: {environment: prod}  # Static stream labels merged onto every push (job + sf_org_id are added automatically).
     structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]  # Event fields promoted to Loki structured metadata (not stream labels).
 state:  # Checkpoint/state store settings.
@@ -126,6 +129,7 @@ service:  # Application-level service settings.
   log_format: json  # Application log output format.
   health_addr: ":8080"  # Address to bind the health-check HTTP server.
   shutdown_grace: 25s  # Grace period allowed for in-flight work to finish on shutdown.
+  unready_after_sink_failing: 15m  # /readyz reports 503 when Loki pushes have been failing continuously for this long (data is retried and safe, but the instance is degraded and an orchestrator should surface it). 0 disables the readiness degradation.
   # When ``enabled`` is false, metrics are still recorded in-process (cheap,
   # used by tests via the in-memory reader) but exported nowhere — there is no
   # Prometheus scrape endpoint; sf2loki is OTLP-push-native.
