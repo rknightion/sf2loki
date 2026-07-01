@@ -192,6 +192,20 @@ uv run python -m sf2loki --config config.example.yaml --check
 See [`docs/configuring-sources.md`](docs/configuring-sources.md) for recipes — polling arbitrary
 custom objects, ingesting login history / setup audit trail, and the either/or-per-category rule.
 
+### Presets
+
+[`examples/presets/`](examples/presets/) has ready-to-merge config fragments for common setups (merge
+the relevant keys into your `config.yaml` alongside sink/state/service — see
+[`config.example.yaml`](config.example.yaml) for the full schema):
+
+- [`custom-object-polling.yaml`](examples/presets/custom-object-polling.yaml) — SOQL-poll an
+  arbitrary custom object (e.g. `MyAudit__c`) via `sources.eventlog_objects`.
+- [`login-history.yaml`](examples/presets/login-history.yaml) — ingest login activity via
+  `LoginHistory` polling, with the `LoginEvent`/`/event/LoginEventStream`/ELF `Login` alternatives
+  shown as commented blocks (pick exactly one — they're the same overlap-guard category).
+- [`setup-audit-trail.yaml`](examples/presets/setup-audit-trail.yaml) — ingest admin/config change
+  history via `SetupAuditTrail` polling.
+
 ### Metrics (OTLP)
 
 All metrics push via OTLP/HTTP. Set `service.telemetry.enabled: true` and `service.telemetry.endpoint`

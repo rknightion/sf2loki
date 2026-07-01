@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
@@ -41,11 +42,28 @@ from typing import Protocol
 from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
 from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.eventlogfile_client import EventLogFileMeta
+from sf2loki.salesforce.eventlogfile_client import EventLogFileError, EventLogFileMeta
 from sf2loki.shaping import extract_timestamp, promote_labels, route_fields
 from sf2loki.state.base import CheckpointStore
 
 _MAX_CARRIED_IDS = 200
+
+_log = logging.getLogger(__name__)
+
+
+def _parse_created(created_date: str) -> datetime | None:
+    """Parse a Salesforce CreatedDate literal to an aware datetime, or None.
+
+    Handles both the SOQL ``+0000`` offset form and an ISO ``Z`` form (a value
+    echoed back from a checkpoint). Returns None on anything unparseable so the
+    caller can fall back to "process it" (never skip/abandon on a parse failure).
+    """
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        with contextlib.suppress(ValueError):
+            return datetime.strptime(created_date, fmt)
+    with contextlib.suppress(ValueError):
+        return datetime.fromisoformat(created_date.replace("Z", "+00:00"))
+    return None
 
 
 class _EventLogFileClientLike(Protocol):
@@ -144,11 +162,57 @@ class EventLogFileSource:
         seen = set(current_ids)
         files = [f for f in files if f.id not in seen]
 
+        now = datetime.now(UTC)
+        settle_window = self._cfg.settle_window
+        download_max_age = self._cfg.download_max_age
+
         for file_meta in files:
             if stop.is_set():
                 return
 
-            rows = await self._client.download(file_meta)
+            created = _parse_created(file_meta.created_date)
+
+            # Settle gate: an Hourly file created within the settle window may still
+            # be half-written; skip it this cycle WITHOUT advancing `current` so it
+            # is re-listed (and settled) next cycle. Disabled when settle_window==0.
+            if settle_window and created is not None and (now - created) < settle_window:
+                _log.debug(
+                    "eventlogfile: skipping unsettled file %s (created %s, within %s)",
+                    file_meta.id,
+                    file_meta.created_date,
+                    settle_window,
+                )
+                continue
+
+            try:
+                rows = await self._client.download(file_meta)
+            except EventLogFileError as exc:
+                # A transient download failure (e.g. body-not-ready 404, or a 5xx)
+                # must NOT crash the connector (ko.md §7.4). The client already
+                # incremented eventlogfile_download_errors. Skip the file WITHOUT
+                # advancing `current`, so it is retried next cycle — UNLESS it is
+                # older than download_max_age, in which case treat it as gone and
+                # advance past it so it can't wedge the watermark forever.
+                age = (now - created) if created is not None else None
+                if age is not None and age > download_max_age:
+                    _log.warning(
+                        "eventlogfile: abandoning file %s after download failure "
+                        "(created %s, older than download_max_age %s): %s",
+                        file_meta.id,
+                        file_meta.created_date,
+                        download_max_age,
+                        exc,
+                    )
+                    current_last_created = file_meta.created_date
+                    current_ids = [*current_ids, file_meta.id][-_MAX_CARRIED_IDS:]
+                else:
+                    _log.warning(
+                        "eventlogfile: skipping file %s after download failure "
+                        "(will retry next cycle): %s",
+                        file_meta.id,
+                        exc,
+                    )
+                continue
             if not rows:
                 # Zero-row files contribute nothing to the checkpoint (see module
                 # docstring); skip without advancing `current`.

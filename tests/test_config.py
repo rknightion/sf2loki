@@ -196,6 +196,20 @@ def test_eventlogfile_config_defaults() -> None:
     assert cfg.lookback == timedelta(hours=24)
     assert cfg.timestamp_column == "TIMESTAMP_DERIVED"
     assert cfg.page_size == 1000
+    # Resiliency knobs (ko.md §7.4): settle disabled by default; abandon after 24h.
+    assert cfg.settle_window == timedelta(0)
+    assert cfg.download_max_age == timedelta(hours=24)
+
+
+def test_eventlogfile_resiliency_durations_parse() -> None:
+    cfg = EventLogFileConfig(
+        enabled=True,
+        event_types=["Login"],
+        settle_window="5m",  # type: ignore[arg-type]
+        download_max_age="48h",  # type: ignore[arg-type]
+    )
+    assert cfg.settle_window == timedelta(minutes=5)
+    assert cfg.download_max_age == timedelta(hours=48)
 
 
 def test_eventlogfile_rich_per_type_objects() -> None:

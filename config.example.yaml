@@ -69,6 +69,10 @@ sources:
     lookback: 24h                                 # initial window on first run (no checkpoint = "from now")
     timestamp_column: TIMESTAMP_DERIVED           # per-row event time column
     page_size: 1000                              # SOQL LIMIT for the file-listing query
+    settle_window: 0s                             # skip files created within this grace window (avoids
+                                                  # half-written Hourly CSVs); 0 = off. Use a few min for Hourly.
+    download_max_age: 24h                          # abandon a file whose body keeps 404ing once older than
+                                                  # this, so a permanently-missing file can't wedge the checkpoint
 
 sink:
   type: loki

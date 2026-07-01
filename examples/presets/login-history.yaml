@@ -1,0 +1,86 @@
+# Preset: ingest Salesforce login activity.
+#
+# Login data is reachable multiple ways — pick exactly ONE per the
+# either/or-per-category overlap rule (see docs/configuring-sources.md §1/§3):
+#
+#   (a) SOQL-poll the standard `LoginHistory` object (this preset, below) —
+#       no Shield/Event Monitoring entitlement required, just standard API
+#       access. Good default when you don't have (or don't need) Event
+#       Monitoring.
+#   (b) SOQL-poll `LoginEvent` (a Real-Time Event Monitoring object) or
+#       stream /event/LoginEventStream via sources.pubsub — typically
+#       requires a Shield/Event Monitoring entitlement.
+#   (c) Ingest the `Login` EventLogFile EventType via sources.eventlogfile —
+#       also part of standard Event Monitoring, same underlying data as (b)
+#       in a different delivery mechanism.
+#
+# LoginHistory, LoginEvent/LoginEventStream, and ELF `Login` all map to the
+# SAME overlap-guard category ("login") — enabling more than one of them
+# trips the fail-fast startup guard.
+#
+# This is a fragment, not a runnable standalone file — merge into config.yaml
+# (see config.example.yaml for the full schema, auth, sink, state, service).
+
+salesforce:
+  environment: production
+  auth_mode: jwt_bearer
+  client_id: ${SF_CLIENT_ID}
+  username: svc@example.com
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+
+sources:
+  # (a) SOQL-poll LoginHistory — the preset in effect here.
+  eventlog_objects:
+    enabled: true
+    objects:
+      - name: LoginHistory
+        timestamp_field: LoginTime   # LoginHistory's event-time field
+        poll_interval: 5m
+        lookback: 1h
+
+  # (b) Alternative — real-time streamed login events (needs Shield/Event
+  # Monitoring). Do NOT enable alongside (a) or (c) above; pick one.
+  # pubsub:
+  #   enabled: true
+  #   topics:
+  #     - /event/LoginEventStream
+
+  # (b-polled) Alternative — SOQL-poll LoginEvent instead of streaming it.
+  # eventlog_objects:
+  #   enabled: true
+  #   objects:
+  #     - name: LoginEvent
+  #       timestamp_field: EventDate   # the default
+  #       poll_interval: 5m
+  #       lookback: 1h
+
+  # (c) Alternative — ELF `Login` EventType (standard Event Monitoring).
+  # eventlogfile:
+  #   enabled: true
+  #   interval: Daily          # Daily is the safe default; Hourly is
+  #                             # advanced and needs the Event Monitoring
+  #                             # add-on (fresher files, shorter retention
+  #                             # without Shield)
+  #   event_types:
+  #     - Login
+  #   poll_interval: 1h
+  #   lookback: 24h
+  #   settle_window: 5m         # skip files created within this grace window,
+  #                             # so a half-written Hourly file isn't pulled
+  #                             # mid-write (default 0s = off; use for Hourly)
+  #   download_max_age: 24h     # abandon a file whose body keeps failing to
+  #                             # download once it's older than this, so a
+  #                             # permanently-missing file can't wedge the
+  #                             # checkpoint (default 24h)
+
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    structured_metadata_fields:
+      - user_id
+      - username
+      - source_ip

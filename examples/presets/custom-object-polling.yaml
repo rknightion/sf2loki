@@ -1,0 +1,49 @@
+# Preset: poll an arbitrary custom Salesforce object via SOQL.
+#
+# sources.eventlog_objects is NOT limited to Salesforce's built-in EventLog
+# objects — it polls any queryable sObject on a timestamp watermark, so it
+# doubles as general-purpose custom-object log collection. This preset polls
+# a custom object `MyAudit__c`; swap in your own object + field names.
+#
+# See docs/configuring-sources.md §2 for the full recipe (query shape, the
+# FIELDS(ALL) LIMIT 200 cap, and BigObject/EventStore caveats).
+#
+# This is a fragment, not a runnable standalone file — merge these keys into
+# your config.yaml (see config.example.yaml for the full schema, auth, sink,
+# state, and service sections).
+
+salesforce:
+  environment: production
+  auth_mode: jwt_bearer
+  client_id: ${SF_CLIENT_ID}
+  username: svc@example.com
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+
+sources:
+  eventlog_objects:
+    enabled: true
+    objects:
+      # name: the sObject API name (custom objects end in __c).
+      # timestamp_field: a field that only ever increases (CreatedDate or
+      #   LastModifiedDate are the usual picks) — it's the watermark this
+      #   source polls on. EventDate (the default) only exists on built-in
+      #   EventLog objects, so custom objects MUST set this explicitly.
+      # poll_interval: how often to re-query (duration shorthand: 5m, 1h30m).
+      # lookback: initial query window on first run (no checkpoint yet).
+      - name: MyAudit__c
+        timestamp_field: LastModifiedDate
+        poll_interval: 5m
+        lookback: 1h
+
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    # Add any custom-object fields you want filterable-but-not-a-label here
+    # (eventlog_objects has no per-object override — this global list applies).
+    structured_metadata_fields:
+      - user_id
+      - username

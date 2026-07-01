@@ -54,6 +54,11 @@ extend-exclude = ["**/_generated/**"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# Dashboard generator: long PromQL query strings and target() calls read better
+# on one line than force-wrapped; line-length is not meaningful for this script.
+"deploy/grafana/gen_dashboard.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.14"
 strict = true

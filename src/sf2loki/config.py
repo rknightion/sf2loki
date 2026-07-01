@@ -238,6 +238,14 @@ class EventLogFileConfig(BaseModel):
     lookback: Duration = timedelta(hours=24)  # initial window when no checkpoint
     timestamp_column: str = "TIMESTAMP_DERIVED"  # per-row timestamp column
     page_size: int = 1000  # SOQL LIMIT for the file-listing query
+    # Resiliency knobs for the (unstable) Hourly path — ko.md §7.4.
+    # settle_window: skip files whose CreatedDate is newer than now-settle_window,
+    # so we don't pull a half-written hourly CSV. 0 disables (safe for Daily).
+    settle_window: Duration = timedelta(0)
+    # download_max_age: a file whose body keeps failing to download and is older
+    # than this is abandoned (checkpoint advances past it) so a permanently-missing
+    # file can't wedge the watermark forever. Files younger than this are retried.
+    download_max_age: Duration = timedelta(hours=24)
 
     @model_validator(mode="after")
     def _require_event_types_when_enabled(self) -> EventLogFileConfig:

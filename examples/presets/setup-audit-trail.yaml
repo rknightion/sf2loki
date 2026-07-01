@@ -1,0 +1,45 @@
+# Preset: ingest Salesforce admin/config change history via SetupAuditTrail.
+#
+# SetupAuditTrail is a standard queryable object — no Shield/Event Monitoring
+# entitlement required, just standard API access. It records setup/config
+# changes (permission changes, metadata edits, admin actions, ...).
+#
+# This is a fragment, not a runnable standalone file — merge into config.yaml
+# (see config.example.yaml for the full schema, auth, sink, state, service).
+# See docs/configuring-sources.md §3 for the full recipe.
+
+salesforce:
+  environment: production
+  auth_mode: jwt_bearer
+  client_id: ${SF_CLIENT_ID}
+  username: svc@example.com
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+
+sources:
+  eventlog_objects:
+    enabled: true
+    objects:
+      - name: SetupAuditTrail
+        timestamp_field: CreatedDate   # SetupAuditTrail's event-time field
+        poll_interval: 5m
+        lookback: 1h
+
+  # Note: unlike login data, SetupAuditTrail has no ELF/streaming equivalent
+  # in the overlap-guard's category map today, so there's no either/or choice
+  # here — SOQL polling is the only channel. If you also want ELF EventLogFile
+  # ingestion for OTHER categories (e.g. API, Report) alongside this, add an
+  # eventlogfile block for those disjoint types; see
+  # examples/presets/login-history.yaml for the commented ELF shape,
+  # including the two resiliency keys (settle_window, download_max_age)
+  # for sources.eventlogfile.
+
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    structured_metadata_fields:
+      - user_id
+      - username

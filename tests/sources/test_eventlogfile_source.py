@@ -16,7 +16,7 @@ from typing import Literal
 import pytest
 
 from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
-from sf2loki.salesforce.eventlogfile_client import EventLogFileMeta
+from sf2loki.salesforce.eventlogfile_client import EventLogFileError, EventLogFileMeta
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.state.file_store import FileCheckpointStore
 
@@ -26,10 +26,15 @@ from sf2loki.state.file_store import FileCheckpointStore
 
 @dataclass
 class FakeEventLogFileClient:
-    """Duck-typed stand-in for EventLogFileClient with deterministic responses."""
+    """Duck-typed stand-in for EventLogFileClient with deterministic responses.
+
+    Ids listed in ``errors`` raise :class:`EventLogFileError` on ``download`` (as
+    the real client does on a non-2xx LogFile response, e.g. a body-not-ready 404).
+    """
 
     files: list[EventLogFileMeta]
     rows_by_id: dict[str, list[dict[str, str]]]
+    errors: set[str] = field(default_factory=set)
     list_calls: list[tuple[str, str, str, int]] = field(default_factory=list)
     download_calls: list[str] = field(default_factory=list)
 
@@ -41,7 +46,14 @@ class FakeEventLogFileClient:
 
     async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]:
         self.download_calls.append(file_meta.id)
+        if file_meta.id in self.errors:
+            raise EventLogFileError(f"download failed for {file_meta.id}: HTTP 404")
         return self.rows_by_id.get(file_meta.id, [])
+
+
+def _created_ago(delta: timedelta) -> str:
+    """A CreatedDate literal (Salesforce ``+0000`` style) *delta* before now."""
+    return (datetime.now(UTC) - delta).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
 
 def make_file_meta(
@@ -70,6 +82,8 @@ def make_elf_cfg(
     lookback: timedelta = timedelta(hours=24),
     page_size: int = 1000,
     timestamp_column: str = "TIMESTAMP_DERIVED",
+    settle_window: timedelta = timedelta(0),
+    download_max_age: timedelta = timedelta(hours=24),
 ) -> EventLogFileConfig:
     return EventLogFileConfig(
         enabled=True,
@@ -79,6 +93,8 @@ def make_elf_cfg(
         lookback=lookback,
         timestamp_column=timestamp_column,
         page_size=page_size,
+        settle_window=settle_window,
+        download_max_age=download_max_age,
     )
 
 
@@ -402,3 +418,120 @@ async def test_zero_row_file_contributes_nothing_to_checkpoint(
 
     last_checkpoint = json.loads(entries[-1].checkpoint.value)
     assert last_checkpoint["ids"] == ["f1", "f2"]
+
+
+# ---------------------------------------------------------------------------
+# Resiliency: transient download failures must not crash the connector, and the
+# checkpoint must not advance past a file we couldn't read (ko.md §7.4).
+
+
+@pytest.mark.asyncio
+async def test_download_failure_does_not_crash_and_skips_file(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A transient download error (e.g. body-not-ready 404) is caught: the file is
+    skipped, later files still process, and the connector does not crash."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
+    f_bad = make_file_meta(id="f_bad", created_date=_created_ago(timedelta(hours=2)))
+    f3 = make_file_meta(id="f3", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f1, f_bad, f3],
+        rows_by_id={
+            "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"}],
+            "f3": [{"TIMESTAMP_DERIVED": "20260630030000.000", "ROW": "c"}],
+        },
+        errors={"f_bad"},
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    # f1 and f3 emitted; f_bad produced nothing and did not raise.
+    assert len(entries) == 2
+    assert client.download_calls == ["f1", "f_bad", "f3"]
+
+
+@pytest.mark.asyncio
+async def test_transient_download_failure_does_not_advance_checkpoint_past_file(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A recent (within download_max_age) failing file is skipped WITHOUT folding its
+    id into the carried checkpoint, so it is retried on the next cycle."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
+    f_bad = make_file_meta(id="f_bad", created_date=_created_ago(timedelta(hours=2)))
+    f3 = make_file_meta(id="f3", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f1, f_bad, f3],
+        rows_by_id={
+            "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "f3": [{"TIMESTAMP_DERIVED": "20260630030000.000"}],
+        },
+        errors={"f_bad"},
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    # The failed (recent) file's id must NOT be recorded, so it will be retried.
+    final = json.loads(entries[-1].checkpoint.value)
+    assert final["ids"] == ["f1", "f3"]
+    assert "f_bad" not in final["ids"]
+
+
+@pytest.mark.asyncio
+async def test_persistently_failing_old_file_is_abandoned_past_max_age(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A failing file older than download_max_age is abandoned: its id IS folded into
+    the checkpoint (and the watermark advances) so it can't wedge the watermark forever."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f_ancient = make_file_meta(id="f_ancient", created_date=_created_ago(timedelta(hours=48)))
+    f_recent = make_file_meta(id="f_recent", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f_ancient, f_recent],
+        rows_by_id={"f_recent": [{"TIMESTAMP_DERIVED": "20260630030000.000"}]},
+        errors={"f_ancient"},
+    )
+    cfg = make_elf_cfg(download_max_age=timedelta(hours=24))
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    assert len(entries) == 1  # only f_recent has rows
+    final = json.loads(entries[-1].checkpoint.value)
+    # The abandoned ancient file is recorded so it won't be retried indefinitely.
+    assert final["ids"] == ["f_ancient", "f_recent"]
+    assert final["last_created"] == f_recent.created_date
+
+
+@pytest.mark.asyncio
+async def test_settle_window_skips_too_fresh_files(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Files created within settle_window are not downloaded this cycle (avoids pulling
+    half-written hourly files); older files still process."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f_old = make_file_meta(id="f_old", created_date=_created_ago(timedelta(hours=2)))
+    f_fresh = make_file_meta(id="f_fresh", created_date=_created_ago(timedelta(minutes=1)))
+    client = FakeEventLogFileClient(
+        files=[f_old, f_fresh],
+        rows_by_id={
+            "f_old": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "f_fresh": [{"TIMESTAMP_DERIVED": "20260630020000.000"}],
+        },
+    )
+    cfg = make_elf_cfg(settle_window=timedelta(minutes=10))
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    stop = asyncio.Event()
+    entries = [e async for e in source.events(store, stop)]
+
+    # f_fresh is within the 10m settle window: not downloaded, not recorded.
+    assert client.download_calls == ["f_old"]
+    assert len(entries) == 1
+    final = json.loads(entries[-1].checkpoint.value)
+    assert final["ids"] == ["f_old"]
+    assert "f_fresh" not in final["ids"]
