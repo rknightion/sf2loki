@@ -1,0 +1,378 @@
+# name,industry,website,description  — synthetic company pool for generate_activity.py
+Zenith Circuits Manufacturing,Electronics,https://zenith-circuits-apac.com,Advanced semiconductor design and fabrication hub
+Meridian Harvest Solutions,Agriculture,https://meridian-harvest.jp,Precision agriculture technology and crop optimization
+Quantum Bridge Consulting,Consulting,https://quantum-bridge-sg.io,Digital transformation and enterprise modernization advisory
+Phoenix Medical Innovations,Healthcare,https://phoenix-medical.com.au,Biomedical device research and clinical testing
+Titan Industrial Systems,Manufacturing,https://titan-industrial-apac.com,Heavy machinery and precision engineering solutions
+Aurora Financial Group,Finance,https://aurora-financial-sg.com,Investment management and wealth advisory services
+Nexus Energy Solutions,Energy,https://nexus-energy.in,Renewable energy infrastructure and grid optimization
+Cornerstone Education Ventures,Education,https://cornerstone-edu-asia.io,Online learning platforms and skill development
+Velocity Logistics Networks,Transportation,https://velocity-logistics-apac.com,Supply chain optimization and last-mile delivery
+Harmony Biotech Research,Biotechnology,https://harmony-biotech.jp,Pharmaceutical compound research and development
+Stellar Communications,Telecommunications,https://stellar-comms-asia.com,Network infrastructure and broadband services
+Ember Construction Group,Construction,https://ember-construction-apac.io,Commercial real estate development and project management
+Vertex Analytics Intelligence,Technology,https://vertex-analytics.sg,Data science and business intelligence solutions
+Pinnacle Insurance Partners,Insurance,https://pinnacle-insurance-apac.com,Risk management and policy underwriting services
+Catalyst Media Productions,Media,https://catalyst-media-asia.jp,Digital content creation and entertainment
+Riviera Hospitality Ventures,Hospitality,https://riviera-hospitality.com.au,Boutique hotel chains and resort management
+Paramount Engineering Services,Engineering,https://paramount-engineering-apac.io,Infrastructure design and structural consulting
+Silverline Retail Ventures,Retail,https://silverline-retail-asia.com,Omnichannel retail and e-commerce platform
+Velocity Chemical Industries,Chemicals,https://velocity-chemicals.in,Specialty chemical manufacturing and distribution
+Horizon Banking Solutions,Banking,https://horizon-banking-apac.sg,Digital banking and fintech services
+Beacon Manufacturing Corp,Manufacturing,https://beacon-mfg-apac.jp,Consumer electronics and appliance production
+Spectrum Communications Tech,Communications,https://spectrum-comms.com,Unified communications and collaboration tools
+Prism Healthcare Systems,Healthcare,https://prism-health-asia.io,Hospital networks and patient care management
+Fortress Security Solutions,Technology,https://fortress-security-apac.com,Cybersecurity and threat intelligence platforms
+Momentum Entertainment Group,Entertainment,https://momentum-entertainment.com.au,Live events and digital streaming services
+Catalyst Utilities Management,Utilities,https://catalyst-utilities-apac.in,Power distribution and infrastructure management
+Synergy Software Solutions,Technology,https://synergy-software-apac.io,Enterprise software and cloud platforms
+Landmark Construction Partners,Construction,https://landmark-construction-asia.sg,Infrastructure projects and urban development
+Valor Financial Services,Finance,https://valor-financial.jp,Corporate finance and investment banking
+Velocity Manufacturing Ltd,Manufacturing,https://velocity-mfg.com,Precision components and industrial parts
+Solstice Energy Group,Energy,https://solstice-energy-apac.com.au,Oil and gas exploration and production
+Apex Consulting Partners,Consulting,https://apex-consulting-apac.io,Management consulting and business strategy
+Emerald Biotechnology Group,Biotechnology,https://emerald-biotech.in,Gene therapy and molecular diagnostics
+Brightstone Agriculture,Agriculture,https://brightstone-agri-asia.jp,Organic farming and sustainable agriculture
+Nova Banking Corp,Banking,https://nova-banking-apac.sg,Investment banking and capital markets
+Stellar Retail Group,Retail,https://stellar-retail-apac.com,Fashion retail and luxury goods distribution
+Compass Engineering Systems,Engineering,https://compass-engineering.au,Civil engineering and infrastructure design
+Harmony Communications Network,Communications,https://harmony-comms-asia.io,Telecommunications infrastructure and services
+Prism Manufacturing Systems,Manufacturing,https://prism-mfg.jp,Smart manufacturing and automation solutions
+Velocity Healthcare Network,Healthcare,https://velocity-health-apac.com.au,Primary care clinics and health services
+Sentinel Insurance Group,Insurance,https://sentinel-insurance-apac.io,Commercial insurance and claims processing
+Quantum Education Services,Education,https://quantum-edu-apac.sg,Corporate training and workforce development
+Zenith Hospitality Group,Hospitality,https://zenith-hospitality-asia.com,Resort chains and event venue management
+Pinnacle Media Networks,Media,https://pinnacle-media-apac.in,Broadcasting and digital media distribution
+Fortress Chemical Solutions,Chemicals,https://fortress-chemical-apac.jp,Industrial chemical manufacturing
+Beacon Energy Resources,Energy,https://beacon-energy-apac.com,Renewable energy and solar installations
+Momentum Transportation Group,Transportation,https://momentum-transport-asia.io,Freight forwarding and cargo management
+Catalyst Electronics Manufacturing,Electronics,https://catalyst-electronics-apac.sg,Consumer electronics assembly and testing
+Riviera Education Foundation,Education,https://riviera-education-apac.com.au,International schools and educational programs
+Nexus Consulting Advisors,Consulting,https://nexus-consulting-apac.io,Strategy consulting and organizational transformation
+Vertex Hospitality Corporation,Hospitality,https://vertex-hospitality-asia.jp,Business hotel chains and conference venues
+Aurora Utilities Infrastructure,Utilities,https://aurora-utilities-apac.in,Smart grid and energy management systems
+Compass Financial Solutions,Finance,https://compass-financial-apac.com,Corporate finance advisory and treasury services
+Prism Entertainment Productions,Entertainment,https://prism-entertainment-asia.com.au,Film production and digital content creation
+Merkels Industriewerke,Manufacturing,https://merkels-industriewerke.de,Industrial machinery and precision components
+Brunner Consulting GmbH,Consulting,https://brunner-consulting.at,Business strategy and digital transformation
+Alpengold AG,Energy,https://alpengold.ch,Precious metals and mineral extraction
+Stadtwerke Leipzig,Utilities,https://stadtwerke-leipzig.de,Municipal energy and water services
+Hoffmann Pharmazie,Healthcare,https://hoffmann-pharmazie.de,Pharmaceutical research and development
+Richter Bau,Construction,https://richter-bau.at,Commercial and residential construction
+Verbundbank Austria,Banking,https://verbundbank.at,Corporate and retail banking services
+Schneider Logistik,Transportation,https://schneider-logistik.de,Supply chain and freight logistics
+Adler Electronics,Electronics,https://adler-electronics.ch,Consumer electronics manufacturing
+Garten Consulting,Consulting,https://garten-consulting.de,Management consulting and advisory
+Vogel Versicherung,Insurance,https://vogel-versicherung.at,Property and casualty insurance
+Zukunft Technologies,Technology,https://zukunft-tech.de,Software development and IT services
+Bergmann Energies,Energy,https://bergmann-energies.ch,Renewable energy solutions
+Dachstein Textiles,Manufacturing,https://dachstein-textiles.at,Textile production and design
+Eckstein Communications,Communications,https://eckstein-comm.de,Corporate communications and PR
+Friedmann Finance,Finance,https://friedmann-finance.de,Investment and wealth management
+Glasmann Retail,Retail,https://glasmann-retail.ch,Department store and specialty retail
+Hirschfeld Education,Education,https://hirschfeld-edu.at,Educational technology and training
+Kirchner Agricultural,Agriculture,https://kirchner-ag.de,Grain and livestock farming
+Lammers Engineering,Engineering,https://lammers-eng.de,Mechanical and civil engineering
+Maurer Media,Media,https://maurer-media.at,Publishing and digital media
+Neumeister Transportation,Transportation,https://neumeister-trans.de,Public transit operator
+Ochsner Chemicals,Chemicals,https://ochsner-chemicals.ch,Industrial and agricultural chemicals
+Perlmutter Telecommunications,Telecommunications,https://perlmutter-tel.de,Mobile and broadband services
+Rothen Biotechnology,Biotechnology,https://rothen-biotech.at,Genetic engineering research
+Salzburg Entertainment,Entertainment,https://salzburg-ent.at,Event production and venue management
+Tesler Banking,Banking,https://tesler-bank.de,Digital banking platform
+Utzinger Hospitality,Hospitality,https://utzinger-hospitality.ch,Hotel and restaurant group
+Vollmer Consulting,Consulting,https://vollmer-consult.de,IT infrastructure consulting
+Waldmann Technology,Technology,https://waldmann-tech.at,Cybersecurity solutions
+Xenner Agriculture,Agriculture,https://xenner-ag.ch,Organic farming cooperative
+Yseult Manufacturing,Manufacturing,https://yseult-mfg.de,Automotive parts supplier
+Zimmerman Education,Education,https://zimmerman-edu.de,University and research institution
+Abrams Engineering,Engineering,https://abrams-eng.at,Bridge and highway construction
+Bauer Healthcare,Healthcare,https://bauer-health.de,Hospital network operator
+Cordell Energy,Energy,https://cordell-energy.ch,Wind and solar power generation
+Delbruck Finance,Finance,https://delbruck-fin.de,Asset management firm
+Eberhard Insurance,Insurance,https://eberhard-ins.at,Life and health insurance
+Faber Retail,Retail,https://faber-retail.de,Electronics and gadgets retailer
+Gmeiner Biotechnology,Biotechnology,https://gmeiner-biotech.ch,Pharmaceutical development
+Hartmann Communications,Communications,https://hartmann-comm.at,Telecommunications and ISP
+Ilseder Chemicals,Chemicals,https://ilseder-chem.de,Specialty chemical manufacturing
+Jakobsen Construction,Construction,https://jakobsen-const.de,Infrastructure and building
+Keller Hospitality,Hospitality,https://keller-hospitality.at,Boutique hotel collection
+Linder Utilities,Utilities,https://linder-utilities.de,District heating services
+Maetzler Media,Media,https://maetzler-media.ch,Broadcasting and streaming platform
+Neumann Transportation,Transportation,https://neumann-trans.at,Courier and delivery service
+Obermeier Technology,Technology,https://obermeier-tech.de,Cloud computing provider
+Pfeiffer Entertainment,Entertainment,https://pfeiffer-ent.de,Concert hall and performance venue
+Quandt Consulting,Consulting,https://quandt-consult.ch,Management and strategy advisory
+Reisman Agriculture,Agriculture,https://reisman-ag.de,Dairy production cooperative
+Sieber Electronics,Electronics,https://sieber-elec.at,Industrial automation equipment
+Tegethoff Manufacturing,Manufacturing,https://tegethoff-mfg.de,Precision metal fabrication
+Ueberall Banking,Banking,https://ueberall-bank.ch,Community savings bank
+Verhoeven Engineering,Engineering,https://verhoeven-eng.de,Environmental and civil engineering
+Wickert Healthcare,Healthcare,https://wickert-health.de,Private clinic and diagnostic center
+Nexo Agricola SA,Agriculture,https://nexo-agricola.com.br,Sustainable farm solutions and crop optimization
+Solaris Energia,Energy,https://solaris-energia.mx,Renewable energy distribution across Mexico
+Primus Consultoria,Consulting,https://primus-consultoria.com.br,Strategic business advisory services
+Bancor Financiero,Banking,https://bancor-financiero.es,Financial services and credit solutions
+Techvision Labs,Technology,https://techvision-labs.io,Cloud computing and digital infrastructure
+Construccion Verde,Construction,https://construccion-verde.mx,Eco-friendly building and infrastructure
+Medica Salud SA,Healthcare,https://medica-salud.com.br,Hospital and medical clinic network
+Industrias Quimicas,Chemicals,https://industrias-quimicas.es,Specialty chemical manufacturing
+Telecom Hispano,Telecommunications,https://telecom-hispano.es,Mobile and broadband services
+Innovatech Industria,Manufacturing,https://innovatech-industria.mx,Advanced manufacturing solutions
+Educare Online,Education,https://educare-online.com.br,Digital learning platform for universities
+Seguros del Sur,Insurance,https://seguros-del-sur.com.ar,Insurance products and claims management
+Harvest Solutions,Agriculture,https://harvest-solutions.com.br,Agricultural equipment rental services
+Electro Innovations,Electronics,https://electro-innovations.mx,Consumer electronics distribution
+Porto Logistics,Transportation,https://porto-logistics.com.br,Cargo and shipping logistics
+Mercantil Retail,Retail,https://mercantil-retail.es,Department store chain
+Media Publicitaria,Media,https://media-publicitaria.com.ar,Advertising and marketing agency
+Sierra Mineria,Energy,https://sierra-mineria.com.ar,Mineral extraction and processing
+Hoteles Premium,Hospitality,https://hoteles-premium.mx,Luxury hotel chain management
+Biotec Research,Biotechnology,https://biotec-research.com.br,Pharmaceutical research firm
+Ingenieros Civiles,Engineering,https://ingenieros-civiles.es,Civil engineering and design
+Entretenimiento Media,Entertainment,https://entretenimiento-media.pt,Music and film production
+Utilities Agua,Utilities,https://utilities-agua.mx,Water treatment and distribution
+Comunicaciones Digital,Communications,https://comunicaciones-digital.es,Digital communications platform
+Capital Venture,Finance,https://capital-venture.com.br,Private equity investment firm
+Agrex Trading,Agriculture,https://agrex-trading.com.ar,Agricultural commodity trading
+Energia Solar,Energy,https://energia-solar.es,Solar panel installation services
+Nexus Digital,Technology,https://nexus-digital.mx,Software development and consulting
+Clinica Integral,Healthcare,https://clinica-integral.pt,Multi-specialty medical services
+Metalurgica Hispana,Manufacturing,https://metalurgica-hispana.es,Steel and metal fabrication
+Teleport Express,Transportation,https://teleport-express.com.br,Courier and delivery services
+Retail Mega,Retail,https://retail-mega.mx,Supermarket and groceries
+Publicidad Creativa,Media,https://publicidad-creativa.com.ar,Creative advertising studio
+Seguros Vida,Insurance,https://seguros-vida.es,Life and health insurance
+Farmalab Iberia,Biotechnology,https://farmalab-iberia.pt,Drug development and testing
+Arquitectos Modernos,Engineering,https://arquitectos-modernos.mx,Architectural design firm
+Cineplex Entertainment,Entertainment,https://cineplex-entertainment.com.br,Cinema chains
+Telecom Brasil,Telecommunications,https://telecom-brasil.com.br,Broadband internet provider
+Quimica Industrial,Chemicals,https://quimica-industrial.mx,Industrial chemical production
+Agua Potable,Utilities,https://agua-potable.es,Municipal water utility
+Consultoría Fiscal,Consulting,https://consultor-fiscal.com.ar,Tax and accounting advisory
+Banco Latinoamericano,Banking,https://banco-latinoamericano.es,Commercial and retail banking
+Electronica Consumer,Electronics,https://electronica-consumer.pt,Personal electronics retailer
+Construccion Obras,Construction,https://construccion-obras.com.br,General contracting and infrastructure
+Agronomia Andina,Agriculture,https://agronomia-andina.com.ar,Crop science and farming technology
+Escuela Digital,Education,https://escuela-digital.mx,Online technical training institute
+Fabrica Textil,Manufacturing,https://fabrica-textil.es,Textile production and design
+Logistica Rapida,Transportation,https://logistica-rapida.pt,Third-party logistics services
+Tienda Premium,Retail,https://tienda-premium.com.br,Fashion and clothing retailer
+Agencia Prensa,Media,https://agencia-prensa.mx,News agency and journalism services
+Zaraq Innovations,Technology,https://zaraq-innovations.io,Digital transformation solutions for enterprise clients across MENA
+Bahar Energy Solutions,Energy,https://bahar-energy.ae,Renewable energy consulting and implementation services
+Noor Manufacturing,Manufacturing,https://noor-manufacturing.com.ae,Precision industrial components and assembly operations
+Shams Finance Group,Finance,https://shams-finance.ae,Investment management and wealth advisory
+Kahlij Trading,Retail,https://kahlij-trading.com.sa,Regional consumer goods distribution network
+Qasr Engineering,Engineering,https://qasr-eng.com.sa,Heavy infrastructure and civil engineering projects
+Amara Healthcare,Healthcare,https://amara-healthcare.ae,Diagnostic and wellness clinic services
+Diwaan Communications,Communications,https://diwaan-comms.ae,Business telephony and connectivity solutions
+Petra Construction,Construction,https://petra-construction.com.sa,Commercial real estate development
+Layla Education,Education,https://layla-education.ae,Private international school network
+Safa Consulting,Consulting,https://safa-consulting.com.sa,Management strategy and organizational development
+Reef Agriculture,Agriculture,https://reef-agriculture.ae,Hydroponic farming and agritech
+Fikra Media,Media,https://fikra-media.com.eg,News and digital content publishing
+Rimal Insurance,Insurance,https://rimal-insurance.com.sa,Health and property insurance underwriting
+Nabat Chemicals,Chemicals,https://nabat-chemicals.com.eg,Industrial adhesives and coating manufacturing
+Talal Electronics,Electronics,https://talal-electronics.com.tr,Consumer electronics retail and service centers
+Hana Hospitality,Hospitality,https://hana-hospitality.ae,Hotel and resort management company
+Ruwad Transportation,Transportation,https://ruwad-transport.com.sa,Logistics and freight services
+Zain Banking,Banking,https://zain-banking.ae,Commercial lending and deposit services
+Kawthar Biotechnology,Biotechnology,https://kawthar-biotech.com.eg,Pharmaceutical research and development
+Wusta Telecommunications,Telecommunications,https://wusta-telecom.com.sa,Mobile and broadband network operator
+Eqbal Utilities,Utilities,https://eqbal-utilities.com.ae,Water treatment and distribution services
+Sukar Entertainment,Entertainment,https://sukar-entertainment.com.eg,Music production and event management
+Faris Technology,Technology,https://faris-tech.io,Cloud infrastructure and DevOps consulting
+Samer Manufacturing,Manufacturing,https://samer-mfg.com.tr,Textile and apparel production facility
+Aida Finance,Finance,https://aida-finance.com.sa,Retail banking and microfinance
+Jalal Construction,Construction,https://jalal-construction.com.sa,Architectural design and building
+Lina Education,Education,https://lina-education.co.za,Online learning platform and tutoring
+Bashar Consulting,Consulting,https://bashar-consulting.com.eg,IT transformation and digital strategy
+Thuraya Energy,Energy,https://thuraya-energy.ae,Oil and gas services contractor
+Samira Healthcare,Healthcare,https://samira-healthcare.com.ng,Medical device distribution and support
+Tamer Communications,Communications,https://tamer-comms.com.sa,Call center and customer service solutions
+Nadira Retail,Retail,https://nadira-retail.com.ae,Fashion and luxury goods boutiques
+Rabia Engineering,Engineering,https://rabia-engineering.com.eg,Mechanical systems and automation
+Inas Electronics,Electronics,https://inas-electronics.co.ke,IT equipment and networking solutions
+Yasir Hospitality,Hospitality,https://yasir-hospitality.com.sa,Restaurant and catering services
+Hadi Transportation,Transportation,https://hadi-transport.co.za,Regional trucking and distribution
+Samir Banking,Banking,https://samir-banking.com.ng,Microfinance and community lending
+Karim Biotechnology,Biotechnology,https://karim-biotech.com.eg,Medical diagnostics and testing
+Amina Chemicals,Chemicals,https://amina-chemicals.com.sa,Specialty chemical manufacturing
+Salim Telecommunications,Telecommunications,https://salim-telecom.com.gh,Mobile network and internet services
+Rania Utilities,Utilities,https://rania-utilities.com.ae,Electricity generation and supply
+Hamza Agriculture,Agriculture,https://hamza-agriculture.com.sa,Livestock and dairy farming
+Leila Media,Media,https://leila-media.com.eg,Radio broadcasting and podcasting
+Rashid Insurance,Insurance,https://rashid-insurance.com.sa,Auto and casualty insurance
+Mariam Technology,Technology,https://mariam-tech.io,Cybersecurity and threat intelligence
+Nasir Manufacturing,Manufacturing,https://nasir-mfg.com.tr,Heavy equipment and machinery
+Dalia Finance,Finance,https://dalia-finance.com.ae,Securities trading and portfolio management
+Kamal Construction,Construction,https://kamal-construction.com.eg,Commercial and residential projects
+Soraya Education,Education,https://soraya-education.co.ke,University preparation courses
+Tarek Consulting,Consulting,https://tarek-consulting.com.sa,Supply chain and logistics optimization
+Zenpoint Solutions,Technology,https://zenpoint-solutions.com,Cloud infrastructure and DevOps tooling.
+Bridgeway Logistics,Transportation,https://bridgeway-logistics.io,Supply chain and freight optimization.
+Cascade Financial Group,Finance,https://cascade-financial-group.com,Investment management and portfolio services.
+NorthStar Renewables,Energy,https://northstar-renewables.net,Wind and solar energy development.
+Pinnacle Consulting,Consulting,https://pinnacle-consulting.com,Digital transformation advisory firm.
+Meridian Healthcare Solutions,Healthcare,https://meridian-healthcare.io,Patient data management systems.
+Velocity Manufacturing,Manufacturing,https://velocity-manufacturing.com,Precision metal fabrication services.
+Horizon Retail Partners,Retail,https://horizon-retail-partners.com,Multi-channel retail distribution network.
+Clearwater Telecommunications,Telecommunications,https://clearwater-telecom.net,Enterprise communication infrastructure.
+Ember Analytics,Technology,https://ember-analytics.io,Real-time business intelligence platform.
+Granite Construction Group,Construction,https://granite-construction-group.com,Commercial and infrastructure projects.
+Vertex Biotechnology,Biotechnology,https://vertex-biotech.io,Gene therapy research and development.
+Prism Education Solutions,Education,https://prism-education.com,K-12 learning management systems.
+Quantum Electronics,Electronics,https://quantum-electronics.io,Semiconductor component manufacturing.
+Skyline Communications,Communications,https://skyline-communications.com,Unified messaging and collaboration.
+Fortress Insurance,Insurance,https://fortress-insurance.co,Commercial property and liability coverage.
+Catalyst Media Group,Media,https://catalyst-media-group.com,Digital publishing and content distribution.
+Equinox Engineering,Engineering,https://equinox-engineering.net,Structural and civil engineering services.
+Nexus Banking Solutions,Banking,https://nexus-banking.io,Payment processing and banking infrastructure.
+Titan Agriculture,Agriculture,https://titan-agriculture.com,Precision farming and crop analytics.
+Radiant Chemical Works,Chemicals,https://radiant-chemical.io,Industrial chemical manufacturing.
+Apex Entertainment,Entertainment,https://apex-entertainment.com,Live event production and venues.
+Nova Hotels,Hospitality,https://nova-hotels.com,Boutique and full-service hotel operations.
+Compass Transportation,Transportation,https://compass-transportation.net,Fleet management and vehicle services.
+Dynamo Power Systems,Utilities,https://dynamo-power-systems.io,Electric utility grid modernization.
+Beacon Consulting Partners,Consulting,https://beacon-consulting.com,Change management and strategy services.
+Synergy Biotech,Biotechnology,https://synergy-biotech.co,Immunotherapy and drug development.
+Pinnacle Technical Services,Technology,https://pinnacle-tech.io,Software development and IT staffing.
+Crossroads Retail Group,Retail,https://crossroads-retail.com,Specialty retail and e-commerce.
+Momentum Capital,Finance,https://momentum-capital.io,Alternative investment and hedge funds.
+Pathfinder Energy Solutions,Energy,https://pathfinder-energy.com,Oil and gas operations and refining.
+Harmony Healthcare Group,Healthcare,https://harmony-healthcare.io,Medical billing and claim processing.
+Summit Manufacturing,Manufacturing,https://summit-manufacturing.net,Automotive parts and assemblies.
+Orbit Telecommunications,Telecommunications,https://orbit-telecom.io,Mobile and wireless network services.
+Eclipse Media Services,Media,https://eclipse-media.com,Broadcast and streaming infrastructure.
+Infinity Construction,Construction,https://infinity-construction.io,Building and real estate development.
+Axiom Education,Education,https://axiom-education.com,Corporate training and development programs.
+Zenith Electronics,Electronics,https://zenith-electronics.io,Consumer electronics manufacturing.
+Velocity Insurance Partners,Insurance,https://velocity-insurance.com,Risk management and underwriting services.
+Catalyst Agricultural Technologies,Agriculture,https://catalyst-ag-tech.io,Crop optimization and soil analysis.
+Sentinel Communications,Communications,https://sentinel-communications.com,Cybersecurity and network monitoring.
+Vitals Pharmaceuticals,Healthcare,https://vitals-pharma.io,Generic drug manufacturing and distribution.
+Frontier Banking Group,Banking,https://frontier-banking.co,Community bank holding company.
+Nexus Engineering Solutions,Engineering,https://nexus-engineering.io,Infrastructure design and consulting.
+Prism Finance Advisors,Finance,https://prism-finance.io,Wealth management and financial planning.
+Titan Utilities,Utilities,https://titan-utilities.com,Water and wastewater treatment services.
+Velocity Chemical Solutions,Chemicals,https://velocity-chem.net,Specialty chemical production.
+Evergreen Hospitality,Hospitality,https://evergreen-hospitality.io,Restaurant and lodging management.
+Nexus Entertainment,Entertainment,https://nexus-entertainment.com,Theater operations and film distribution.
+Phoenix Logistics,Transportation,https://phoenix-logistics.io,Last-mile delivery and fulfillment.
+Momentum Consulting Group,Consulting,https://momentum-consulting.net,Management consulting and transformation.
+Quantum Manufacturing,Manufacturing,https://quantum-mfg.io,Advanced materials and composites.
+Stellar Biotechnology,Biotechnology,https://stellar-biotech.com,Diagnostic testing and lab services.
+Skyline Insurance Solutions,Insurance,https://skyline-insurance.io,Claims management and adjudication.
+Compass Education Services,Education,https://compass-education.io,Curriculum development and assessment.
+Nordvik Mining Solutions,Energy,https://nordvik-mining.se,Swedish extraction and mineral processing leader
+Lysegard Pharma,Biotechnology,https://lysegard-pharma.no,Oslo-based pharmaceutical research and development
+Solheim Electronics,Electronics,https://solheim-electronics.dk,Danish precision electronics manufacturer
+Kankivi Forestry,Agriculture,https://kankivi-forestry.fi,Finnish sustainable timber and pulp producer
+Akershus Construction,Construction,https://akershus-build.no,Norwegian infrastructure and civil engineering
+Tanglevik Consulting,Consulting,https://tanglevik-consulting.se,Swedish management and digital transformation
+Halmstad Banking,Banking,https://halmstad-bank.se,Regional Nordic retail and corporate banking
+Sjostrom Communications,Communications,https://sjostrom-comms.dk,Danish telecommunications infrastructure
+Vaagos Manufacturing,Manufacturing,https://vaagos-manufact.fi,Finnish industrial machinery producer
+Bergstad Education,Education,https://bergstad-academy.no,Norwegian vocational training and development
+Torvik Engineering,Engineering,https://torvik-eng.se,Swedish mechanical and automation engineering
+Estrup Chemicals,Chemicals,https://estrup-chemicals.dk,Danish specialty chemical manufacturer
+Inkoo Transport,Transportation,https://inkoo-transport.fi,Finnish logistics and freight specialist
+Sorvoll Healthcare,Healthcare,https://sorvoll-health.no,Norwegian medical devices and services
+Sundvik Retail,Retail,https://sundvik-stores.se,Swedish consumer goods and supermarket operator
+Kjolstad Entertainment,Entertainment,https://kjolstad-ent.no,Norwegian film and media production
+Gravdal Insurance,Insurance,https://gravdal-insure.dk,Danish underwriting and risk management
+Aarhus Finance,Finance,https://aarhus-financial.dk,Danish investment and wealth management
+Smolvik Energy,Energy,https://smolvik-energy.fi,Finnish renewable power and grid operator
+Kastrup Utilities,Utilities,https://kastrup-utils.se,Swedish water and municipal services
+Ostberg Telecommunications,Telecommunications,https://ostberg-telecom.no,Norwegian mobile and broadband provider
+Linkoping Media,Media,https://linkoping-media.se,Swedish publishing and digital content
+Larvik Biotechnology,Biotechnology,https://larvik-biotech.no,Norwegian life sciences research institute
+Vejers Technology,Technology,https://vejers-tech.dk,Danish software and cloud solutions
+Moivio Agriculture,Agriculture,https://moivio-farm.fi,Finnish organic and dairy cooperative
+Tromso Consulting,Consulting,https://tromso-advising.no,Norwegian strategy and organizational change
+Bogense Construction,Construction,https://bogense-construct.dk,Danish residential and commercial building
+Varkaus Manufacturing,Manufacturing,https://varkaus-industrial.fi,Finnish steel and metal products
+Gjovik Electronics,Electronics,https://gjovik-elec.no,Norwegian component and PCB fabrication
+Stavanger Healthcare,Healthcare,https://stavanger-med.no,Norwegian hospital systems and clinics
+Norrkoping Education,Education,https://norrkoping-edu.se,Swedish language and professional training
+Helsingborg Communications,Communications,https://helsingborg-comm.se,Swedish digital and broadcast media
+Randers Chemicals,Chemicals,https://randers-chem.dk,Danish polymer and specialty compounds
+Tampere Transportation,Transportation,https://tampere-logistics.fi,Finnish railway and freight network
+Malmo Finance,Finance,https://malmo-wealth.se,Swedish asset management and banking
+Svendborg Entertainment,Entertainment,https://svendborg-shows.dk,Danish event production and theaters
+Riihimaki Energy,Energy,https://riihimaki-power.fi,Finnish industrial energy solutions
+Viborg Banking,Banking,https://viborg-bank.dk,Danish commercial and retail bank
+Sodankyla Utilities,Utilities,https://sodankyla-utils.fi,Finnish power distribution operator
+Skien Insurance,Insurance,https://skien-cover.no,Norwegian liability and property underwriting
+Aalborg Telecommunications,Telecommunications,https://aalborg-broadband.dk,Danish fiber and mobile infrastructure
+Vaasa Technology,Technology,https://vaasa-softtech.fi,Finnish IT services and digital transformation
+Sundsvall Retail,Retail,https://sundsvall-markets.se,Swedish retail chain and e-commerce
+Sandefjord Media,Media,https://sandefjord-news.no,Norwegian newspaper and digital publishing
+Kolding Consulting,Consulting,https://kolding-consult.dk,Danish HR and management advisory
+Kuopio Engineering,Engineering,https://kuopio-systems.fi,Finnish systems design and automation
+Fredrikstad Manufacturing,Manufacturing,https://fredrikstad-metal.no,Norwegian machinery and fabrication
+Gothenburg Biotechnology,Biotechnology,https://gothenburg-lifesci.se,Swedish medical research and trials
+Frederikshavn Agriculture,Agriculture,https://frederikshavn-coop.dk,Danish fishing and seafood processing
+Jyvaskyla Education,Education,https://jyvaskyla-training.fi,Finnish corporate and technical education
+Falun Healthcare,Healthcare,https://falun-hospitals.se,Swedish private and public health services
+Kristianstad Construction,Construction,https://kristianstad-dev.se,Swedish property development and contracting
+Hameln Electronics,Electronics,https://hameln-precision.no,Norwegian industrial electronics
+Odense Retail,Retail,https://odense-shopping.dk,Danish department stores and malls
+Tampere Consulting,Consulting,https://tampere-advisory.fi,Finnish business and technology consulting
+Pembroke Renewable Solutions Ltd,Energy,https://pembroke-renewable.co.uk,Wind and solar installation across south Wales and southwest England.
+Kestrel Manufacturing Group,Manufacturing,https://kestrel-mfg.ie,Industrial machinery components for automotive and aerospace.
+Thornfield Consulting Associates,Consulting,https://thornfield-consulting.com,Enterprise transformation and digital strategy for FTSE companies.
+Ascent Biotechnology Ltd,Biotechnology,https://ascent-biotech.io,Rare disease diagnostics and therapeutic research.
+Dublin Bridge Transport,Transportation,https://dublinbridge-transport.ie,Logistics and freight management across Ireland and UK.
+Wavelength Communications plc,Communications,https://wavelength-comms.co.uk,Broadcast infrastructure and content delivery networks.
+Sandstone Education Ltd,Education,https://sandstone-education.co.uk,Online learning platforms for professional development.
+Horizon Electronics Manufacturing,Electronics,https://horizon-electronics.com,Consumer electronics assembly and contract manufacturing.
+Fairview Banking Services,Banking,https://fairview-banking.io,Digital-first business banking and working capital solutions.
+Granite Construction Partners,Construction,https://granite-construction.co.uk,Commercial property development and renovation.
+Vortex Engineering Ltd,Engineering,https://vortex-engineering.ie,Structural and civil engineering consultancy.
+Cascade Healthcare Solutions,Healthcare,https://cascade-healthcare.co.uk,Medical device distribution and clinical support services.
+Ember Insurance Group,Insurance,https://ember-insurance.co.uk,Specialty insurance for SME and professional indemnity.
+Longitude Finance Ltd,Finance,https://longitude-finance.io,Alternative lending and asset-backed financing.
+Starbridge Media Productions,Media,https://starbridge-media.co.uk,Television production and documentary distribution.
+Velocity Retail Holdings plc,Retail,https://velocity-retail.ie,Fashion and homeware omnichannel retailer.
+Pinnacle Technology Solutions,Technology,https://pinnacle-tech.com,Cloud infrastructure and managed IT services.
+Stonewood Hospitality Group,Hospitality,https://stonewood-hospitality.co.uk,Hotels and conference venues across Scotland and Northern Ireland.
+Verdant Agricultural Services,Agriculture,https://verdant-agri.ie,Farm advisory and agribusiness consultancy.
+Nexus Telecommunications Ltd,Telecommunications,https://nexus-telecom.co.uk,Enterprise connectivity and 5G network solutions.
+Catalyst Chemicals plc,Chemicals,https://catalyst-chemicals.io,Specialty chemicals for pharmaceutical manufacturing.
+Beacon Entertainment Ltd,Entertainment,https://beacon-entertainment.co.uk,Live events and music festival promotion.
+Fortis Utilities Group,Utilities,https://fortis-utilities.ie,Water treatment and distribution infrastructure.
+Millbrook Consulting Ltd,Consulting,https://millbrook-consulting.co.uk,Management consulting and interim executive placement.
+Prism Technology Ltd,Technology,https://prism-technology.ie,Software development and digital transformation services.
+Tidal Energy Corp,Energy,https://tidal-energy.com,Marine renewable energy and hydroelectric projects.
+Sterling Financial Services,Finance,https://sterling-financial.co.uk,Wealth management and private client advisory.
+Meridian Manufacturing Ltd,Manufacturing,https://meridian-mfg.ie,Precision engineering and tooling for electronics.
+Pavilion Hospitality Ltd,Hospitality,https://pavilion-hospitality.co.uk,Restaurant group and food service operations.
+Axiom Insurance Brokers,Insurance,https://axiom-insurance.io,Commercial and brokerage insurance services.
+Calibre Engineering Group,Engineering,https://calibre-engineering.co.uk,Mechanical and process engineering design.
+Crescent Biotechnology Ltd,Biotechnology,https://crescent-biotech.ie,Medical research and clinical trial management.
+Zenith Banking Corp,Banking,https://zenith-banking.com,Corporate and investment banking services.
+Landmark Education Solutions,Education,https://landmark-education.co.uk,Higher education recruitment and student services.
+Harmony Communications Ltd,Communications,https://harmony-comms.ie,Telecom infrastructure and mobile backhaul.
+Polygon Electronics Ltd,Electronics,https://polygon-electronics.co.uk,Semiconductor testing and quality assurance.
+Riverside Construction Group,Construction,https://riverside-construction.ie,Infrastructure and heavy civil engineering.
+Ascot Retail Ltd,Retail,https://ascot-retail.co.uk,Supermarket and convenience store operator.
+Cascade Media Ltd,Media,https://cascade-media.ie,Digital publishing and content management platforms.
+Triumph Transportation Ltd,Transportation,https://triumph-transport.co.uk,Coach hire and passenger transport services.
+Equinox Utilities Ltd,Utilities,https://equinox-utilities.io,Smart metering and energy efficiency solutions.
+Fortnight Chemicals Ltd,Chemicals,https://fortnight-chemicals.co.uk,Industrial adhesives and sealant manufacturing.
+Reverie Healthcare Ltd,Healthcare,https://reverie-healthcare.ie,Home care services and elderly support provision.
+Silversmith Consulting,Consulting,https://silversmith-consulting.co.uk,Operations and supply chain optimization.
+Nimbus Technology Group,Technology,https://nimbus-technology.ie,Mobile app development and UX design studios.
+Lakeside Agricultural Ltd,Agriculture,https://lakeside-agri.co.uk,Organic farming certification and premium food labels.
+Topaz Telecommunications Ltd,Telecommunications,https://topaz-telecom.ie,Fixed-line and broadband service provider.
+Pinnacle Finance Holdings,Finance,https://pinnacle-finance.com,Investment management and hedge fund operations.
+Ironworks Manufacturing Ltd,Manufacturing,https://ironworks-mfg.co.uk,Metal fabrication and bespoke engineering.
+Crescent Entertainment Ltd,Entertainment,https://crescent-entertainment.co.uk,Venue management and ticketing systems.
+Cornerstone Banking Services,Banking,https://cornerstone-banking.io,Community banking and credit union support.
+Everest Biotechnology Group,Biotechnology,https://everest-biotech.co.uk,Gene therapy and immunotherapy research.
+Beacon Construction Ltd,Construction,https://beacon-construction.ie,Residential development and house building.
+Cascade Engineering Solutions,Engineering,https://cascade-engineering.co.uk,Process automation and industrial control systems.
+Willow Healthcare Group,Healthcare,https://willow-healthcare.com,Private healthcare and cosmetic surgery clinics.
+Summit Insurance Ltd,Insurance,https://summit-insurance.ie,Life insurance and pension products.
