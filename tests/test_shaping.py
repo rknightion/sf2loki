@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -8,6 +8,7 @@ from sf2loki.shaping import (
     cap_line,
     derive_level,
     extract_timestamp,
+    extract_timestamp_checked,
     promote_labels,
     route_fields,
 )
@@ -186,3 +187,48 @@ def test_extract_timestamp_unparseable_string_falls_through() -> None:
     # An unparseable candidate must not crash; falls through to now() (aware).
     ts = extract_timestamp({"EventDate": "not-a-timestamp"})
     assert ts.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic timestamp fallback (issue #20): a stable fallback beats
+# now(UTC) so byte-identical replays dedup in Loki; callers can count usage.
+
+
+def test_extract_timestamp_checked_parseable_is_not_fallback() -> None:
+    ts, used_fallback = extract_timestamp_checked(
+        {"EventDate": "2026-06-30T12:00:00Z"},
+        fallback=datetime.now(UTC),
+    )
+    assert used_fallback is False
+    assert ts == datetime(2026, 6, 30, 12, 0, 0, tzinfo=UTC)
+
+
+def test_extract_timestamp_checked_uses_recent_fallback() -> None:
+    fb = datetime.now(UTC) - timedelta(minutes=30)
+    ts, used_fallback = extract_timestamp_checked({"EventDate": "garbage"}, fallback=fb)
+    assert used_fallback is True
+    assert ts == fb
+
+
+def test_extract_timestamp_checked_without_fallback_uses_now() -> None:
+    before = datetime.now(UTC)
+    ts, used_fallback = extract_timestamp_checked({"foo": "bar"})
+    assert used_fallback is True
+    assert before <= ts <= datetime.now(UTC)
+
+
+def test_extract_timestamp_checked_old_fallback_clamped_near_now() -> None:
+    # A fallback >1h old would be rejected by Loki's out-of-order guard (and the
+    # whole row dropped via the 400 path) — it must be clamped near now instead,
+    # while still reporting used_fallback=True so the metric counts it.
+    fb = datetime.now(UTC) - timedelta(hours=3)
+    ts, used_fallback = extract_timestamp_checked({}, fallback=fb)
+    assert used_fallback is True
+    assert ts > fb  # clamped forward, not the stale fallback
+    assert timedelta(0) <= datetime.now(UTC) - ts < timedelta(minutes=10)
+
+
+def test_extract_timestamp_accepts_fallback_kwarg() -> None:
+    # Back-compat wrapper: same fallback semantics, plain datetime return.
+    fb = datetime.now(UTC) - timedelta(minutes=5)
+    assert extract_timestamp({}, fallback=fb) == fb

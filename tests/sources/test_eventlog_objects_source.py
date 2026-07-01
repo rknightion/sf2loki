@@ -13,6 +13,7 @@ import respx
 
 from sf2loki.auth.jwt_auth import AccessToken
 from sf2loki.config import EventLogObjectConfig, EventLogObjectsConfig, SalesforceConfig
+from sf2loki.obs.metrics import Metrics
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.state.file_store import FileCheckpointStore
 
@@ -631,3 +632,197 @@ async def test_throttled_aborts_rest_of_cycle(
 
     assert entries == []
     assert call_count == 1  # second object never queried this cycle
+
+
+# ---------------------------------------------------------------------------
+# Per-object poll_interval timers (issue #18): each object polls on ITS OWN
+# interval, not the first object's.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_per_object_poll_intervals_schedule_independently(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A fast-interval object polls many times while a slow-interval object in
+    the same source polls only once (its next due time is far in the future)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    calls: dict[str, int] = {"LoginEvent": 0, "ApiEvent": 0}
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        q = parse_qs(urlparse(str(request.url)).query)["q"][0]
+        for name in calls:
+            if f"FROM {name} " in q:
+                calls[name] += 1
+        return httpx.Response(200, json={"records": [], "done": True})
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = EventLogObjectsConfig(
+        enabled=True,
+        objects=[
+            EventLogObjectConfig(name="LoginEvent", poll_interval=timedelta(milliseconds=20)),
+            EventLogObjectConfig(name="ApiEvent", poll_interval=timedelta(seconds=10)),
+        ],
+    )
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=False)
+        stop = asyncio.Event()
+
+        async def consume() -> None:
+            async for _ in source.events(store, stop):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.3)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    # The slow object is due only once in 0.3s; the fast one many times.
+    assert calls["ApiEvent"] == 1
+    assert calls["LoginEvent"] >= 4
+
+
+# ---------------------------------------------------------------------------
+# Poll-error counter (issue #19): contained cycle failures must be countable.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_soql_error_increments_poll_error_counter(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(return_value=httpx.Response(500, text="boom"))
+
+    cfg = make_elo_cfg()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True, metrics=metrics)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert entries == []
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_soql_poll_errors_total",
+            {"source": "eventlog_objects", "object": "LoginEvent"},
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_throttled_cycle_increments_poll_error_counter(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            403, json=[{"message": "limit", "errorCode": "REQUEST_LIMIT_EXCEEDED"}]
+        )
+    )
+
+    cfg = make_elo_cfg()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client, metrics=metrics)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True, metrics=metrics)
+        _ = [e async for e in source.events(store, asyncio.Event())]
+
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_soql_poll_errors_total",
+            {"source": "eventlog_objects", "object": "LoginEvent"},
+        )
+        == 1.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic timestamp fallback (issue #20): a record with an unparseable
+# timestamp gets the PREVIOUS watermark as its entry time (stable across
+# replays), not now(UTC) — and the fallback is counted.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_null_timestamp_uses_previous_watermark_and_counts_fallback(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    # Watermark within 1h of now so the Loki OOO clamp does not kick in.
+    wm_dt = (datetime.now(UTC) - timedelta(minutes=30)).replace(microsecond=0)
+    wm = wm_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    await store.commit("eventlog_objects:LoginEvent", json.dumps({"last_ts": wm, "ids": []}))
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={"records": [{"Id": "b", "EventDate": None}], "done": True},
+        )
+    )
+
+    cfg = make_elo_cfg()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True, metrics=metrics)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    # Stable fallback: the previous watermark, NOT ingest time.
+    assert entries[0].timestamp == wm_dt
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_timestamp_fallbacks_total", {"source": "eventlog_objects"}
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_parseable_timestamps_never_count_fallback(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [{"Id": "a", "EventDate": "2026-06-30T10:00:00Z"}],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True, metrics=metrics)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_timestamp_fallbacks_total", {"source": "eventlog_objects"}
+        )
+        is None
+    )

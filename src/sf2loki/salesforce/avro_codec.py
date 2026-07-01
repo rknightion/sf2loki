@@ -42,9 +42,12 @@ class AvroCodec:
         self._fetch_schema = fetch_schema
         # Parsed schemas (fastavro.parse_schema output) keyed by schema_id.
         self._cache: dict[str, Any] = {}
-        # Protects the populate-then-cache path so concurrent first-time
-        # decodes of the same schema_id result in exactly one fetch.
-        self._lock: asyncio.Lock = asyncio.Lock()
+        # Per-schema-id locks: single-flight per id (concurrent first-time
+        # decodes of one schema_id fetch exactly once), while DIFFERENT ids
+        # fetch concurrently — a slow fetch of schema A must not block the
+        # first decode of schema B. Bounded by the number of distinct schema
+        # ids, i.e. the same cardinality as the cache itself.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,7 +79,10 @@ class AvroCodec:
         if schema_id in self._cache:
             return self._cache[schema_id]
 
-        async with self._lock:
+        # setdefault has no await point, so it is atomic under asyncio's
+        # cooperative scheduling — no guard lock needed around lock creation.
+        lock = self._locks.setdefault(schema_id, asyncio.Lock())
+        async with lock:
             # Double-check: another coroutine may have populated the cache
             # while we waited for the lock.
             if schema_id in self._cache:

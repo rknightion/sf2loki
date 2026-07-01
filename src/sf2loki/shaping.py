@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 def route_fields(
@@ -176,16 +176,32 @@ def _parse_ts_value(value: object) -> datetime | None:
     return dt
 
 
-def extract_timestamp(
+# Loki (Grafana Cloud) rejects entries more than ~1h older than the newest
+# entry in their stream (out-of-order window). A stable fallback older than
+# that would make the whole row bounce on the 400 path — dropped entirely,
+# which is worse than a duplicate on replay — so it is clamped near now
+# instead (fresh-but-nondeterministic is the unavoidable lesser evil there).
+_MAX_FALLBACK_AGE = timedelta(hours=1)
+_FALLBACK_CLAMP_MARGIN = timedelta(minutes=5)
+
+
+def extract_timestamp_checked(
     payload: Mapping[str, object],
     field_names: Sequence[str] = ("EventDate", "CreatedDate"),
-) -> datetime:
-    """Best-effort event occurrence time, always timezone-aware (UTC).
+    *,
+    fallback: datetime | None = None,
+) -> tuple[datetime, bool]:
+    """Like :func:`extract_timestamp`, but reports whether a fallback was used.
 
-    Tries each name in *field_names* in order (default ``EventDate`` then
-    ``CreatedDate``; EventLogFile passes ``TIMESTAMP_DERIVED``/``TIMESTAMP``),
-    accepting epoch-millis, ISO-8601, or the ELF compact format. Falls back to
-    ingest time when no field yields a parseable value.
+    Returns ``(timestamp, used_fallback)`` so call sites can count fallbacks
+    (``timestamp_fallbacks`` metric). When no field parses:
+
+    - with a *fallback* (an aware datetime — e.g. the ELF file's CreatedDate or
+      the previous poll watermark) the fallback is used, so replayed rows keep
+      byte-identical timestamps and dedup in Loki — UNLESS it is older than
+      ~1h, in which case it is clamped to now-minus-margin to stay inside
+      Loki's out-of-order window (see ``_MAX_FALLBACK_AGE`` above);
+    - without one, ingest time is used (the legacy behavior).
     """
     for field_name in field_names:
         value = payload.get(field_name)
@@ -193,5 +209,29 @@ def extract_timestamp(
             continue
         parsed = _parse_ts_value(value)
         if parsed is not None:
-            return parsed
-    return datetime.now(UTC)
+            return parsed, False
+
+    now = datetime.now(UTC)
+    if fallback is None:
+        return now, True
+    if now - fallback > _MAX_FALLBACK_AGE:
+        return now - _FALLBACK_CLAMP_MARGIN, True
+    return fallback, True
+
+
+def extract_timestamp(
+    payload: Mapping[str, object],
+    field_names: Sequence[str] = ("EventDate", "CreatedDate"),
+    fallback: datetime | None = None,
+) -> datetime:
+    """Best-effort event occurrence time, always timezone-aware (UTC).
+
+    Tries each name in *field_names* in order (default ``EventDate`` then
+    ``CreatedDate``; EventLogFile passes ``TIMESTAMP_DERIVED``/``TIMESTAMP``),
+    accepting epoch-millis, ISO-8601, or the ELF compact format. When no field
+    yields a parseable value, falls back to *fallback* (clamped to Loki's
+    out-of-order window) if given, else to ingest time. Use
+    :func:`extract_timestamp_checked` when the caller needs to count fallbacks.
+    """
+    ts, _ = extract_timestamp_checked(payload, field_names, fallback=fallback)
+    return ts

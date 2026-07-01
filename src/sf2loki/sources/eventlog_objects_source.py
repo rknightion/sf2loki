@@ -35,18 +35,20 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
 from sf2loki.config import EventLogObjectConfig, EventLogObjectsConfig
 from sf2loki.model import CheckpointToken, LogEntry
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.soql_client import (
     SoqlClient,
     SoqlError,
     SoqlThrottledError,
     to_soql_datetime_literal,
 )
-from sf2loki.shaping import extract_timestamp, route_fields
+from sf2loki.shaping import extract_timestamp_checked, route_fields
 from sf2loki.state.base import CheckpointStore
 
 # FIELDS(ALL) requires LIMIT <=200 (Salesforce documented constraint).
@@ -64,13 +66,18 @@ _log = logging.getLogger(__name__)
 
 def _is_valid_watermark(value: str) -> bool:
     """True when *value* parses as an ISO-8601-ish datetime (SF ``+0000`` included)."""
+    return _watermark_datetime(value) is not None
+
+
+def _watermark_datetime(value: str) -> datetime | None:
+    """Parse a watermark string to an aware datetime, or None if unparseable."""
     if not value:
-        return False
+        return None
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return True
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _parse_checkpoint(raw: str) -> tuple[str, list[str]]:
@@ -111,11 +118,13 @@ class EventLogObjectsSource:
         soql: SoqlClient,
         *,
         sm_fields: Sequence[str],
+        metrics: Metrics | None = None,
         poll_once: bool = False,
     ) -> None:
         self._cfg = cfg
         self._soql = soql
         self._sm_fields = sm_fields
+        self._metrics = metrics if metrics is not None else Metrics()
         # poll_once=True runs a single cycle and returns (useful in tests to avoid
         # an infinite polling loop).
         self._poll_once = poll_once
@@ -129,7 +138,8 @@ class EventLogObjectsSource:
     ) -> AsyncIterator[LogEntry]:
         """Yield log entries for all enabled EventLog objects.
 
-        Each poll cycle, per object:
+        Each wake of the polling loop, per DUE object (each object is scheduled
+        on its OWN ``poll_interval``, with ±10% jitter):
         1. Load the stored watermark + id window (or default to now-lookback).
         2. Issue SOQL ``WHERE timestamp_field >= <watermark> ORDER BY ASC LIMIT 200``,
            repeating while full pages return (drain-until-short-page), deduping
@@ -137,7 +147,7 @@ class EventLogObjectsSource:
         3. Yield a :class:`~sf2loki.model.LogEntry` per new record, with a
            :class:`~sf2loki.model.CheckpointToken` carrying the advanced
            watermark + id window (so the pipeline can commit it after push).
-        4. Sleep for poll_interval before the next cycle.
+        4. Sleep until the earliest per-object due time (stop-aware).
 
         Stop semantics: checks ``stop`` before each cycle and between records;
         returns promptly when set.
@@ -145,34 +155,61 @@ class EventLogObjectsSource:
         The pipeline (not this source) is responsible for committing checkpoints
         to ``state``; we only read the watermark here.
         """
+        if not self._cfg.objects:
+            return
+
+        loop = asyncio.get_running_loop()
+        # Per-object next-due times on the monotonic loop clock; every object
+        # is due immediately on startup.
+        next_due: dict[str, float] = dict.fromkeys(
+            (obj.name for obj in self._cfg.objects), loop.time()
+        )
+
         while True:
             if stop.is_set():
                 return
 
             self._cycle_throttled = False
+            wake = loop.time()
             for obj in self._cfg.objects:
+                if next_due[obj.name] > wake:
+                    continue  # not due yet: its own interval hasn't elapsed
                 if stop.is_set():
                     return
 
                 async for entry in self._process_object(obj, state, stop):
                     yield entry
 
+                next_due[obj.name] = loop.time() + self._jittered_interval(obj)
+
                 if self._cycle_throttled:
-                    # API budget exhausted: leave the remaining objects for the
-                    # next poll interval.
+                    # API budget exhausted: defer every still-due object a full
+                    # interval — polling them now would burn more of the
+                    # exhausted budget.
+                    now = loop.time()
+                    for other in self._cfg.objects:
+                        if next_due[other.name] <= now:
+                            next_due[other.name] = now + self._jittered_interval(other)
                     break
 
             if self._poll_once:
                 return
 
-            # --- 4. Sleep between cycles (per poll_interval of first object for simplicity;
-            # a production implementation could track per-object timers independently) ---
-            if self._cfg.objects:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        stop.wait(),
-                        timeout=self._cfg.objects[0].poll_interval.total_seconds(),
-                    )
+            timeout = max(0.0, min(next_due.values()) - loop.time())
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=timeout)
+
+    @staticmethod
+    def _jittered_interval(obj: EventLogObjectConfig) -> float:
+        """The object's poll interval in seconds, with ±10% jitter.
+
+        Jitter desynchronizes multi-instance / multi-object cycles (same idiom
+        as the EventLogFile source).
+        """
+        interval = obj.poll_interval.total_seconds()
+        if interval > 0:
+            interval *= random.uniform(0.9, 1.1)  # jitter, not cryptographic
+        return interval
 
     async def _process_object(
         self,
@@ -227,6 +264,9 @@ class EventLogObjectsSource:
                 page = [record async for record in self._soql.query(soql)]
             except SoqlThrottledError as exc:
                 self._cycle_throttled = True
+                self._metrics.soql_poll_errors.labels(
+                    source="eventlog_objects", object=obj.name
+                ).inc()
                 _log.error(
                     "eventlog_objects[%s]: Salesforce API request limit exceeded; "
                     "backing off until the next poll interval: %s",
@@ -237,6 +277,9 @@ class EventLogObjectsSource:
             except SoqlError as exc:
                 count = self._consecutive_failures.get(obj.name, 0) + 1
                 self._consecutive_failures[obj.name] = count
+                self._metrics.soql_poll_errors.labels(
+                    source="eventlog_objects", object=obj.name
+                ).inc()
                 level = logging.ERROR if count >= _ERROR_LOG_THRESHOLD else logging.WARNING
                 _log.log(
                     level,
@@ -270,9 +313,17 @@ class EventLogObjectsSource:
                 # Prefer the configured timestamp field (e.g. LoginTime) so the
                 # entry time is the event time, not ingest time; fall back to the
                 # generic EventDate/CreatedDate names for objects without it.
-                ts = extract_timestamp(
-                    record, field_names=(obj.timestamp_field, "EventDate", "CreatedDate")
+                # When nothing parses, the PREVIOUS watermark (mirroring the
+                # checkpoint-carry behavior below) is the stable fallback:
+                # replayed rows then keep byte-identical timestamps and dedup
+                # in Loki, instead of getting a fresh now() every replay.
+                ts, used_fallback = extract_timestamp_checked(
+                    record,
+                    field_names=(obj.timestamp_field, "EventDate", "CreatedDate"),
+                    fallback=_watermark_datetime(watermark),
                 )
+                if used_fallback:
+                    self._metrics.timestamp_fallbacks.labels(source="eventlog_objects").inc()
                 line, sm = route_fields(record, self._sm_fields)
 
                 # labels: source and event_type only — job/sf_org_id/environment

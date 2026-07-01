@@ -141,6 +141,49 @@ async def test_concurrent_decode_fetches_schema_once() -> None:
     assert fetch_count == 1, f"schema fetched {fetch_count} times, expected 1"
 
 
+@pytest.mark.asyncio
+async def test_concurrent_decode_different_schema_ids_not_serialized() -> None:
+    """A slow fetch of schema A must not block the first decode of schema B.
+
+    Fetch locks are per-schema-id: single-flight per id, but different ids
+    proceed concurrently (issue #21c).
+    """
+    slow_schema: dict[str, object] = {
+        "type": "record",
+        "name": "Slow",
+        "fields": [{"name": "x", "type": "string"}],
+    }
+    fast_schema: dict[str, object] = {
+        "type": "record",
+        "name": "Fast",
+        "fields": [{"name": "y", "type": "int"}],
+    }
+    slow_payload = _encode_record(slow_schema, {"x": "hello"})
+    fast_payload = _encode_record(fast_schema, {"y": 7})
+
+    gate = asyncio.Event()
+    slow_fetch_started = asyncio.Event()
+
+    async def fetcher(schema_id: str) -> str:
+        if schema_id == "slow":
+            slow_fetch_started.set()
+            await gate.wait()  # blocks until the test releases it
+            return json.dumps(slow_schema)
+        return json.dumps(fast_schema)
+
+    codec = AvroCodec(fetcher)
+    slow_task = asyncio.create_task(codec.decode("slow", slow_payload))
+    await slow_fetch_started.wait()  # slow fetch is in flight, holding its lock
+
+    # With a single global lock this would deadlock until the 1s timeout.
+    fast_result = await asyncio.wait_for(codec.decode("fast", fast_payload), timeout=1.0)
+    assert fast_result == {"y": 7}
+    assert not slow_task.done()
+
+    gate.set()
+    assert await slow_task == {"x": "hello"}
+
+
 # ---------------------------------------------------------------------------
 # Schema-fetch failures must be distinguishable from poison payloads (B3)
 # ---------------------------------------------------------------------------

@@ -12,10 +12,12 @@ subclass so callers can back off distinctly.
 from __future__ import annotations
 
 import csv
+import email.utils
 import io
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -98,6 +100,36 @@ class EventLogFileClient:
         self._client = client
         self._metrics = metrics if metrics is not None else Metrics()
         self._soql = SoqlClient(sf_cfg, tokens, client, metrics=self._metrics)
+        # Last observed (Salesforce server time - local now), from the Date
+        # response header. Captured via a response event hook on the shared
+        # httpx client because the SOQL listing goes through SoqlClient, which
+        # does not expose response headers — the hook sees every Salesforce
+        # response (listing, discovery, downloads) at zero extra request cost.
+        self._clock_skew: timedelta | None = None
+        hooks = dict(client.event_hooks)
+        hooks["response"] = [*hooks.get("response", []), self._capture_server_date]
+        client.event_hooks = hooks
+
+    async def _capture_server_date(self, response: httpx.Response) -> None:
+        """httpx response hook: record clock skew from the Date header, if any."""
+        date_header = response.headers.get("Date")
+        if not date_header:
+            return
+        try:
+            server_time = email.utils.parsedate_to_datetime(date_header)
+        except TypeError, ValueError:
+            return
+        if server_time.tzinfo is None:
+            server_time = server_time.replace(tzinfo=UTC)
+        self._clock_skew = server_time - datetime.now(UTC)
+
+    def clock_skew(self) -> timedelta | None:
+        """Most recent (Salesforce server time - local now), or None if unknown.
+
+        1-second resolution plus network latency noise — callers should ignore
+        small values (the ELF source applies it only beyond a 30s threshold).
+        """
+        return self._clock_skew
 
     async def list_files(
         self,

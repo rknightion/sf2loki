@@ -497,6 +497,56 @@ async def test_download_short_row_fills_missing_columns_with_empty_string() -> N
     assert rows == [{"A": "1", "B": "2", "C": ""}]
 
 
+# ---------------------------------------------------------------------------
+# Clock-skew capture (issue #21b): the Salesforce Date response header is
+# captured (via a response hook on the shared httpx client, so SOQL listing
+# responses count too) and exposed as clock_skew().
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clock_skew_captured_from_date_header() -> None:
+    from email.utils import format_datetime
+
+    server_time = datetime.now(UTC) + timedelta(minutes=10)
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={"records": [], "done": True},
+            headers={"Date": format_datetime(server_time, usegmt=True)},
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        assert elf_client.clock_skew() is None  # nothing captured yet
+        await elf_client.list_files(
+            event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
+        )
+        skew = elf_client.clock_skew()
+
+    assert skew is not None
+    # Date header has 1s resolution; allow small execution slack.
+    assert abs(skew - timedelta(minutes=10)) < timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clock_skew_none_without_date_header() -> None:
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(200, json={"records": [], "done": True})
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        await elf_client.list_files(
+            event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
+        )
+        assert elf_client.clock_skew() is None
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_download_zero_rows_header_only() -> None:

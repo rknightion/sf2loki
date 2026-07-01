@@ -8,8 +8,10 @@ and yield a :class:`~sf2loki.model.LogEntry` per row.
 
 Checkpoint format (JSON string, per ``eventlogfile:<event_type>`` key):
 ``{"last_created": "<iso-8601 CreatedDate>", "ids": [["<file id>", "<CreatedDate>"], ...]}``.
-``ids`` is a rolling window (last 200) of recently-processed files, used to
-dedup files whose ``CreatedDate`` ties with (or falls before) the watermark.
+``ids`` is a window of recently-processed files, used to dedup files whose
+``CreatedDate`` ties with (or falls before) the watermark: ALL pairs at the
+watermark's CreatedDate are kept (the ``>=`` re-list boundary needs every one
+of them), plus a capped tail (last 200) of older pairs.
 Each entry is an ``[id, created_date]`` pair — Salesforce regenerates DAILY
 files **in place** (same Id, CreatedDate bumped, blob replaced with the full
 superset including late rows), so a re-listed id with a NEWER CreatedDate must
@@ -55,7 +57,7 @@ import json
 import logging
 import random
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sf2loki.config import EVENT_TYPE_WILDCARD, EventLogFileConfig, EventLogFileTypeConfig
@@ -66,14 +68,30 @@ from sf2loki.salesforce.eventlogfile_client import (
     EventLogFileMeta,
     EventLogFileThrottledError,
 )
-from sf2loki.shaping import extract_timestamp, promote_labels, route_fields
+from sf2loki.shaping import extract_timestamp_checked, promote_labels, route_fields
 from sf2loki.sources.overlap import category_of_elf
 from sf2loki.state.base import CheckpointStore
 
+# Cap for carried (id, created_date) pairs OLDER than the current watermark.
+# Pairs AT the watermark are always all kept — the next listing is
+# ``CreatedDate >= watermark``, so exactly those are needed to dedup the
+# re-listed boundary (capping them would re-download uncovered files forever
+# when >cap files share one CreatedDate, e.g. a bulk backfill).
 _MAX_CARRIED_IDS = 200
+
+# The carried window growing past this many pairs means something anomalous is
+# stamping thousands of files with one CreatedDate — worth a WARNING.
+_CARRIED_IDS_WARN_THRESHOLD = 5000
 
 # Consecutive per-type cycle failures at which the skip log escalates to ERROR.
 _ERROR_LOG_THRESHOLD = 3
+
+# Clock skew (Salesforce server time - local now) below this is ignored: the
+# Date header has 1s resolution and includes network latency noise.
+_SKEW_APPLY_THRESHOLD = timedelta(seconds=30)
+# Skew beyond this logs a WARNING (once per process): the local clock is
+# meaningfully wrong and CreatedDate comparisons are being adjusted.
+_SKEW_WARN_THRESHOLD = timedelta(seconds=60)
 
 # A carried checkpoint entry: (file id, CreatedDate). created is None for
 # entries loaded from a legacy (bare-id) checkpoint — matches any CreatedDate.
@@ -120,14 +138,35 @@ def _serialize_carried_ids(ids: Sequence[_CarriedId]) -> list[object]:
 
 
 def _append_carried_id(ids: Sequence[_CarriedId], file_meta: EventLogFileMeta) -> list[_CarriedId]:
-    """Fold *file_meta* into the ids window (deduped by id, trimmed to the cap).
+    """Fold *file_meta* into the ids window (deduped by id, older pairs capped).
 
     Dropping an existing pair for the same id matters for re-issued daily files:
     the window must record the NEWEST processed CreatedDate, not accumulate
     stale versions.
+
+    Trimming keeps ALL pairs whose created_date equals the new watermark
+    (*file_meta*'s CreatedDate): the next listing re-fetches everything at
+    ``CreatedDate >= watermark``, so that boundary set is exactly what the
+    ``>=`` re-list dedup needs and is naturally bounded by how many files
+    Salesforce stamps with one CreatedDate. Only pairs at OLDER CreatedDates
+    (which can never re-list, apart from a regenerated daily file — handled by
+    the same-id replacement above) and legacy bare-id entries are capped to a
+    tail of ``_MAX_CARRIED_IDS``.
     """
     kept = [(fid, created) for fid, created in ids if fid != file_meta.id]
-    return [*kept, (file_meta.id, file_meta.created_date)][-_MAX_CARRIED_IDS:]
+    combined = [*kept, (file_meta.id, file_meta.created_date)]
+    at_watermark = [pair for pair in combined if pair[1] == file_meta.created_date]
+    older = [pair for pair in combined if pair[1] != file_meta.created_date]
+    result = [*older[-_MAX_CARRIED_IDS:], *at_watermark]
+    if len(ids) <= _CARRIED_IDS_WARN_THRESHOLD < len(result):
+        _log.warning(
+            "eventlogfile: carried checkpoint id window exceeded %d pairs (%d files "
+            "share CreatedDate %s) — checkpoint size is growing abnormally",
+            _CARRIED_IDS_WARN_THRESHOLD,
+            len(at_watermark),
+            file_meta.created_date,
+        )
+    return result
 
 
 def _is_already_processed(file_meta: EventLogFileMeta, seen: dict[str, str | None]) -> bool:
@@ -162,6 +201,8 @@ class _EventLogFileClientLike(Protocol):
     async def list_event_types(self, interval: str) -> list[str]: ...
 
     def download(self, file_meta: EventLogFileMeta) -> AsyncIterator[dict[str, str]]: ...
+
+    def clock_skew(self) -> timedelta | None: ...
 
 
 class EventLogFileSource:
@@ -204,6 +245,11 @@ class EventLogFileSource:
         # Set when a cycle hits REQUEST_LIMIT_EXCEEDED: abort remaining work
         # until the next poll interval.
         self._cycle_throttled = False
+        # Clock skew (server - local) applied to CreatedDate comparisons this
+        # cycle; recomputed once per poll cycle from the client's last-seen
+        # Salesforce Date header. Zero when unknown or negligible.
+        self._cycle_skew = timedelta(0)
+        self._skew_warned = False
 
     async def events(
         self,
@@ -215,7 +261,12 @@ class EventLogFileSource:
                 return
 
             self._cycle_throttled = False
-            for type_cfg in await self._resolve_event_types():
+            type_cfgs = await self._resolve_event_types()
+            # Once per cycle (after discovery, whose response may have updated
+            # the client's last-seen Date header): how far the local clock is
+            # from Salesforce server time.
+            self._cycle_skew = self._compute_cycle_skew()
+            for type_cfg in type_cfgs:
                 if stop.is_set():
                     return
 
@@ -257,6 +308,7 @@ class EventLogFileSource:
         except EventLogFileError as exc:
             if isinstance(exc, EventLogFileThrottledError):
                 self._cycle_throttled = True
+            self._metrics.soql_poll_errors.labels(source="eventlogfile", object="discovery").inc()
             _log.warning(
                 "eventlogfile: EventType discovery failed; using %d explicit type(s) only: %s",
                 len(explicit),
@@ -277,6 +329,29 @@ class EventLogFileSource:
             names.add(name)
             resolved.append(EventLogFileTypeConfig(name=name))
         return resolved
+
+    def _compute_cycle_skew(self) -> timedelta:
+        """Clock skew (server - local) to apply to CreatedDate comparisons.
+
+        Salesforce stamps CreatedDate with ITS clock; the settle gate,
+        first-run ``default_since`` and ``download_max_age`` compare it against
+        local now(UTC). A skewed local clock silently shifts those windows, so
+        when the client has seen a Salesforce ``Date`` response header and the
+        skew is beyond noise (>30s), comparisons are adjusted to server time.
+        Returns zero (today's behavior) when the skew is unknown or small.
+        """
+        skew = self._client.clock_skew()
+        if skew is None or abs(skew) <= _SKEW_APPLY_THRESHOLD:
+            return timedelta(0)
+        if abs(skew) > _SKEW_WARN_THRESHOLD and not self._skew_warned:
+            self._skew_warned = True
+            _log.warning(
+                "eventlogfile: local clock is %s away from Salesforce server time; "
+                "adjusting CreatedDate comparisons (settle window, lookback, "
+                "download_max_age) by that skew",
+                skew,
+            )
+        return skew
 
     def _record_cycle_failure(self, event_type: str, what: str, exc: Exception) -> None:
         """Log a contained per-cycle failure, escalating after repeated ones."""
@@ -317,7 +392,11 @@ class EventLogFileSource:
         )
         label_fields = type_cfg.labels
         key = f"eventlogfile:{event_type}"
-        default_since = (datetime.now(UTC) - self._cfg.lookback).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # "now" in Salesforce server terms (skew is zero when unknown/small):
+        # CreatedDate values are stamped by Salesforce's clock, so the settle
+        # gate / lookback / download_max_age comparisons below must use it too.
+        now = datetime.now(UTC) + self._cycle_skew
+        default_since = (now - self._cfg.lookback).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         raw = await state.load(key)
         if raw is None:
@@ -340,6 +419,7 @@ class EventLogFileSource:
         except EventLogFileError as exc:
             # Listing failure (SOQL/HTTP/transport) is contained: skip this
             # type for the cycle; the unchanged checkpoint retries it next poll.
+            self._metrics.soql_poll_errors.labels(source="eventlogfile", object=event_type).inc()
             self._record_cycle_failure(event_type, "listing", exc)
             return
 
@@ -348,7 +428,6 @@ class EventLogFileSource:
         seen: dict[str, str | None] = dict(current_ids)
         files = [f for f in files if not _is_already_processed(f, seen)]
 
-        now = datetime.now(UTC)
         settle_window = self._cfg.settle_window
         download_max_age = self._cfg.download_max_age
 
@@ -429,6 +508,7 @@ class EventLogFileSource:
                             label_fields=label_fields,
                             carried_last_created=advanced_last_created,
                             carried_ids=advanced_ids,
+                            ts_fallback=created,
                         )
                         break
                     except EventLogFileError as exc:
@@ -448,6 +528,7 @@ class EventLogFileSource:
                         label_fields=label_fields,
                         carried_last_created=current_last_created,
                         carried_ids=current_ids,
+                        ts_fallback=created,
                     )
                     pending = nxt
             finally:
@@ -473,8 +554,19 @@ class EventLogFileSource:
         label_fields: Sequence[str],
         carried_last_created: str,
         carried_ids: Sequence[_CarriedId],
+        ts_fallback: datetime | None = None,
     ) -> LogEntry:
-        ts = extract_timestamp(row, field_names=(self._cfg.timestamp_column, "TIMESTAMP"))
+        # An unparseable row timestamp falls back to the FILE's CreatedDate
+        # (stable across replays, so re-emitted rows stay byte-identical and
+        # dedup in Loki) rather than now(UTC); extract_timestamp_checked clamps
+        # a >1h-old fallback near now to stay inside Loki's OOO window.
+        ts, used_fallback = extract_timestamp_checked(
+            row,
+            field_names=(self._cfg.timestamp_column, "TIMESTAMP"),
+            fallback=ts_fallback,
+        )
+        if used_fallback:
+            self._metrics.timestamp_fallbacks.labels(source="eventlogfile").inc()
         line, sm = route_fields(row, sm_fields)
         # Promoted labels first, then reserved keys — reserved win so a
         # promoted column can never clobber source identity.

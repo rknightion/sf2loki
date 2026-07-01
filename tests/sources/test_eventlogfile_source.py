@@ -18,6 +18,7 @@ import pytest
 
 from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
 from sf2loki.model import LogEntry
+from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.eventlogfile_client import (
     EventLogFileError,
     EventLogFileMeta,
@@ -53,9 +54,13 @@ class FakeEventLogFileClient:
     list_error: Exception | None = None
     discovered_types: list[str] = field(default_factory=list)
     discover_error: bool = False
+    skew: timedelta | None = None
     list_calls: list[tuple[str, str, str, int]] = field(default_factory=list)
     download_calls: list[str] = field(default_factory=list)
     discover_calls: list[str] = field(default_factory=list)
+
+    def clock_skew(self) -> timedelta | None:
+        return self.skew
 
     async def list_files(
         self, event_type: str, interval: str, since: str, page_size: int
@@ -936,3 +941,205 @@ async def test_no_wildcard_skips_discovery(tmp_path) -> None:
     _ = [e async for e in source.events(store, asyncio.Event())]
     assert client.discover_calls == []
     assert sorted({c[0] for c in client.list_calls}) == ["Login"]
+
+
+# ---------------------------------------------------------------------------
+# Poll-error counter (issue #19): listing/discovery cycle failures must be
+# countable (downloads are already counted by eventlogfile_download_errors).
+
+
+@pytest.mark.asyncio
+async def test_listing_failure_increments_poll_error_counter(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(
+        files=[], rows_by_id={}, list_error=EventLogFileError("listing failed: HTTP 503")
+    )
+    metrics = Metrics()
+    source = EventLogFileSource(
+        make_elf_cfg(), client, sm_fields=[], metrics=metrics, poll_once=True
+    )  # type: ignore[arg-type]
+    _ = [e async for e in source.events(store, asyncio.Event())]
+
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_soql_poll_errors_total", {"source": "eventlogfile", "object": "Login"}
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_increments_poll_error_counter(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(files=[], rows_by_id={}, discover_error=True)
+    metrics = Metrics()
+    source = EventLogFileSource(
+        _wildcard_cfg(), client, sm_fields=[], metrics=metrics, poll_once=True
+    )  # type: ignore[arg-type]
+    _ = [e async for e in source.events(store, asyncio.Event())]
+
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_soql_poll_errors_total", {"source": "eventlogfile", "object": "discovery"}
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_failure_does_not_increment_poll_error_counter(tmp_path) -> None:
+    """Download failures are counted by eventlogfile_download_errors (in the
+    client) — soql_poll_errors must NOT double-count them."""
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=2)))
+    client = FakeEventLogFileClient(
+        files=[f1],
+        rows_by_id={"f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+        errors={"f1"},
+    )
+    metrics = Metrics()
+    source = EventLogFileSource(
+        make_elf_cfg(), client, sm_fields=[], metrics=metrics, poll_once=True
+    )  # type: ignore[arg-type]
+    _ = [e async for e in source.events(store, asyncio.Event())]
+
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_soql_poll_errors_total", {"source": "eventlogfile", "object": "Login"}
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic timestamp fallback (issue #20): an unparseable row timestamp
+# falls back to the FILE's CreatedDate (stable across replays), counted via
+# timestamp_fallbacks{source="eventlogfile"}; >1h-old fallbacks clamp near now.
+
+
+@pytest.mark.asyncio
+async def test_unparseable_row_timestamp_falls_back_to_file_created_date(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    created = _created_ago(timedelta(minutes=30))  # within 1h: no OOO clamp
+    f1 = make_file_meta(id="f1", created_date=created)
+    rows = [
+        {"TIMESTAMP_DERIVED": "garbage", "ROW": "bad"},
+        {"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "good"},
+    ]
+    client = FakeEventLogFileClient(files=[f1], rows_by_id={"f1": rows})
+    metrics = Metrics()
+    source = EventLogFileSource(
+        make_elf_cfg(), client, sm_fields=[], metrics=metrics, poll_once=True
+    )  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 2
+    expected = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S.%f%z")
+    assert entries[0].timestamp == expected  # file CreatedDate, not now()
+    assert entries[1].timestamp == datetime(2026, 6, 30, 1, 0, 0, tzinfo=UTC)
+    # Only the unparseable row counted.
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_timestamp_fallbacks_total", {"source": "eventlogfile"}
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_old_created_date_fallback_is_clamped_near_now(tmp_path) -> None:
+    """A fallback >1h old would be rejected by Loki's OOO guard (dropping the
+    row entirely) — clamp near now instead; the fallback is still counted."""
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
+    rows = [{"TIMESTAMP_DERIVED": "garbage", "ROW": "bad"}]
+    client = FakeEventLogFileClient(files=[f1], rows_by_id={"f1": rows})
+    metrics = Metrics()
+    source = EventLogFileSource(
+        make_elf_cfg(), client, sm_fields=[], metrics=metrics, poll_once=True
+    )  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    age = datetime.now(UTC) - entries[0].timestamp
+    assert timedelta(0) <= age < timedelta(minutes=10)
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_timestamp_fallbacks_total", {"source": "eventlogfile"}
+        )
+        == 1.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Carried-id window (issue #21a): ALL files sharing the watermark CreatedDate
+# must stay in the carried window — a bulk backfill (>200 files with one
+# CreatedDate) must not re-download uncovered files forever.
+
+
+@pytest.mark.asyncio
+async def test_bulk_files_sharing_one_created_date_all_deduped_next_cycle(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    created = _created_ago(timedelta(hours=2))
+    n = 250  # exceeds the old 200-pair cap
+    files = [make_file_meta(id=f"f{i:03d}", created_date=created) for i in range(n)]
+    rows_by_id = {
+        f"f{i:03d}": [{"TIMESTAMP_DERIVED": "20260630010000.000", "N": str(i)}] for i in range(n)
+    }
+    client = FakeEventLogFileClient(files=files, rows_by_id=rows_by_id)
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+    assert len(entries) == n
+    assert len(client.download_calls) == n
+
+    # Cycle 2 re-lists everything at the tied CreatedDate (>= watermark): ALL
+    # files must dedup — zero re-downloads, zero duplicate rows.
+    entries2 = await _run_cycle(source, store)
+    assert entries2 == []
+    assert len(client.download_calls) == n
+
+
+# ---------------------------------------------------------------------------
+# Clock-skew hardening (issue #21b): CreatedDate comparisons use Salesforce
+# server time (from the Date response header) when the local clock is skewed.
+
+
+@pytest.mark.asyncio
+async def test_clock_skew_applied_to_settle_gate(tmp_path) -> None:
+    """Local clock 10 minutes BEHIND Salesforce: a file created 'now' by the
+    local clock is really 10 minutes old in server time, so it is settled and
+    must be processed (unadjusted, the settle gate would skip it)."""
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(0)))
+    client = FakeEventLogFileClient(
+        files=[f1],
+        rows_by_id={"f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+        skew=timedelta(minutes=10),  # server time = local now + 10m
+    )
+    cfg = make_elf_cfg(settle_window=timedelta(minutes=5))
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert client.download_calls == ["f1"]
+    assert len(entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_small_clock_skew_is_ignored(tmp_path) -> None:
+    """|skew| <= 30s (Date-header noise / latency) must NOT shift comparisons."""
+    store = FileCheckpointStore(tmp_path / "s.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(0)))
+    client = FakeEventLogFileClient(
+        files=[f1],
+        rows_by_id={"f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+        skew=timedelta(seconds=20),
+    )
+    cfg = make_elf_cfg(settle_window=timedelta(minutes=5))
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # Fresh file stays unsettled: 20s of skew is within the ignore threshold.
+    assert client.download_calls == []
+    assert entries == []
