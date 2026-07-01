@@ -119,17 +119,38 @@ class PubSubClient:
         self._metrics = metrics if metrics is not None else Metrics()
 
         if channel is None:
-            # Production path: TLS channel owned by this client.
-            creds = grpc.ssl_channel_credentials()
-            self._channel: grpc.aio.Channel = grpc.aio.secure_channel(cfg.endpoint, creds)
+            # Production path: the TLS channel is created LAZILY on first use
+            # (see _stub()). grpc.aio binds a channel to the event loop that is
+            # current when it is created; App.build() constructs this client
+            # synchronously *before* the asyncio/uvloop loop starts, so an
+            # eagerly-created channel would bind to the wrong loop and Subscribe
+            # would silently never deliver. Deferring creation to first use
+            # guarantees it binds to the running loop.
+            self._channel: grpc.aio.Channel | None = None
             self._owns_channel = True
         else:
             # Injected channel (tests): do not close on aclose().
             self._channel = channel
             self._owns_channel = False
 
-        self._stub = pb_grpc.PubSubStub(self._channel)  # type: ignore[no-untyped-call]
+        self._stub_cached: Any = (
+            pb_grpc.PubSubStub(channel)  # type: ignore[no-untyped-call]
+            if channel is not None
+            else None
+        )
         self._codec = AvroCodec(self.get_schema)
+
+    def _stub(self) -> Any:
+        """Return the gRPC stub, creating the owned channel lazily on first use.
+
+        Must be called from within the running event loop so the channel binds
+        to it (see the note in __init__).
+        """
+        if self._stub_cached is None:
+            creds = grpc.ssl_channel_credentials()
+            self._channel = grpc.aio.secure_channel(self._cfg.endpoint, creds)
+            self._stub_cached = pb_grpc.PubSubStub(self._channel)  # type: ignore[no-untyped-call]
+        return self._stub_cached
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,7 +162,7 @@ class PubSubClient:
         This is also the fetch_schema callback wired into :class:`AvroCodec`,
         so the codec calls it on cache miss — callers rarely need it directly.
         """
-        resp = await self._stub.GetSchema(
+        resp = await self._stub().GetSchema(
             pb.SchemaRequest(schema_id=schema_id),  # type: ignore[attr-defined]
             metadata=await self._metadata(),
         )
@@ -176,7 +197,7 @@ class PubSubClient:
         n = num_requested if num_requested is not None else self._cfg.default_num_requested
         low_watermark = n // 2
 
-        call: grpc.aio.StreamStreamCall[Any, Any] = self._stub.Subscribe(
+        call: grpc.aio.StreamStreamCall[Any, Any] = self._stub().Subscribe(
             metadata=await self._metadata()
         )
 
@@ -227,8 +248,8 @@ class PubSubClient:
                     break
 
     async def aclose(self) -> None:
-        """Close the underlying gRPC channel (only if owned by this client)."""
-        if self._owns_channel:
+        """Close the underlying gRPC channel (only if owned + actually created)."""
+        if self._owns_channel and self._channel is not None:
             await self._channel.close()
 
     # ------------------------------------------------------------------

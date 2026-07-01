@@ -271,6 +271,29 @@ def test_preset_for_invalid_raises() -> None:
         preset_for("BOGUS")
 
 
+def test_channel_created_lazily_not_in_init(
+    pubsub_cfg: PubSubConfig,
+    token_provider: FakeTokenProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gRPC channel must NOT be created in __init__ (channel=None case).
+
+    App.build() constructs PubSubClient synchronously, before the event loop
+    starts. grpc.aio binds a channel to the loop current at creation time, so an
+    eagerly-created channel binds to the wrong loop and Subscribe silently never
+    delivers. The channel must be created lazily, inside the running loop.
+    """
+    import grpc.aio as grpc_aio
+
+    created: list[object] = []
+    monkeypatch.setattr(
+        grpc_aio, "secure_channel", lambda *a, **k: created.append((a, k)) or object()
+    )
+    client = PubSubClient(pubsub_cfg, token_provider)  # channel=None -> production path
+    assert created == [], "grpc channel was created eagerly in __init__"
+    assert client._channel is None
+
+
 # ---------------------------------------------------------------------------
 # Tests: subscribe yields DecodedEvents
 # ---------------------------------------------------------------------------
