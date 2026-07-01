@@ -14,11 +14,20 @@ from sf2loki.model import Batch
 
 
 class RetryableSinkError(Exception):
-    """Delivery failed transiently (transport/429/5xx); retry the same batch."""
+    """Delivery failed but the data is fine (transport/429/5xx, or an auth/config
+    error such as 401/403); retry the same batch — never drop it."""
 
 
 class PermanentSinkError(Exception):
-    """Delivery rejected unrecoverably (400 / unsplittable 413); drop + advance."""
+    """Delivery rejected unrecoverably (single-entry 400/413); drop + advance.
+
+    ``reason`` is a low-cardinality tag for the per-entry drop counter
+    (``sf2loki_loki_entries_dropped``), e.g. ``"bad_request"`` / ``"oversized_413"``.
+    """
+
+    def __init__(self, message: str, *, reason: str = "permanent") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class Sink(Protocol):

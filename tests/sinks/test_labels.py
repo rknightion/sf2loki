@@ -6,8 +6,10 @@ import pytest
 
 from sf2loki.sinks.loki.labels import (
     ALLOWED_LABELS,
+    RESERVED_STATIC_LABELS,
     LabelGuardError,
     guard_labels,
+    guard_static_labels,
     render_labels,
 )
 
@@ -44,6 +46,34 @@ class TestGuardLabels:
     def test_raises_with_custom_allowed_set(self) -> None:
         with pytest.raises(LabelGuardError, match="job"):
             guard_labels({"job": "sf2loki"}, allowed=frozenset({"custom_key"}))
+
+
+class TestGuardStaticLabels:
+    """Operator static labels must not clobber per-entry identity labels."""
+
+    def test_reserved_set_contains_identity_labels(self) -> None:
+        assert RESERVED_STATIC_LABELS == frozenset({"source", "event_type"})
+
+    @pytest.mark.parametrize("key", ["source", "event_type"])
+    def test_rejects_reserved_key(self, key: str) -> None:
+        with pytest.raises(LabelGuardError, match=key):
+            guard_static_labels({key: "x"})
+
+    def test_error_message_explains_static_label_clobbering(self) -> None:
+        with pytest.raises(LabelGuardError, match="static"):
+            guard_static_labels({"event_type": "x"})
+
+    def test_allows_non_reserved_allowed_keys(self) -> None:
+        guard_static_labels(
+            {"job": "sf2loki", "service_name": "sf", "environment": "prod", "sf_org_id": "00D"}
+        )  # must not raise
+
+    def test_still_rejects_disallowed_keys(self) -> None:
+        with pytest.raises(LabelGuardError, match="user_id"):
+            guard_static_labels({"user_id": "abc"})
+
+    def test_empty_ok(self) -> None:
+        guard_static_labels({})
 
 
 class TestRenderLabels:

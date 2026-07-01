@@ -16,7 +16,7 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -66,7 +66,10 @@ def build_static_labels(
     ``environment`` from the Salesforce ``environment`` toggle. Operator-supplied
     ``sink.loki.labels`` are merged last, so they win over these defaults (e.g. to
     point ``service_name`` at the monitored system or override ``environment``).
-    All keys must be in :data:`~sf2loki.sinks.loki.labels.ALLOWED_LABELS`.
+    All keys must be in :data:`~sf2loki.sinks.loki.labels.ALLOWED_LABELS`; the
+    per-entry identity keys in
+    :data:`~sf2loki.sinks.loki.labels.RESERVED_STATIC_LABELS` (``source``,
+    ``event_type``) are rejected at startup by the sink's label guard.
     """
     return {
         "job": "sf2loki",
@@ -81,6 +84,11 @@ def build_static_labels(
 # short and separate from shutdown_grace (which bounds the pipeline drain) so
 # the two don't stack past the container runtime's stop timeout.
 _CLOSE_TIMEOUT: float = 5.0
+
+# Explicit timeouts for the shared HTTP clients: httpx defaults to 5s for
+# everything, which makes large Loki pushes / slow Salesforce responses churn
+# as transport errors.
+_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
 
 class Pipeline:
@@ -115,36 +123,60 @@ class Pipeline:
         self._static_labels = dict(labels)
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Run all producers and the single consumer until ``stop`` and drained."""
+        """Run all producers and the single consumer until ``stop`` and drained.
+
+        FIRST_EXCEPTION semantics for the consumer: it can only finish normally
+        after seeing every producer's sentinel, so if it completes while
+        producers are still running it died (e.g. an ``OSError`` from the
+        checkpoint file write). In that case producers — which would otherwise
+        block forever on the full queue — are cancelled and the exception is
+        re-raised so the process exits nonzero and gets restarted (checkpoints
+        are safe; the batch is simply retried after restart).
+        """
         if not self._sources:
             return
         queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
         producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
         consumer = asyncio.create_task(self._consume(queue, len(producers), stop))
+        producers_done = asyncio.gather(*producers)
         try:
-            await asyncio.gather(*producers)
+            first_done: set[asyncio.Future[Any]] = {producers_done, consumer}
+            await asyncio.wait(first_done, return_when=asyncio.FIRST_COMPLETED)
+            if consumer.done() and not producers_done.done():
+                # Consumer died mid-stream: crash out instead of hanging.
+                producers_done.cancel()
+                exc = consumer.exception()
+                if exc is not None:
+                    log.error("pipeline consumer failed; aborting", error=str(exc))
+                    raise exc
+                return
+            await producers_done
             # Producers each enqueue a sentinel in their finally; the consumer
             # returns once it has seen one per producer and flushed the tail.
             await consumer
         finally:
-            for task in (*producers, consumer):
-                task.cancel()
-            await asyncio.gather(*producers, consumer, return_exceptions=True)
+            producers_done.cancel()
+            consumer.cancel()
+            await asyncio.gather(producers_done, consumer, return_exceptions=True)
 
     async def _produce(
         self, source: Source, queue: asyncio.Queue[LogEntry | object], stop: asyncio.Event
     ) -> None:
         try:
             async for entry in source.events(self._state, stop):
-                if self._static_labels:
-                    entry.labels = {**entry.labels, **self._static_labels}
-                event_type = entry.labels.get("event_type", "unknown")
-                self._metrics.events_ingested.labels(
-                    source=source.name, event_type=event_type
-                ).inc()
-                lag = (datetime.now(UTC) - entry.timestamp).total_seconds()
-                self._metrics.ingest_lag.labels(event_type=event_type).set(lag)
+                if not entry.checkpoint_only:
+                    if self._static_labels:
+                        entry.labels = {**entry.labels, **self._static_labels}
+                    event_type = entry.labels.get("event_type", "unknown")
+                    self._metrics.events_ingested.labels(
+                        source=source.name, event_type=event_type
+                    ).inc()
+                    lag = (datetime.now(UTC) - entry.timestamp).total_seconds()
+                    self._metrics.ingest_lag.labels(event_type=event_type).set(lag)
                 await queue.put(entry)
+                # Also updated here (not just in the consumer) so the gauge keeps
+                # tracking queue growth while the consumer is stuck in sink retry.
+                self._metrics.queue_depth.set(queue.qsize())
         finally:
             await queue.put(_SENTINEL)
 
@@ -181,7 +213,8 @@ class Pipeline:
 
             assert isinstance(item, LogEntry)
             batch.append(item)
-            approx_bytes += len(item.line.encode("utf-8")) + 64
+            if not item.checkpoint_only:
+                approx_bytes += len(item.line.encode("utf-8")) + 64
             if deadline is None:
                 deadline = loop.time() + flush_interval
             if len(batch) >= self._batch.max_entries or approx_bytes >= self._batch.max_bytes:
@@ -191,7 +224,17 @@ class Pipeline:
     async def _flush(self, entries: list[LogEntry], stop: asyncio.Event) -> None:
         if not entries:
             return
-        batch = Batch(entries=list(entries))
+        # checkpoint_only entries (e.g. Pub/Sub keepalive replay_ids) ride the
+        # batch for FIFO commit ordering but are never handed to the sink.
+        all_entries = Batch(entries=list(entries))
+        real = [e for e in entries if not e.checkpoint_only]
+        if not real:
+            # Nothing to push: FIFO ordering guarantees any real entry for the
+            # same key was already pushed in an earlier flush, so committing
+            # these tokens directly preserves the commit-after-push invariant.
+            await self._commit(all_entries)
+            return
+        batch = Batch(entries=real)
         backoff = _RETRY_BACKOFF_BASE
         while True:
             t0 = asyncio.get_running_loop().time()
@@ -209,18 +252,24 @@ class Pipeline:
                     return  # stop fired during backoff
                 backoff = min(backoff * 2, _RETRY_BACKOFF_MAX)
                 continue
-            except PermanentSinkError:
-                # Poison batch: drop it, count the gap, and advance past it. Count
-                # every dropped entry (a flat 400 on a multi-entry batch drops all
-                # of them), not just one — matches the sink's per-entry drop count.
-                self._metrics.loki_push.labels(outcome="dropped").inc(len(batch.entries))
-                await self._commit(batch)
+            except PermanentSinkError as exc:
+                # Poison batch: drop it, count the gap loudly, and advance past
+                # it. Count every dropped entry (a permanent error on a
+                # multi-entry batch drops all of them), not just one.
+                self._metrics.loki_entries_dropped.labels(reason=exc.reason).inc(len(batch.entries))
+                log.error(
+                    "dropping undeliverable batch and advancing checkpoint",
+                    entries=len(batch.entries),
+                    reason=exc.reason,
+                    error=str(exc),
+                )
+                await self._commit(all_entries)
                 return
             else:
                 self._metrics.loki_push.labels(outcome="success").inc()
                 self._metrics.loki_push_duration.observe(asyncio.get_running_loop().time() - t0)
                 log.debug("pushed batch to loki", entries=len(batch.entries))
-                await self._commit(batch)
+                await self._commit(all_entries)
                 return
 
     async def _commit(self, batch: Batch) -> None:
@@ -353,10 +402,10 @@ class App:
         )
         health = Health()
 
-        sf_http = httpx.AsyncClient()
+        sf_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         tokens = TokenProvider(cfg.salesforce, sf_http, metrics=metrics)
 
-        loki_http = httpx.AsyncClient()
+        loki_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         sink = LokiSink(cfg.sink.loki, loki_http, metrics=metrics)
 
         state = _build_state(cfg)
@@ -387,7 +436,7 @@ class App:
         if cfg.sources.eventlog_objects.enabled:
             from sf2loki.salesforce.soql_client import SoqlClient
 
-            soql = SoqlClient(cfg.salesforce, tokens, sf_http)
+            soql = SoqlClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
             sources.append(
                 EventLogObjectsSource(cfg.sources.eventlog_objects, soql, sm_fields=sm_fields)
             )
@@ -457,6 +506,16 @@ class App:
             )
 
         closers.extend([sink.aclose, sf_http.aclose, loki_http.aclose])
+
+        # Release the state store's exclusive-instance lock last, after the
+        # pipeline has drained and committed its final checkpoints.
+        state_close = getattr(state, "close", None)
+        if callable(state_close):
+
+            async def _close_state() -> None:
+                state_close()
+
+            closers.append(_close_state)
         return cls(
             cfg=cfg,
             pipeline=pipeline,
@@ -500,6 +559,13 @@ class App:
                 loop.add_signal_handler(sig, stop.set)
 
         await self._health.start(self._cfg.service.health_addr)
+
+        # Startup auth probe: mint a token in EVERY configuration (even when
+        # salesforce.org_id is set, in which case org_id() never touches the
+        # network) so bad credentials fail fast and exit nonzero here, before
+        # readiness — instead of every source loop retrying forever while the
+        # process reports healthy.
+        await self._tokens.token()
 
         # Resolve the org id once and assemble deployment-wide labels.
         org_id = self._cfg.salesforce.org_id or await self._tokens.org_id()

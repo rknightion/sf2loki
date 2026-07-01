@@ -360,9 +360,9 @@ panels.append(
         w=12,
         h=8,
         unit="ops",
-        desc="Loki push attempts/s by outcome (success / retried / dropped). The RED rate signal for the "
-        "Loki sink — any sustained dropped or retried volume means data is being lost or delayed "
-        "on the way to Loki.",
+        desc="Loki push batch attempts/s by outcome (success / retried). Sustained retried volume means "
+        "delivery to Loki is delayed (data is held and retried, not lost). Per-entry permanent "
+        "drops are counted separately in the 'Entries dropped rate by reason' panel below.",
         stacking="normal",
         overrides=[
             {
@@ -372,10 +372,6 @@ panels.append(
             {
                 "matcher": {"id": "byName", "options": "retried"},
                 "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}],
-            },
-            {
-                "matcher": {"id": "byName", "options": "dropped"},
-                "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}],
             },
         ],
     )
@@ -446,6 +442,31 @@ panels.append(
     )
 )
 y += 8
+
+panels.append(
+    panel(
+        "Entries dropped rate by reason",
+        "timeseries",
+        [
+            target(
+                f"sum by (reason) (rate(sf2loki_loki_entries_dropped_total{JOB}[5m]))",
+                legend="{{reason}}",
+            )
+        ],
+        x=0,
+        y=y,
+        w=24,
+        h=6,
+        unit="ops",
+        desc="Log entries permanently dropped as undeliverable, per reason (bad_request = Loki rejected "
+        "the entry with 400, e.g. outside the out-of-order window; oversized_413 = a single entry "
+        "too large even alone). Healthy = 0 — every non-zero point is real data loss, logged at "
+        "ERROR by the connector and worth alerting on. Auth failures (401/403) are NOT counted "
+        "here: those are retried indefinitely without dropping.",
+        thresholds=thr([(None, "green"), (0.001, "red")]),
+    )
+)
+y += 6
 
 
 # =============================================================================

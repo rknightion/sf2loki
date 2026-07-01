@@ -25,13 +25,21 @@ class CheckpointToken:
 
 @dataclass(slots=True)
 class LogEntry:
-    """A single decoded event ready to ship to the sink."""
+    """A single decoded event ready to ship to the sink.
+
+    ``checkpoint_only`` entries carry a checkpoint advance with no log payload
+    (e.g. a Pub/Sub keepalive's ``latest_replay_id``). The pipeline never sends
+    them to the sink; it only commits their token — after any real entries
+    queued ahead of them have been pushed, preserving the commit-after-push
+    at-least-once invariant.
+    """
 
     timestamp: datetime
     labels: Mapping[str, str]
     line: str
     structured_metadata: Mapping[str, str]
     checkpoint: CheckpointToken
+    checkpoint_only: bool = False
 
 
 @dataclass(slots=True)

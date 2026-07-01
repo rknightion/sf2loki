@@ -1,14 +1,15 @@
 """LokiSink: HTTP push sink for Grafana Loki.
 
 Satisfies the Sink protocol (push / aclose). Handles auth, encoding/compression,
-bounded retries with tenacity, and 413 payload splitting.
+bounded retries with tenacity (honouring Retry-After), and 400/413 payload
+splitting. Auth/config rejections (401/403/404) are retryable — the data is
+fine, so they must never be treated as poison.
 """
 
 from __future__ import annotations
 
 import base64
 import gzip
-import logging
 from typing import Any
 
 import httpx
@@ -16,13 +17,14 @@ import tenacity
 
 from sf2loki.config import LokiConfig
 from sf2loki.model import Batch
+from sf2loki.obs.logging import get_logger
 from sf2loki.obs.metrics import Metrics
 from sf2loki.shaping import cap_line
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
-from sf2loki.sinks.loki.labels import guard_labels
+from sf2loki.sinks.loki.labels import guard_static_labels
 from sf2loki.sinks.loki.push import encode_json, encode_protobuf
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level retry knobs — monkeypatched in tests to keep them fast.
@@ -31,6 +33,48 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS: int = 5
 _WAIT_MIN: float = 0.5  # seconds
 _WAIT_MAX: float = 30.0  # seconds
+
+# Longest we will honour a server-sent Retry-After for (seconds).
+_RETRY_AFTER_CAP: float = 60.0
+
+# Statuses that mean broken auth/config (rotated token, wrong tenant/URL): the
+# data is fine, so these are retryable — the pipeline holds the batch and its
+# checkpoints and retries with capped backoff until an operator fixes it.
+_AUTH_CONFIG_STATUSES: frozenset[int] = frozenset({401, 403, 404})
+
+# Log the auth/config ERROR on the 1st consecutive failure and every Nth after
+# (with the pipeline's 30s backoff cap that is roughly one ERROR per 5 minutes).
+_AUTH_LOG_EVERY: int = 10
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header in delay-seconds form.
+
+    Returns the (non-negative) delay, or ``None`` for a missing header or the
+    HTTP-date form — callers then fall back to normal backoff.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return max(0.0, seconds)
+
+
+def _compute_wait(retry_state: tenacity.RetryCallState) -> float:
+    """Tenacity wait: exponential backoff, raised to any server Retry-After.
+
+    Waits at least the Retry-After carried by the failed attempt's
+    :class:`_TransientError` (capped at :data:`_RETRY_AFTER_CAP`), so a 429/503
+    from Grafana Cloud is not hammered ahead of the server's own schedule.
+    """
+    base = float(tenacity.wait_random_exponential(min=_WAIT_MIN, max=_WAIT_MAX)(retry_state))
+    exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    retry_after: float | None = getattr(exc, "retry_after", None)
+    if retry_after is None:
+        return base
+    return min(max(base, retry_after), _RETRY_AFTER_CAP)
 
 
 class LokiSink:
@@ -47,12 +91,14 @@ class LokiSink:
         *,
         metrics: Metrics | None = None,
     ) -> None:
-        guard_labels(cfg.labels)  # fail fast on disallowed static label keys
+        # Fail fast on disallowed/reserved static label keys (config error).
+        guard_static_labels(cfg.labels)
 
         self._cfg = cfg
         self._client = client
         self._headers = self._build_headers()
         self._metrics = metrics if metrics is not None else Metrics()
+        self._consecutive_auth_failures = 0
 
     # ------------------------------------------------------------------
     # Header construction
@@ -124,13 +170,16 @@ class LokiSink:
 
             status = resp.status_code
             if status in (429,) or (500 <= status < 600):
-                raise _TransientError(f"HTTP {status}")
+                raise _TransientError(
+                    f"HTTP {status}",
+                    retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                )
             return status
 
         retry = tenacity.AsyncRetrying(
             reraise=False,
             stop=tenacity.stop_after_attempt(_MAX_ATTEMPTS),
-            wait=tenacity.wait_random_exponential(min=_WAIT_MIN, max=_WAIT_MAX),
+            wait=_compute_wait,
             retry=tenacity.retry_if_exception_type(_TransientError),
         )
 
@@ -147,7 +196,7 @@ class LokiSink:
     # ------------------------------------------------------------------
 
     async def push(self, batch: Batch) -> None:
-        """Encode *batch* and POST it to Loki, with retries and 413 splitting."""
+        """Encode *batch* and POST it to Loki, with retries and 400/413 splitting."""
         if not batch.entries:
             return
 
@@ -158,13 +207,27 @@ class LokiSink:
 
         if 200 <= status < 300:
             self._metrics.loki_bytes_pushed.inc(len(body))
+            self._note_auth_ok()
             return
 
-        if status == 413:
+        if status in _AUTH_CONFIG_STATUSES:
+            # Rotated token / wrong tenant or URL. The data is fine — surface
+            # loudly and let the pipeline retry forever with capped backoff;
+            # checkpoints are held, so nothing is lost while an operator fixes it.
+            self._note_auth_failure(status)
+            raise RetryableSinkError(
+                f"Loki rejected push with HTTP {status} (auth/config error); "
+                "retrying — no data dropped"
+            )
+
+        if status in (400, 413):
+            reason = "oversized_413" if status == 413 else "bad_request"
             if len(batch.entries) == 1:
-                raise PermanentSinkError("unsplittable 413: single-entry batch rejected")
+                raise PermanentSinkError(
+                    f"unsplittable {status}: single-entry batch rejected", reason=reason
+                )
             # Split and recurse — re-encode each half independently. A permanent
-            # failure in one half (e.g. one oversized entry that 413s even when
+            # failure in one half (e.g. one entry that is rejected even when
             # alone) must NOT discard the other half: drop+count just the poison
             # and keep delivering the rest. Only a top-level single-entry batch
             # propagates PermanentSinkError (no parent to absorb it).
@@ -172,19 +235,42 @@ class LokiSink:
             for half in (Batch(entries=batch.entries[:mid]), Batch(entries=batch.entries[mid:])):
                 try:
                     await self.push(half)
-                except PermanentSinkError:
-                    self._metrics.loki_push.labels(outcome="dropped").inc(len(half.entries))
-                    logger.warning(
-                        "dropping %d undeliverable Loki entries (permanent error during 413 split)",
-                        len(half.entries),
+                except PermanentSinkError as exc:
+                    self._metrics.loki_entries_dropped.labels(reason=exc.reason).inc(
+                        len(half.entries)
+                    )
+                    log.warning(
+                        "dropping undeliverable Loki entries (permanent error during split)",
+                        entries=len(half.entries),
+                        reason=exc.reason,
+                        error=str(exc),
                     )
             return
 
-        if status == 400:
-            raise PermanentSinkError("Loki rejected batch (400 Bad Request)")
+        # Any other status is unexpected: retry rather than silently dropping
+        # data — permanent drops are reserved for statuses known to mean a
+        # poison payload (400 / single-entry 413).
+        raise RetryableSinkError(f"Loki push failed with unexpected HTTP {status}")
 
-        # Any other 4xx is also permanent.
-        raise PermanentSinkError(f"Loki rejected batch (HTTP {status})")
+    def _note_auth_failure(self, status: int) -> None:
+        """Log auth/config rejections loudly, rate-limited across retries."""
+        self._consecutive_auth_failures += 1
+        n = self._consecutive_auth_failures
+        if n == 1 or n % _AUTH_LOG_EVERY == 0:
+            log.error(
+                "Loki push rejected (auth/config) — check auth token / tenant_id / url; "
+                "retrying with backoff, no data dropped",
+                status=status,
+                consecutive_failures=n,
+            )
+
+    def _note_auth_ok(self) -> None:
+        if self._consecutive_auth_failures:
+            log.info(
+                "Loki push auth recovered",
+                after_failures=self._consecutive_auth_failures,
+            )
+            self._consecutive_auth_failures = 0
 
     def _cap_lines(self, batch: Batch) -> None:
         """Truncate any over-cap lines in place before encoding.
@@ -215,7 +301,15 @@ class LokiSink:
 
 
 class _TransientError(Exception):
-    """Internal signal: this failure is retryable."""
+    """Internal signal: this failure is retryable.
+
+    ``retry_after`` carries a parsed Retry-After delay (seconds) when the
+    server sent one; :func:`_compute_wait` honours it.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------------------

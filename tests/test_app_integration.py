@@ -84,6 +84,63 @@ def test_build_rejects_disallowed_label() -> None:
         App.build(cfg)
 
 
+@pytest.mark.parametrize("key", ["source", "event_type"])
+def test_build_rejects_reserved_static_label(key: str) -> None:
+    """Static sink.loki.labels overriding per-entry identity labels would collapse
+    all stream separation — must fail fast at startup."""
+    cfg = _cfg(sink={"loki": {"url": "http://x/loki/api/v1/push", "labels": {key: "x"}}})
+    with pytest.raises(LabelGuardError, match=key):
+        App.build(cfg)
+
+
+def test_build_sets_explicit_http_timeouts() -> None:
+    """Both shared clients get explicit timeouts (not httpx's 5s-everywhere default)."""
+    appn = App.build(_cfg())
+    for client in (appn._pipeline._sink._client, appn._tokens._client):  # type: ignore[attr-defined]
+        t = client.timeout
+        assert t.connect == 10.0
+        assert t.read == 30.0
+        assert t.write == 30.0
+        assert t.pool == 30.0
+
+
+# ---------------------------------------------------------------------------
+# Startup auth probe: bad credentials fail fast in every configuration
+# ---------------------------------------------------------------------------
+
+
+class _BadCredsTokens:
+    """TokenProvider stand-in whose mint always fails (bad credentials)."""
+
+    async def token(self) -> object:
+        raise RuntimeError("bad credentials")
+
+    async def org_id(self) -> str:
+        raise AssertionError("org_id must not be needed when salesforce.org_id is set")
+
+
+async def test_run_fails_fast_on_bad_credentials_even_with_org_id_configured() -> None:
+    """With org_id configured, run() must still mint a token before set_ready so
+    bad credentials exit nonzero at startup instead of retrying forever."""
+    cfg = _cfg(
+        salesforce={
+            "client_id": "cid",
+            "username": "svc@example.com",
+            "private_key": "DUMMY",
+            "org_id": "00D000000000001",
+        },
+        service={"health_addr": "127.0.0.1:0"},
+    )
+    appn = App.build(cfg)
+    appn._tokens = _BadCredsTokens()  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="bad credentials"):
+            await asyncio.wait_for(appn.run(), timeout=5)
+        assert not appn._health.ready  # never went ready
+    finally:
+        await appn._health.stop()
+
+
 def test_build_rejects_overlapping_category() -> None:
     # Streaming LoginEventStream AND polling LoginEvent = the same data twice.
     cfg = _cfg(

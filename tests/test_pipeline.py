@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import structlog.testing
 
 from sf2loki import app as app_module
 from sf2loki.app import Pipeline
@@ -23,6 +24,18 @@ def _entry(key: str, value: str, line: str = "{}") -> LogEntry:
         line=line,
         structured_metadata={},
         checkpoint=CheckpointToken(key=key, value=value),
+    )
+
+
+def _keepalive(key: str, value: str) -> LogEntry:
+    """A checkpoint-only entry (e.g. a Pub/Sub keepalive latest_replay_id)."""
+    return LogEntry(
+        timestamp=datetime.now(UTC),
+        labels={},
+        line="",
+        structured_metadata={},
+        checkpoint=CheckpointToken(key=key, value=value),
+        checkpoint_only=True,
     )
 
 
@@ -134,8 +147,8 @@ async def test_permanent_error_drops_and_advances() -> None:
 
 
 async def test_permanent_error_counts_all_dropped_entries() -> None:
-    # A flat permanent error (e.g. 400) on a multi-entry batch drops every entry;
-    # the dropped metric must reflect N, not 1.
+    # A permanent error on a multi-entry batch drops every entry; the per-entry
+    # drop counter must reflect N (with the error's reason), not 1.
     src = FakeSource([_entry("k", "1"), _entry("k", "2"), _entry("k", "3")])
     sink = FakeSink(permanent=True)
     state = FakeState()
@@ -146,8 +159,28 @@ async def test_permanent_error_counts_all_dropped_entries() -> None:
 
     await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
 
-    dropped = metrics.registry.get_sample_value("sf2loki_loki_push_total", {"outcome": "dropped"})
+    dropped = metrics.registry.get_sample_value(
+        "sf2loki_loki_entries_dropped_total", {"reason": "permanent"}
+    )
     assert dropped == 3.0
+    # loki_push{outcome} counts batch outcomes only — no "dropped" outcome anymore.
+    assert (
+        metrics.registry.get_sample_value("sf2loki_loki_push_total", {"outcome": "dropped"}) is None
+    )
+
+
+async def test_permanent_drop_is_logged_with_count_and_reason() -> None:
+    src = FakeSource([_entry("k", "1"), _entry("k", "2")])
+    sink = FakeSink(permanent=True)
+    state = FakeState()
+    pipe = _pipeline(src, sink, state, max_entries=10)
+
+    with structlog.testing.capture_logs() as captured:
+        await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    drops = [e for e in captured if e["log_level"] == "error" and e.get("entries") == 2]
+    assert drops, f"no ERROR drop log with entry count; got {captured}"
+    assert drops[0]["reason"] == "permanent"
 
 
 async def test_retryable_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +322,136 @@ async def test_commit_eventlogfile_watermark_falls_back_on_bad_json() -> None:
         {"source": "eventlogfile", "object": "Login"},
     )
     assert val is not None and val > 0.0
+
+
+# --- Consumer-task death must crash Pipeline.run (A5) -----------------------
+
+
+class ExplodingState(FakeState):
+    """Checkpoint store whose commit fails like a full/read-only volume."""
+
+    async def commit(self, key: str, value: str) -> None:
+        raise OSError("disk full")
+
+
+async def test_consumer_death_crashes_run_instead_of_hanging() -> None:
+    """A fatal consumer exception (e.g. checkpoint write OSError) must propagate
+    out of Pipeline.run promptly — not leave producers blocked forever."""
+    block = asyncio.Event()  # producer never finishes on its own
+    src = FakeSource([_entry("k", "v")], block=block)
+    sink = FakeSink()
+    pipe = _pipeline(src, sink, ExplodingState(), max_entries=1)
+
+    with pytest.raises(OSError, match="disk full"):
+        await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+
+# --- checkpoint_only entries (A6) --------------------------------------------
+
+
+async def test_checkpoint_only_rides_batch_but_never_reaches_sink() -> None:
+    """Real entry + keepalive for the same key in one flush: the sink sees only
+    the real entry; the keepalive's (later) token is committed after the push."""
+    src = FakeSource(
+        [
+            _entry("pubsub:/event/X", "v1", line="real event"),
+            _keepalive("pubsub:/event/X", "v2"),
+        ]
+    )
+    sink = FakeSink()
+    state = FakeState()
+    pipe = _pipeline(src, sink, state, max_entries=2)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    (batch,) = sink.pushed
+    assert [e.line for e in batch.entries] == ["real event"]
+    assert all(not e.checkpoint_only for e in batch.entries)
+    assert state.committed == {"pubsub:/event/X": "v2"}  # keepalive token won, post-push
+
+
+async def test_only_keepalives_flush_skips_sink_and_commits_directly() -> None:
+    src = FakeSource([_keepalive("pubsub:/event/X", "v9")])
+    sink = FakeSink()
+    state = FakeState()
+    pipe = _pipeline(src, sink, state)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    assert sink.attempts == 0  # sink never touched
+    assert state.committed == {"pubsub:/event/X": "v9"}
+
+
+async def test_keepalive_token_not_committed_when_push_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit-after-push invariant: a keepalive queued behind a real entry must
+    not commit if that entry's push never succeeded."""
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 5.0)
+    src = FakeSource([_entry("k", "v1"), _keepalive("k", "v2")])
+    sink = FakeSink(fail_times=10**6)
+    state = FakeState()
+    pipe = _pipeline(src, sink, state, max_entries=2)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(pipe.run(stop))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, timeout=0.5)
+
+    assert state.committed == {}  # neither the real token nor the keepalive
+
+
+async def test_keepalive_skips_static_labels_and_ingest_metrics() -> None:
+    keepalive = _keepalive("pubsub:/event/X", "v1")
+    src = FakeSource([keepalive])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+    pipe.set_static_labels({"job": "sf2loki"})
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    assert keepalive.labels == {}  # static labels not merged
+    ingested = metrics.registry.get_sample_value(
+        "sf2loki_events_ingested_total", {"source": "test", "event_type": "unknown"}
+    )
+    assert ingested is None  # not counted as an ingested event
+
+
+async def test_keepalive_commit_fires_commit_metric() -> None:
+    src = FakeSource([_keepalive("pubsub:/event/LoginEventStream", "AAEC")])
+    sink = FakeSink()
+    state = FakeState()
+    metrics = Metrics()
+    pipe = Pipeline(sources=[src], sink=sink, state=state, batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    val = metrics.registry.get_sample_value(
+        "sf2loki_last_replay_commit_timestamp_seconds",
+        {"topic": "/event/LoginEventStream"},
+    )
+    assert val is not None and val > 0.0
+
+
+# --- queue_depth updated by the producer (A8) --------------------------------
+
+
+async def test_producer_updates_queue_depth_gauge() -> None:
+    """The gauge must reflect queue growth even while the consumer is stuck."""
+    metrics = Metrics()
+    pipe = Pipeline(
+        sources=[], sink=FakeSink(), state=FakeState(), batch=_batch_cfg(), metrics=metrics
+    )
+    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
+    src = FakeSource([_entry("k", "1"), _entry("k", "2"), _entry("k", "3")])
+
+    await pipe._produce(src, queue, asyncio.Event())
+
+    # No consumer ran: the gauge was set by the producer after each put.
+    assert metrics.registry.get_sample_value("sf2loki_queue_depth") == 3.0
 
 
 async def test_commit_watermark_falls_back_to_now_on_unparseable_value() -> None:

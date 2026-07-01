@@ -649,7 +649,7 @@
     {
       "id": 11,
       "title": "Push outcomes rate by outcome",
-      "description": "Loki push attempts/s by outcome (success / retried / dropped). The RED rate signal for the Loki sink \u2014 any sustained dropped or retried volume means data is being lost or delayed on the way to Loki.",
+      "description": "Loki push batch attempts/s by outcome (success / retried). Sustained retried volume means delivery to Loki is delayed (data is held and retried, not lost). Per-entry permanent drops are counted separately in the 'Entries dropped rate by reason' panel below.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -719,21 +719,6 @@
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "dropped"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
                 }
               }
             ]
@@ -973,19 +958,92 @@
     },
     {
       "id": 15,
+      "title": "Entries dropped rate by reason",
+      "description": "Log entries permanently dropped as undeliverable, per reason (bad_request = Loki rejected the entry with 400, e.g. outside the out-of-order window; oversized_413 = a single entry too large even alone). Healthy = 0 \u2014 every non-zero point is real data loss, logged at ERROR by the connector and worth alerting on. Auth failures (401/403) are NOT counted here: those are retried indefinitely without dropping.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (reason) (rate(sf2loki_loki_entries_dropped_total{job=~\"$job\"}[5m]))",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{reason}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.001,
+                "color": "red"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
       "title": "Connector health",
       "type": "row",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 55,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 16,
+      "id": 17,
       "title": "Auth refreshes & errors rate",
       "description": "Salesforce OAuth token refresh rate vs auth error rate. Refreshes-with-no-errors is healthy steady state; any sustained error rate means credentials/connected-app config need attention.",
       "type": "timeseries",
@@ -995,7 +1053,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 56,
         "w": 12,
         "h": 8
       },
@@ -1072,7 +1130,7 @@
       }
     },
     {
-      "id": 17,
+      "id": 18,
       "title": "Internal queue depth",
       "description": "Depth of the internal in-process event queue between ingestion and the Loki sink. Healthy \u2248 0; sustained growth means the sink can't keep up with ingestion (backpressure risk).",
       "type": "timeseries",
@@ -1082,7 +1140,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 50,
+        "y": 56,
         "w": 12,
         "h": 8
       },
@@ -1149,7 +1207,7 @@
       }
     },
     {
-      "id": 18,
+      "id": 19,
       "title": "Pub/Sub pending credits by topic",
       "description": "Outstanding flow-control credits owed to Salesforce Pub/Sub per topic. A persistently high or climbing value means the consumer is not keeping pace with the credit window.",
       "type": "timeseries",
@@ -1159,7 +1217,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1209,7 +1267,7 @@
       }
     },
     {
-      "id": 19,
+      "id": 20,
       "title": "Pub/Sub reconnects rate",
       "description": "Pub/Sub gRPC stream reconnect rate per topic. Occasional reconnects are normal (stream lifetime limits); a sustained high rate indicates network instability or server-side issues.",
       "type": "timeseries",
@@ -1219,7 +1277,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 58,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1269,7 +1327,7 @@
       }
     },
     {
-      "id": 20,
+      "id": 21,
       "title": "Decode errors rate",
       "description": "Avro/payload decode error rate by reason. Healthy = 0; non-zero means events are being dropped before they ever reach Loki \u2014 a silent-data-loss signal worth alerting on.",
       "type": "timeseries",
@@ -1279,7 +1337,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -1342,7 +1400,7 @@
       }
     },
     {
-      "id": 21,
+      "id": 22,
       "title": "Replay/watermark age",
       "description": "Age (now minus last committed checkpoint) of the Pub/Sub replay_id commit and the EventLogFile polling watermark. A climbing age means that checkpoint isn't advancing \u2014 the connector may be stuck, even if the queue/ingestion panels still look fine.",
       "type": "stat",
@@ -1352,7 +1410,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 66,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -1421,7 +1479,7 @@
       }
     },
     {
-      "id": 22,
+      "id": 23,
       "title": "Build info",
       "description": "Connector build/version metadata per running instance (sf2loki_build_info, value always 1). Use to confirm which version is deployed and that all instances agree.",
       "type": "table",
@@ -1431,7 +1489,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 74,
+        "y": 80,
         "w": 24,
         "h": 5
       },

@@ -224,6 +224,12 @@ class Metrics:
         self.loki_push = _Counter(
             meter.create_counter("sf2loki_loki_push", description="Total Loki push attempts")
         )
+        self.loki_entries_dropped = _Counter(
+            meter.create_counter(
+                "sf2loki_loki_entries_dropped",
+                description="Loki entries dropped as undeliverable (permanent errors), per reason",
+            )
+        )
         self.loki_push_duration = _Histogram(
             meter.create_histogram(
                 "sf2loki_loki_push_duration_seconds",
@@ -257,6 +263,29 @@ class Metrics:
             meter.create_counter(
                 "sf2loki_pubsub_reconnects",
                 description="Total Pub/Sub stream reconnects, per topic",
+            )
+        )
+        self.pubsub_replay_fallbacks = _Counter(
+            meter.create_counter(
+                "sf2loki_pubsub_replay_fallbacks",
+                description=(
+                    "Subscriptions restarted with a fallback replay preset after an "
+                    "invalid/expired replay id, per topic"
+                ),
+            )
+        )
+        self.pubsub_stream_stalls = _Counter(
+            meter.create_counter(
+                "sf2loki_pubsub_stream_stalls",
+                description=(
+                    "Pub/Sub streams force-reconnected by the keepalive watchdog, per topic"
+                ),
+            )
+        )
+        self.salesforce_api_throttled = _Counter(
+            meter.create_counter(
+                "sf2loki_salesforce_api_throttled",
+                description=("Salesforce REST calls rejected with REQUEST_LIMIT_EXCEEDED, per api"),
             )
         )
         self.watermark_ts = _Gauge(
