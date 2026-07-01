@@ -4,9 +4,11 @@ import base64
 from datetime import timedelta
 from pathlib import Path
 
+import pydantic
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from sf2loki import config as cfg_mod
 from sf2loki.config import (
     ConfigError,
     EventLogFileConfig,
@@ -21,6 +23,32 @@ from sf2loki.config import (
     load,
     telemetry_headers,
 )
+
+
+def _all_config_models():
+    seen = set()
+    stack = [cfg_mod.Config]
+    while stack:
+        model = stack.pop()
+        if model in seen or not (isinstance(model, type) and issubclass(model, pydantic.BaseModel)):
+            continue
+        seen.add(model)
+        for f in model.model_fields.values():
+            ann = f.annotation
+            # descend into nested BaseModel annotations (incl. list[Model])
+            for candidate in (ann, *getattr(ann, "__args__", ())):
+                if isinstance(candidate, type) and issubclass(candidate, pydantic.BaseModel):
+                    stack.append(candidate)
+    return seen
+
+
+def test_every_config_field_has_a_description():
+    missing = []
+    for model in _all_config_models():
+        for name, f in model.model_fields.items():
+            if not (f.description and f.description.strip()):
+                missing.append(f"{model.__name__}.{name}")
+    assert not missing, f"fields missing Field(description=...): {sorted(missing)}"
 
 
 def _write_config(tmp_path: Path, key_file: Path) -> Path:

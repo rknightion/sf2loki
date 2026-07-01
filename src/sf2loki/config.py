@@ -106,30 +106,99 @@ class SalesforceLimitsConfig(BaseModel):
     (one REST call per interval) and useful product telemetry.
     """
 
-    enabled: bool = False
-    poll_interval: Duration = timedelta(minutes=5)
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Poll /services/data/vXX.0/limits for org-limit gauges "
+            "(API usage, storage, streaming events, ...)."
+        ),
+    )
+    poll_interval: Duration = Field(
+        default=timedelta(minutes=5), description="How often to poll the limits endpoint."
+    )
 
 
 class SalesforceConfig(BaseModel):
-    # login_url, when left blank, is derived from ``environment`` below. An
-    # explicit value (a custom My Domain URL) always takes precedence.
-    login_url: str = ""
-    environment: Literal["production", "sandbox"] = "production"
-    # OAuth flow: ``jwt_bearer`` (asymmetric key + cert, no shared secret) or
-    # ``client_credentials`` (consumer key + secret, no keypair/cert/pre-auth).
-    # Defaults to jwt_bearer for backward compatibility.
-    auth_mode: Literal["jwt_bearer", "client_credentials"] = "jwt_bearer"
-    client_id: str
-    # client_credentials flow secret (injectable from file/env like the key).
-    client_secret: SecretStr | None = None
-    client_secret_file: Path | None = None
-    # Required for jwt_bearer (the JWT ``sub`` claim); unused for client_credentials.
-    username: str = ""
-    private_key_file: Path | None = None
-    private_key: SecretStr | None = None
-    api_version: str = "60.0"
-    org_id: str | None = None
-    limits: SalesforceLimitsConfig = Field(default_factory=SalesforceLimitsConfig)
+    """Salesforce org connection and authentication.
+
+    Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
+    key + cert, no shared secret) or ``client_credentials`` (consumer key +
+    secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
+    compatibility.
+    """
+
+    login_url: str = Field(
+        default="",
+        description=(
+            "Optional: derived from `environment` when omitted; set to a custom "
+            "My Domain URL to override. An explicit value always takes precedence "
+            "over the environment-derived default."
+        ),
+    )
+    environment: Literal["production", "sandbox"] = Field(
+        default="production",
+        description=(
+            "production | sandbox — derives login_url when login_url is unset; "
+            "an explicit login_url takes precedence."
+        ),
+    )
+    auth_mode: Literal["jwt_bearer", "client_credentials"] = Field(
+        default="jwt_bearer",
+        description=(
+            "jwt_bearer (private key + cert) | client_credentials (consumer key + secret)."
+        ),
+    )
+    client_id: str = Field(
+        description="External Client App consumer key.", examples=["${SF_CLIENT_ID}"]
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "client_credentials flow secret (injectable from file/env like the key). "
+            "Required when auth_mode is client_credentials; unused for jwt_bearer."
+        ),
+    )
+    client_secret_file: Path | None = Field(
+        default=None,
+        description=(
+            "File path to the client_credentials secret; required when "
+            "auth_mode: client_credentials."
+        ),
+        examples=["/etc/sf2loki/secrets/client-secret"],
+    )
+    username: str = Field(
+        default="",
+        description=(
+            "Integration user (pre-authorised on the app's Policies tab). Required "
+            "for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials."
+        ),
+        examples=["svc@example.com"],
+    )
+    private_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "File path to the jwt_bearer private key; not needed when "
+            "auth_mode: client_credentials."
+        ),
+        examples=["/etc/sf2loki/secrets/server.key"],
+    )
+    private_key: SecretStr | None = Field(
+        default=None,
+        description="jwt_bearer private key, inline (alternative to private_key_file).",
+    )
+    api_version: str = Field(
+        default="60.0", description="Salesforce REST/SOAP API version to target."
+    )
+    org_id: str | None = Field(
+        default=None,
+        description=(
+            "Set this to keep the app on the `api` scope alone; left null it is "
+            "auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope)."
+        ),
+    )
+    limits: SalesforceLimitsConfig = Field(
+        default_factory=SalesforceLimitsConfig, description="Org-limits metric poller settings."
+    )
 
     @model_validator(mode="after")
     def _resolve_login_url_and_validate_mode(self) -> SalesforceConfig:
@@ -149,25 +218,63 @@ class SalesforceConfig(BaseModel):
 
 
 class PubSubConfig(BaseModel):
-    enabled: bool = True
-    endpoint: str = "api.pubsub.salesforce.com:7443"
-    default_num_requested: int = 100
-    replay_preset: Literal["LATEST", "EARLIEST", "CUSTOM"] = "CUSTOM"
-    topics: list[str] = Field(default_factory=list)
-    include: list[str] = Field(default_factory=lambda: ["*"])
-    exclude: list[str] = Field(default_factory=list)
+    """Salesforce Pub/Sub API (real-time event streaming) source."""
+
+    enabled: bool = Field(default=True, description="Enable the Pub/Sub streaming source.")
+    endpoint: str = Field(
+        default="api.pubsub.salesforce.com:7443", description="Pub/Sub API gRPC endpoint."
+    )
+    default_num_requested: int = Field(default=100, description="Flow-control batch size.")
+    replay_preset: Literal["LATEST", "EARLIEST", "CUSTOM"] = Field(
+        default="CUSTOM",
+        description="Replay position; falls back to LATEST when no stored replay_id.",
+    )
+    topics: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the '
+            "org exposes (the *EventStream channels), re-filtered by include/exclude."
+        ),
+        examples=[["/event/LoginEventStream", "/event/ApiAnomalyEvent"]],
+    )
+    include: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="Operator inclusion globs applied to discovered/explicit topics.",
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description="Operator exclusion globs applied to discovered/explicit topics.",
+    )
 
 
 class EventLogObjectConfig(BaseModel):
-    name: str
-    timestamp_field: str = "EventDate"
-    poll_interval: Duration = timedelta(minutes=5)
-    lookback: Duration = timedelta(hours=1)
+    """A single Salesforce event object polled via SOQL."""
+
+    name: str = Field(description="The event object API name to poll (e.g. LoginEvent).")
+    timestamp_field: str = Field(
+        default="EventDate",
+        description="The field used as the per-row event time for polling/checkpointing.",
+    )
+    poll_interval: Duration = Field(
+        default=timedelta(minutes=5), description="How often to poll this object."
+    )
+    lookback: Duration = Field(
+        default=timedelta(hours=1),
+        description="Initial window to fetch on first run (no checkpoint).",
+    )
 
 
 class EventLogObjectsConfig(BaseModel):
-    enabled: bool = False
-    objects: list[EventLogObjectConfig] = Field(default_factory=list)
+    """Poll stored event objects via SOQL.
+
+    Use for categories you'd rather poll than stream (or that have no stream).
+    Do NOT also stream the same category.
+    """
+
+    enabled: bool = Field(default=False, description="Enable the event-object polling source.")
+    objects: list[EventLogObjectConfig] = Field(
+        default_factory=list, description="Event objects to poll."
+    )
 
 
 # Label keys injected/reserved by the pipeline + sink; a promoted ELF column
@@ -194,9 +301,23 @@ class EventLogFileTypeConfig(BaseModel):
     columns promoted to stream labels — keep these LOW cardinality.
     """
 
-    name: str
-    structured_metadata_fields: list[str] | None = None
-    labels: list[str] = Field(default_factory=list)
+    name: str = Field(description="The ELF EventType this override applies to (e.g. ReportExport).")
+    structured_metadata_fields: list[str] | None = Field(
+        default=None,
+        description=(
+            "Per-type override of the global sink.loki.structured_metadata_fields; "
+            "omit (None) to inherit the global list, or set to [] to suppress it."
+        ),
+        examples=[["REPORT_ID", "OWNER_ID"]],
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Columns promoted to Loki stream labels for this event type. Keep these "
+            "LOW cardinality — each distinct value is a new Loki stream."
+        ),
+        examples=[["DELEGATED_USER"]],
+    )
 
     @model_validator(mode="after")
     def _validate_labels(self) -> EventLogFileTypeConfig:
@@ -228,32 +349,90 @@ def _coerce_event_types(value: object) -> object:
 
 
 class EventLogFileConfig(BaseModel):
-    enabled: bool = False
-    # Ingest exactly ONE interval; hourly and daily files are redundant copies
-    # of the same events (Salesforce), so ingesting both double-counts.
-    interval: Literal["Hourly", "Daily"] = "Hourly"
-    # ELF EventTypes to ingest. Each item is either a bare string (e.g. "Login")
-    # or a per-type object (name + optional structured_metadata_fields/labels).
-    # Required when enabled — there is no sensible "all" default given ~70 types
-    # and the either/or-per-category model.
-    event_types: Annotated[list[EventLogFileTypeConfig], BeforeValidator(_coerce_event_types)] = (
-        Field(default_factory=list)
+    """EventLogFile (CSV) ingestion.
+
+    Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
+    EventLogFile``, or the EventType picklist, to see which your org actually
+    produces); schema is read per-file. This is the workhorse for breadth —
+    most activity only surfaces here, not as a streaming event.
+
+    Ingest exactly ONE interval (``Hourly`` or ``Daily``); hourly and daily
+    files are redundant copies of the same events (Salesforce), so ingesting
+    both double-counts. ``Daily`` is settled (~1 day lag) and works for every
+    org; ``Hourly`` is fresher but needs the Event Monitoring hourly opt-in in
+    Setup, and some orgs generate ONLY Daily files — check before choosing
+    Hourly.
+
+    Use ``event_types: ["*"]`` to DISCOVER and ingest every EventType the org
+    produces for the configured interval (re-checked each poll, so newly
+    enabled types appear with no restart), then use ``exclude`` to drop
+    categories owned by another source or high-volume types you don't want.
+    Or list types explicitly — each item is a bare string (uses the global
+    structured_metadata_fields, promotes no labels) or a per-type object
+    (name + optional structured_metadata_fields/labels overrides). Explicit
+    entries always win over discovered ones.
+    """
+
+    enabled: bool = Field(default=False, description="Enable the EventLogFile ingestion source.")
+    interval: Literal["Hourly", "Daily"] = Field(
+        default="Hourly",
+        description=(
+            "Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring "
+            "hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; "
+            "check before Hourly."
+        ),
     )
-    # EventTypes to skip when the wildcard "*" is used (e.g. a category served by
-    # another source, or a high-volume type you don't want). Ignored otherwise.
-    exclude: list[str] = Field(default_factory=list)
-    poll_interval: Duration = timedelta(hours=1)  # how often to list new files
-    lookback: Duration = timedelta(hours=24)  # initial window when no checkpoint
-    timestamp_column: str = "TIMESTAMP_DERIVED"  # per-row timestamp column
-    page_size: int = 1000  # SOQL LIMIT for the file-listing query
-    # Resiliency knobs for the (unstable) Hourly path — ko.md §7.4.
-    # settle_window: skip files whose CreatedDate is newer than now-settle_window,
-    # so we don't pull a half-written hourly CSV. 0 disables (safe for Daily).
-    settle_window: Duration = timedelta(0)
-    # download_max_age: a file whose body keeps failing to download and is older
-    # than this is abandoned (checkpoint advances past it) so a permanently-missing
-    # file can't wedge the watermark forever. Files younger than this are retried.
-    download_max_age: Duration = timedelta(hours=24)
+    event_types: Annotated[list[EventLogFileTypeConfig], BeforeValidator(_coerce_event_types)] = (
+        Field(
+            default_factory=list,
+            description=(
+                "ELF EventTypes to ingest (required when enabled — there is no sensible "
+                '"all" default given ~70 types and the either/or-per-category model). '
+                'Each item is a bare string (e.g. "Login") or a per-type object (name + '
+                'optional structured_metadata_fields/labels). Use "*" to discover and '
+                "ingest every EventType the org produces for this interval."
+            ),
+            examples=[["API", "RestApi", "BulkApi", "Report", "Login"]],
+        )
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description=(
+            'EventTypes to skip when the wildcard "*" is used (e.g. a category served '
+            "by another source, or a high-volume type you don't want). Ignored otherwise."
+        ),
+    )
+    poll_interval: Duration = Field(
+        default=timedelta(hours=1),
+        description="How often to list new files (Daily files land ~once/day).",
+    )
+    lookback: Duration = Field(
+        default=timedelta(hours=24),
+        description=(
+            "Initial window on first run (no checkpoint); reach back far enough to "
+            "catch the last few settled Daily files."
+        ),
+    )
+    timestamp_column: str = Field(
+        default="TIMESTAMP_DERIVED", description="Per-row event time column."
+    )
+    page_size: int = Field(default=1000, description="SOQL LIMIT for the file-listing query.")
+    settle_window: Duration = Field(
+        default=timedelta(0),
+        description=(
+            "Skip files whose CreatedDate is newer than now-settle_window, so we don't "
+            "pull a half-written hourly CSV. 0 disables (safe for Daily); use a few "
+            "minutes for Hourly."
+        ),
+    )
+    download_max_age: Duration = Field(
+        default=timedelta(hours=24),
+        description=(
+            "A file whose body keeps failing to download and is older than this is "
+            "abandoned (checkpoint advances past it) so a permanently-missing file "
+            "can't wedge the watermark forever. Files younger than this are retried."
+        ),
+    )
 
     @property
     def discover(self) -> bool:
@@ -272,48 +451,137 @@ class EventLogFileConfig(BaseModel):
 
 
 class SourcesConfig(BaseModel):
-    pubsub: PubSubConfig = Field(default_factory=PubSubConfig)
-    eventlog_objects: EventLogObjectsConfig = Field(default_factory=EventLogObjectsConfig)
-    eventlogfile: EventLogFileConfig = Field(default_factory=EventLogFileConfig)
-    # Bypass the fail-fast overlap guard (sources/overlap.py) that refuses to
-    # start when one event category is enabled on more than one source.
-    allow_overlap: bool = False
+    """Event source selection: Pub/Sub streaming, event-object polling, and EventLogFile.
+
+    Either/or per event category: by default ingest each category (Login,
+    API, Report, ...) from exactly ONE source. Streaming
+    ``/event/LoginEventStream`` AND polling ``LoginEvent`` AND pulling the
+    "Login" EventLogFile are the SAME activity via different channels. A
+    fail-fast guard refuses to start on an EXPLICIT overlap, and the ELF "*"
+    wildcard auto-excludes categories a stream/object source already owns.
+    Set ``allow_overlap: true`` to ingest a category via MULTIPLE sources on
+    purpose — e.g. the real-time-but-lean stream AND the slower-but-richer
+    EventLogFile rows for the same category (they are NOT byte-identical, so
+    both flow — build dashboards on whichever fits).
+    """
+
+    pubsub: PubSubConfig = Field(
+        default_factory=PubSubConfig, description="Pub/Sub API streaming source."
+    )
+    eventlog_objects: EventLogObjectsConfig = Field(
+        default_factory=EventLogObjectsConfig, description="Event-object SOQL polling source."
+    )
+    eventlogfile: EventLogFileConfig = Field(
+        default_factory=EventLogFileConfig, description="EventLogFile (CSV) ingestion source."
+    )
+    allow_overlap: bool = Field(
+        default=False,
+        description=(
+            "Bypass the fail-fast overlap guard that refuses to start when one "
+            "event category is enabled on more than one source."
+        ),
+    )
 
 
 class LokiBatchConfig(BaseModel):
-    max_entries: int = 1000
-    max_bytes: int = 1_048_576
-    flush_interval: Duration = timedelta(seconds=1)
-    # Per-line UTF-8 byte cap; lines longer than this are truncated (with a
-    # marker) before push so one oversized row can't 400 its whole batch.
-    # Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
-    max_line_bytes: int = 262144
+    """Loki push batching."""
+
+    max_entries: int = Field(
+        default=1000, description="Flush the batch after this many log entries."
+    )
+    max_bytes: int = Field(default=1_048_576, description="Flush the batch after this many bytes.")
+    flush_interval: Duration = Field(
+        default=timedelta(seconds=1),
+        description="Flush the batch after this much time, regardless of size.",
+    )
+    max_line_bytes: int = Field(
+        default=262144,
+        description=(
+            "Per-line UTF-8 byte cap; lines longer than this are truncated (with a "
+            "marker) before push so one oversized row can't 400 its whole batch. "
+            "Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables."
+        ),
+    )
 
 
 class LokiConfig(BaseModel):
-    url: str
-    tenant_id: str | None = None
-    auth_token_file: Path | None = None
-    auth_token: SecretStr | None = None
-    encoding: Literal["protobuf", "json"] = "protobuf"
-    compression: Literal["snappy", "gzip", "none"] = "snappy"
-    batch: LokiBatchConfig = Field(default_factory=LokiBatchConfig)
-    labels: dict[str, str] = Field(default_factory=dict)
-    structured_metadata_fields: list[str] = Field(default_factory=list)
+    """Loki push-API sink.
+
+    Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+ tenant_id + auth_token).
+    Self-hosted: http://loki:3100/loki/api/v1/push (+ tenant_id -> X-Scope-OrgID).
+    Local Alloy: http://alloy:3100/loki/api/v1/push (no auth).
+    """
+
+    url: str = Field(description="Loki push API URL.", examples=["${GC_LOKI}"])
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Loki tenant (X-Scope-OrgID); required for Grafana Cloud and multi-tenant Loki."
+        ),
+        examples=["${GC_TENANT_ID}"],
+    )
+    auth_token_file: Path | None = Field(
+        default=None,
+        description="File path to the Loki auth token.",
+        examples=["/etc/sf2loki/secrets/loki-token"],
+    )
+    auth_token: SecretStr | None = Field(
+        default=None, description="Loki auth token, inline (alternative to auth_token_file)."
+    )
+    encoding: Literal["protobuf", "json"] = Field(
+        default="protobuf", description="Wire encoding for the push request."
+    )
+    compression: Literal["snappy", "gzip", "none"] = Field(
+        default="snappy", description="Compression: snappy (protobuf) | gzip (json) | none."
+    )
+    batch: LokiBatchConfig = Field(
+        default_factory=LokiBatchConfig, description="Push batching settings."
+    )
+    labels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Static stream labels merged onto every push (job + sf_org_id are added automatically)."
+        ),
+        examples=[{"environment": "prod"}],
+    )
+    structured_metadata_fields: list[str] = Field(
+        default_factory=list,
+        description="Event fields promoted to Loki structured metadata (not stream labels).",
+        examples=[
+            [
+                "replay_id",
+                "schema_id",
+                "event_uuid",
+                "user_id",
+                "username",
+                "source_ip",
+                "session_key",
+            ]
+        ],
+    )
 
 
 class SinkConfig(BaseModel):
-    type: Literal["loki"] = "loki"
-    loki: LokiConfig
+    type: Literal["loki"] = Field(
+        default="loki", description="Sink backend (only loki is supported)."
+    )
+    loki: LokiConfig = Field(description="Loki sink settings.")
 
 
 class FileStateConfig(BaseModel):
-    path: Path = Path("/var/lib/sf2loki/state.json")
+    path: Path = Field(
+        default=Path("/var/lib/sf2loki/state.json"),
+        description="Checkpoint file path; persist on a mounted volume for durable resume.",
+    )
 
 
 class StateConfig(BaseModel):
-    store: Literal["file"] = "file"
-    file: FileStateConfig = Field(default_factory=FileStateConfig)
+    store: Literal["file"] = Field(
+        default="file", description="State backend (local JSON file is the only backend)."
+    )
+    file: FileStateConfig = Field(
+        default_factory=FileStateConfig, description="File-backed state store settings."
+    )
 
 
 class TelemetryConfig(BaseModel):
@@ -324,33 +592,71 @@ class TelemetryConfig(BaseModel):
     Prometheus scrape endpoint; sf2loki is OTLP-push-native.
     """
 
-    enabled: bool = False
-    # Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP
-    # gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics;
-    # for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.
-    endpoint: str = ""
-    # Auth for the OTLP endpoint. "basic" sends Authorization: Basic
-    # base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic,
-    # the credentials default to the Loki sink's tenant_id/auth_token when left
-    # blank — Grafana Cloud uses one stack credential for both Loki and OTLP.
-    auth: Literal["basic", "none"] = "basic"
-    basic_auth_user: str = ""
-    basic_auth_token: SecretStr | None = None
-    basic_auth_token_file: Path | None = None
-    # Explicit headers, merged on top of any computed Authorization header.
-    # Values support ${ENV} interpolation at config load.
-    headers: dict[str, str] = Field(default_factory=dict)
-    export_interval: Duration = timedelta(seconds=60)
-    # Extra OTel resource attributes merged onto the defaults (service.name, etc.).
-    resource_attributes: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = Field(default=False, description="Push all metrics via OTLP/HTTP.")
+    endpoint: str = Field(
+        default="",
+        description=(
+            "Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP "
+            "gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics; "
+            "for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics."
+        ),
+        examples=["https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics"],
+    )
+    auth: Literal["basic", "none"] = Field(
+        default="basic",
+        description=(
+            'Auth for the OTLP endpoint. "basic" sends Authorization: Basic '
+            'base64(user:token); "none" sends none (e.g. in-cluster Alloy). For '
+            "basic, the credentials default to the Loki sink's tenant_id/auth_token "
+            "when left blank — Grafana Cloud uses one stack credential for both "
+            "Loki and OTLP."
+        ),
+    )
+    basic_auth_user: str = Field(
+        default="",
+        description="Basic-auth username; defaults to the Loki sink's tenant_id when blank.",
+    )
+    basic_auth_token: SecretStr | None = Field(
+        default=None,
+        description="Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.",
+    )
+    basic_auth_token_file: Path | None = Field(
+        default=None,
+        description="File path to the basic-auth token (alternative to basic_auth_token).",
+        examples=["/etc/sf2loki/secrets/otlp-token"],
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Explicit headers, merged on top of any computed Authorization header. "
+            "Values support ${ENV} interpolation at config load."
+        ),
+    )
+    export_interval: Duration = Field(
+        default=timedelta(seconds=60),
+        description="How often to export accumulated metrics via OTLP.",
+    )
+    resource_attributes: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra OTel resource attributes merged onto the defaults (service.name, etc.).",
+    )
 
 
 class ServiceConfig(BaseModel):
-    log_level: str = "info"
-    log_format: Literal["json", "logfmt"] = "json"
-    health_addr: str = ":8080"
-    shutdown_grace: Duration = timedelta(seconds=25)
-    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    log_level: str = Field(default="info", description="Application log level.")
+    log_format: Literal["json", "logfmt"] = Field(
+        default="json", description="Application log output format."
+    )
+    health_addr: str = Field(
+        default=":8080", description="Address to bind the health-check HTTP server."
+    )
+    shutdown_grace: Duration = Field(
+        default=timedelta(seconds=25),
+        description="Grace period allowed for in-flight work to finish on shutdown.",
+    )
+    telemetry: TelemetryConfig = Field(
+        default_factory=TelemetryConfig, description="OTLP metrics egress settings."
+    )
 
 
 class Config(BaseSettings):
@@ -360,11 +666,19 @@ class Config(BaseSettings):
         extra="ignore",
     )
 
-    salesforce: SalesforceConfig
-    sources: SourcesConfig = Field(default_factory=SourcesConfig)
-    sink: SinkConfig
-    state: StateConfig = Field(default_factory=StateConfig)
-    service: ServiceConfig = Field(default_factory=ServiceConfig)
+    salesforce: SalesforceConfig = Field(
+        description="Salesforce org connection and authentication."
+    )
+    sources: SourcesConfig = Field(
+        default_factory=SourcesConfig, description="Event source selection and settings."
+    )
+    sink: SinkConfig = Field(description="Log sink settings.")
+    state: StateConfig = Field(
+        default_factory=StateConfig, description="Checkpoint/state store settings."
+    )
+    service: ServiceConfig = Field(
+        default_factory=ServiceConfig, description="Application-level service settings."
+    )
 
     @classmethod
     def settings_customise_sources(
