@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+import structlog.testing
 
 from sf2loki.config import PubSubConfig
 from sf2loki.obs.metrics import Metrics
@@ -548,3 +549,45 @@ async def test_reconnect_increments_metric() -> None:
 
     val = metrics.registry.get_sample_value("sf2loki_pubsub_reconnects_total", {"topic": TOPIC})
     assert val is not None and val >= 1.0
+
+
+@pytest.mark.asyncio
+async def test_stream_error_is_logged() -> None:
+    """A subscribe error is logged (previously swallowed silently, hiding failures)."""
+
+    class RaisingClient:
+        async def subscribe(
+            self,
+            topic: str,
+            *,
+            replay_preset: int,
+            replay_id: bytes = b"",
+            num_requested: int | None = None,
+        ) -> AsyncIterator[DecodedEvent]:
+            if False:  # make this an async generator
+                yield  # pragma: no cover
+            raise RuntimeError("boom-subscribe")
+
+        async def aclose(self) -> None:
+            pass
+
+    stop = asyncio.Event()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]), RaisingClient(), sm_fields=[], reconnect_backoff=0.01
+    )
+    state = FakeCheckpointStore()
+
+    with structlog.testing.capture_logs() as captured:
+
+        async def consume() -> None:
+            async for _ in src.events(state, stop):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.1)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    errors = [e for e in captured if e["event"] == "pubsub stream error"]
+    assert errors, "subscribe failure was not logged"
+    assert "boom-subscribe" in errors[0]["error"]

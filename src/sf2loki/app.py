@@ -14,6 +14,7 @@ import contextlib
 import json
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -213,6 +214,7 @@ class Pipeline:
             else:
                 self._metrics.loki_push.labels(outcome="success").inc()
                 self._metrics.loki_push_duration.observe(asyncio.get_running_loop().time() - t0)
+                log.debug("pushed batch to loki", entries=len(batch.entries))
                 await self._commit(batch)
                 return
 
@@ -306,6 +308,17 @@ def _build_state(cfg: Config) -> CheckpointStore:
     return FileCheckpointStore(cfg.state.file.path)
 
 
+@dataclass(frozen=True, slots=True)
+class _StartupInfo:
+    """Summary of what the app is configured to run, for the startup banner."""
+
+    pubsub_topics: list[str]
+    eventlog_objects: list[str]
+    eventlogfile_event_types: list[str]
+    sink_url: str
+    limits_enabled: bool
+
+
 class App:
     """The running service: wires implementations and owns process lifecycle."""
 
@@ -319,6 +332,7 @@ class App:
         health: Health,
         closers: Sequence[Callable[[], Awaitable[None]]],
         limits_poller: LimitsPoller | None = None,
+        startup: _StartupInfo | None = None,
     ) -> None:
         self._cfg = cfg
         self._pipeline = pipeline
@@ -327,6 +341,7 @@ class App:
         self._health = health
         self._closers = list(closers)
         self._limits_poller = limits_poller
+        self._startup = startup
 
     @classmethod
     def build(cls, cfg: Config) -> App:
@@ -424,10 +439,34 @@ class App:
             health=health,
             closers=closers,
             limits_poller=limits_poller,
+            startup=_StartupInfo(
+                pubsub_topics=pubsub_topics,
+                eventlog_objects=stored_objects,
+                eventlogfile_event_types=elf_event_types,
+                sink_url=cfg.sink.loki.url,
+                limits_enabled=cfg.salesforce.limits.enabled,
+            ),
+        )
+
+    def _emit_startup_log(self) -> None:
+        """Announce, at INFO, what the app is configured to run."""
+        s = self._startup
+        log.info(
+            "sf2loki starting",
+            pubsub_topics=s.pubsub_topics if s else [],
+            eventlog_objects=s.eventlog_objects if s else [],
+            eventlogfile_event_types=s.eventlogfile_event_types if s else [],
+            sink=s.sink_url if s else "",
+            org_limit_metrics=s.limits_enabled if s else False,
+            environment=self._cfg.salesforce.environment,
+            log_level=self._cfg.service.log_level,
+            health_addr=self._cfg.service.health_addr,
         )
 
     async def run(self) -> None:
         """Install signal handlers, run the pipeline under the coordinator, shut down."""
+        self._emit_startup_log()
+
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -438,6 +477,11 @@ class App:
 
         # Resolve the org id once and assemble deployment-wide labels.
         org_id = self._cfg.salesforce.org_id or await self._tokens.org_id()
+        log.info(
+            "authenticated to salesforce org",
+            org_id=org_id,
+            environment=self._cfg.salesforce.environment,
+        )
         self._pipeline.set_static_labels(
             build_static_labels(
                 environment=self._cfg.salesforce.environment,
@@ -451,6 +495,7 @@ class App:
 
         async def on_acquire() -> None:
             self._health.set_ready()
+            log.info("sf2loki ready — streaming to Loki")
             poller_task: asyncio.Task[None] | None = None
             if self._limits_poller is not None:
                 poller_task = asyncio.create_task(self._limits_poller.run(stop))

@@ -17,12 +17,15 @@ from typing import TYPE_CHECKING
 
 from sf2loki.config import PubSubConfig
 from sf2loki.model import CheckpointToken, LogEntry
+from sf2loki.obs.logging import get_logger
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.pubsub_client import DecodedEvent, PubSubClient, preset_for
 from sf2loki.shaping import extract_timestamp, route_fields
 
 if TYPE_CHECKING:
     from sf2loki.state.base import CheckpointStore
+
+log = get_logger(__name__)
 
 
 class PubSubSource:
@@ -163,10 +166,12 @@ class PubSubSource:
         backoff = self._reconnect_backoff
         attempt = 0
 
+        log.info("pubsub subscribing", topic=topic, preset=preset, resuming=bool(stored))
         try:
             while not stop.is_set():
                 if attempt > 0:
                     self._metrics.pubsub_reconnects.labels(topic=topic).inc()
+                    log.info("pubsub reconnecting", topic=topic, attempt=attempt, backoff=backoff)
                 attempt += 1
                 try:
                     async for ev in self._client.subscribe(
@@ -194,9 +199,12 @@ class PubSubSource:
                     except TimeoutError:
                         pass
 
-                except Exception:
+                except Exception as exc:
                     if stop.is_set():
                         return
+                    log.warning(
+                        "pubsub stream error", topic=topic, error=repr(exc), backoff=backoff
+                    )
                     # Transient error: back off then reconnect.
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=backoff)
