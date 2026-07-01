@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import signal
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,7 +37,12 @@ from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.sink import LokiSink
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
-from sf2loki.sources.overlap import check_overlap
+from sf2loki.sources.overlap import (
+    category_of_elf,
+    category_of_pubsub,
+    category_of_stored_object,
+    check_overlap,
+)
 from sf2loki.sources.pubsub_source import PubSubSource
 from sf2loki.state.file_store import FileCheckpointStore
 
@@ -54,6 +60,11 @@ _SENTINEL: object = object()
 # Pipeline-level retry backoff for a batch the sink reports as retryable.
 _RETRY_BACKOFF_BASE = 1.0
 _RETRY_BACKOFF_MAX = 30.0
+
+# Fixed per-entry overhead added to len(line) for the approximate byte
+# accounting shared by batch flushing and the queue byte budget (labels,
+# timestamps, object headers — cheap to compute, close enough to bound memory).
+_QUEUE_ENTRY_OVERHEAD = 64
 
 
 def build_static_labels(
@@ -94,9 +105,13 @@ _HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 class Pipeline:
     """Drain sources into batches and push them to the sink, committing on success.
 
-    Backpressure is structural: a slow sink leaves the bounded queue full, which
-    blocks producers on ``queue.put`` and therefore suspends each source's event
-    stream — Salesforce stops being asked for more.
+    Backpressure is structural and two-dimensional: a slow sink leaves the
+    bounded queue full — by entry count (``batch.queue_maxsize``) or by
+    approximate bytes (``batch.queue_max_bytes``) — which blocks producers and
+    therefore suspends each source's event stream — Salesforce stops being
+    asked for more. The byte bound caps worst-case buffered memory during a
+    sink outage (entries can be ~max_line_bytes each, so a count bound alone
+    could buffer gigabytes).
     """
 
     def __init__(
@@ -108,7 +123,7 @@ class Pipeline:
         batch: LokiBatchConfig,
         metrics: Metrics,
         static_labels: Mapping[str, str] | None = None,
-        queue_maxsize: int = 10_000,
+        queue_maxsize: int | None = None,
     ) -> None:
         self._sources = list(sources)
         self._sink = sink
@@ -116,7 +131,24 @@ class Pipeline:
         self._batch = batch
         self._metrics = metrics
         self._static_labels: dict[str, str] = dict(static_labels or {})
-        self._queue_maxsize = queue_maxsize
+        # Explicit override for tests; production wiring takes the config value.
+        self._queue_maxsize = batch.queue_maxsize if queue_maxsize is None else queue_maxsize
+        # Approximate bytes currently sitting in the queue, guarded by the
+        # condition; producers wait on it when over batch.queue_max_bytes.
+        self._queued_bytes = 0
+        self._byte_cond = asyncio.Condition()
+        # Monotonic instant the sink started failing continuously (None while
+        # healthy); feeds the /readyz degradation check installed by App.build.
+        self._sink_failing_since: float | None = None
+
+    @property
+    def sink_failing_since(self) -> float | None:
+        """``time.monotonic()`` of the first failure of the current sink outage.
+
+        None while the sink is healthy (or after a permanent drop, which
+        advances the pipeline rather than wedging it).
+        """
+        return self._sink_failing_since
 
     def set_static_labels(self, labels: Mapping[str, str]) -> None:
         """Set the deployment-wide labels merged into every entry (job/org/env)."""
@@ -135,6 +167,7 @@ class Pipeline:
         """
         if not self._sources:
             return
+        self._queued_bytes = 0  # fresh accounting per run (the queue is fresh too)
         queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
         producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
         consumer = asyncio.create_task(self._consume(queue, len(producers), stop))
@@ -173,12 +206,58 @@ class Pipeline:
                     ).inc()
                     lag = (datetime.now(UTC) - entry.timestamp).total_seconds()
                     self._metrics.ingest_lag.labels(event_type=event_type).set(lag)
+                await self._charge(entry)
                 await queue.put(entry)
                 # Also updated here (not just in the consumer) so the gauge keeps
                 # tracking queue growth while the consumer is stuck in sink retry.
                 self._metrics.queue_depth.set(queue.qsize())
         finally:
+            # Sentinels carry no bytes, so this put can never block on the byte
+            # budget — a cancelled/finished producer always delivers its sentinel.
             await queue.put(_SENTINEL)
+
+    @staticmethod
+    def _entry_cost(item: LogEntry | object) -> int:
+        """Approximate queued bytes for one item (same accounting as _consume).
+
+        checkpoint_only entries (keepalive tokens with an empty line) and the
+        internal sentinel are free — they must never contribute to, or block
+        on, the byte budget.
+        """
+        if not isinstance(item, LogEntry) or item.checkpoint_only:
+            return 0
+        return len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
+
+    async def _charge(self, entry: LogEntry) -> None:
+        """Producer side: wait for byte-budget headroom, then account *entry*.
+
+        Admission rule: admit while the queue is *under* budget — an admitted
+        entry may overshoot it. This guarantees a single entry larger than the
+        whole budget is still admitted once the queue drains (blocking it until
+        "it fits" would deadlock: it never fits, and the consumer would have
+        nothing to drain). Cancellation while waiting is safe: nothing has been
+        accounted yet, and Condition.wait re-raises after reacquiring the lock.
+        """
+        budget = self._batch.queue_max_bytes
+        if budget <= 0:  # 0 disables byte accounting entirely
+            return
+        cost = self._entry_cost(entry)
+        if cost == 0:
+            return
+        async with self._byte_cond:
+            await self._byte_cond.wait_for(lambda: self._queued_bytes < budget)
+            self._queued_bytes += cost
+
+    async def _release(self, item: LogEntry | object) -> None:
+        """Consumer side: return *item*'s bytes to the budget and wake producers."""
+        if self._batch.queue_max_bytes <= 0:
+            return
+        cost = self._entry_cost(item)
+        if cost == 0:
+            return
+        async with self._byte_cond:
+            self._queued_bytes -= cost
+            self._byte_cond.notify_all()
 
     async def _consume(
         self, queue: asyncio.Queue[LogEntry | object], n_producers: int, stop: asyncio.Event
@@ -203,6 +282,7 @@ class Pipeline:
                 continue
 
             self._metrics.queue_depth.set(queue.qsize())
+            await self._release(item)
 
             if item is _SENTINEL:
                 active -= 1
@@ -214,7 +294,7 @@ class Pipeline:
             assert isinstance(item, LogEntry)
             batch.append(item)
             if not item.checkpoint_only:
-                approx_bytes += len(item.line.encode("utf-8")) + 64
+                approx_bytes += len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
             if deadline is None:
                 deadline = loop.time() + flush_interval
             if len(batch) >= self._batch.max_entries or approx_bytes >= self._batch.max_bytes:
@@ -242,6 +322,8 @@ class Pipeline:
                 await self._sink.push(batch)
             except RetryableSinkError:
                 self._metrics.loki_push.labels(outcome="retried").inc()
+                if self._sink_failing_since is None:
+                    self._sink_failing_since = time.monotonic()
                 if stop.is_set():
                     # Shutting down: abandon this batch uncommitted rather than
                     # hammering a failing sink past the grace period — it will
@@ -256,6 +338,9 @@ class Pipeline:
                 # Poison batch: drop it, count the gap loudly, and advance past
                 # it. Count every dropped entry (a permanent error on a
                 # multi-entry batch drops all of them), not just one.
+                # Not a stuck sink (it answered, the batch advanced) — clear the
+                # continuous-failure mark so readiness doesn't degrade for it.
+                self._sink_failing_since = None
                 self._metrics.loki_entries_dropped.labels(reason=exc.reason).inc(len(batch.entries))
                 log.error(
                     "dropping undeliverable batch and advancing checkpoint",
@@ -266,7 +351,9 @@ class Pipeline:
                 await self._commit(all_entries)
                 return
             else:
+                self._sink_failing_since = None
                 self._metrics.loki_push.labels(outcome="success").inc()
+                self._metrics.last_push_success_ts.set(datetime.now(UTC).timestamp())
                 self._metrics.loki_push_duration.observe(asyncio.get_running_loop().time() - t0)
                 log.debug("pushed batch to loki", entries=len(batch.entries))
                 await self._commit(all_entries)
@@ -357,6 +444,30 @@ def _build_state(cfg: Config) -> CheckpointStore:
     return FileCheckpointStore(cfg.state.file.path)
 
 
+def _format_failing_duration(seconds: float) -> str:
+    """Human-short duration for the /readyz degradation body ('17m' / '45s')."""
+    return f"{int(seconds // 60)}m" if seconds >= 60 else f"{int(seconds)}s"
+
+
+def _sink_degradation_check(pipeline: Pipeline, threshold: float) -> Callable[[], str | None]:
+    """Readiness predicate: degrade once the sink has failed continuously > *threshold* s.
+
+    Evaluated per /readyz request, so it recovers by itself on the next
+    successful push (which clears ``pipeline.sink_failing_since``).
+    """
+
+    def check() -> str | None:
+        since = pipeline.sink_failing_since
+        if since is None:
+            return None
+        elapsed = time.monotonic() - since
+        if elapsed <= threshold:
+            return None
+        return f"degraded: loki pushes failing for {_format_failing_duration(elapsed)}"
+
+    return check
+
+
 @dataclass(frozen=True, slots=True)
 class _StartupInfo:
     """Summary of what the app is configured to run, for the startup banner."""
@@ -414,12 +525,40 @@ class App:
         sources: list[Source] = []
         closers: list[Callable[[], Awaitable[None]]] = []
         pubsub_topics: list[str] = []
-        stored_objects: list[str] = []
-        elf_event_types: list[str] = []
+
+        # Identifiers for the polling sources come straight from config, so
+        # extract them before any source is constructed: the Pub/Sub source
+        # (built first) needs to know which categories they own.
+        stored_objects: list[str] = (
+            [o.name for o in cfg.sources.eventlog_objects.objects]
+            if cfg.sources.eventlog_objects.enabled
+            else []
+        )
+        # ELF wildcard expands at poll time, so its discovered types aren't
+        # known here; the overlap guard and category ownership see only the
+        # explicit types (use exclude to keep a discovered category off ELF
+        # when another source owns it).
+        elf_event_types: list[str] = (
+            [t.name for t in cfg.sources.eventlogfile.event_types if t.name != EVENT_TYPE_WILDCARD]
+            if cfg.sources.eventlogfile.enabled
+            else []
+        )
 
         if cfg.sources.pubsub.enabled:
             from sf2loki.salesforce.metadata_client import MetadataClient
             from sf2loki.salesforce.pubsub_client import PubSubClient
+
+            # Categories another source already owns (stored event objects +
+            # explicit ELF event types): Pub/Sub wildcard discovery auto-excludes
+            # these so the same events aren't ingested twice — unless
+            # allow_overlap, where the operator wants both (pass empty set).
+            if cfg.sources.allow_overlap:
+                pubsub_owned: frozenset[str] = frozenset()
+            else:
+                pubsub_owned = frozenset(
+                    [category_of_stored_object(o) for o in stored_objects]
+                    + [category_of_elf(t) for t in elf_event_types]
+                )
 
             pubsub_client = PubSubClient(cfg.sources.pubsub, tokens, metrics=metrics)
             pubsub_src = PubSubSource(
@@ -428,6 +567,7 @@ class App:
                 sm_fields=sm_fields,
                 metrics=metrics,
                 topic_discoverer=MetadataClient(cfg.salesforce, tokens, sf_http),
+                owned_categories=pubsub_owned,
             )
             sources.append(pubsub_src)
             pubsub_topics = pubsub_src.resolve_topics()
@@ -438,22 +578,23 @@ class App:
 
             soql = SoqlClient(cfg.salesforce, tokens, sf_http, metrics=metrics)
             sources.append(
-                EventLogObjectsSource(cfg.sources.eventlog_objects, soql, sm_fields=sm_fields)
+                EventLogObjectsSource(
+                    cfg.sources.eventlog_objects, soql, sm_fields=sm_fields, metrics=metrics
+                )
             )
-            stored_objects = [o.name for o in cfg.sources.eventlog_objects.objects]
 
         if cfg.sources.eventlogfile.enabled:
             from sf2loki.salesforce.eventlogfile_client import EventLogFileClient
-            from sf2loki.sources.overlap import category_of_pubsub, category_of_stored_object
 
-            # Categories a higher-priority source already owns. The ELF wildcard
-            # auto-excludes these discovered types so the same events aren't
-            # ingested twice — unless allow_overlap, where the operator wants both
-            # the real-time-lean stream and the richer ELF rows (pass empty set).
+            # Mirror image of pubsub_owned: categories the higher-priority
+            # sources feed. The ELF wildcard auto-excludes these discovered
+            # types so the same events aren't ingested twice — unless
+            # allow_overlap, where the operator wants both the real-time-lean
+            # stream and the richer ELF rows (pass empty set).
             if cfg.sources.allow_overlap:
-                owned_categories: frozenset[str] = frozenset()
+                elf_owned: frozenset[str] = frozenset()
             else:
-                owned_categories = frozenset(
+                elf_owned = frozenset(
                     [category_of_pubsub(t) for t in pubsub_topics]
                     + [category_of_stored_object(o) for o in stored_objects]
                 )
@@ -465,17 +606,9 @@ class App:
                     elf_client,
                     sm_fields=sm_fields,
                     metrics=metrics,
-                    exclude_categories=owned_categories,
+                    exclude_categories=elf_owned,
                 )
             )
-            # The wildcard expands at poll time, so its discovered types aren't
-            # known here; the guard sees only the explicit types (use exclude to
-            # keep a discovered category off ELF when another source owns it).
-            elf_event_types = [
-                t.name
-                for t in cfg.sources.eventlogfile.event_types
-                if t.name != EVENT_TYPE_WILDCARD
-            ]
 
         # Fail fast if one event category is fed by more than one source (which
         # would ingest duplicate events). Bypass with sources.allow_overlap.
@@ -490,9 +623,17 @@ class App:
             sources=sources,
             sink=sink,
             state=state,
-            batch=cfg.sink.loki.batch,
+            batch=cfg.sink.loki.batch,  # queue_maxsize/queue_max_bytes ride in here
             metrics=metrics,
         )
+
+        # Readiness degradation: report 503 on /readyz once Loki pushes have
+        # been failing continuously for longer than the configured threshold
+        # (0 disables). Liveness (/healthz) is deliberately unaffected — data
+        # is checkpointed and retried, so a restart would not help.
+        unready_after = cfg.service.unready_after_sink_failing.total_seconds()
+        if unready_after > 0:
+            health.set_degraded_check(_sink_degradation_check(pipeline, unready_after))
 
         limits_poller: LimitsPoller | None = None
         if cfg.salesforce.limits.enabled:

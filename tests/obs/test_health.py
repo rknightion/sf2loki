@@ -116,6 +116,66 @@ def test_ready_property() -> None:
     assert h.ready is False
 
 
+# --- readiness degradation (issue #17) ---
+
+
+def test_decide_readyz_degraded_returns_503_with_reason() -> None:
+    reason = "degraded: loki pushes failing for 17m"
+    assert decide("/readyz", ready=True, degraded_reason=reason) == (503, reason)
+
+
+def test_decide_readyz_not_ready_wins_over_degraded() -> None:
+    assert decide("/readyz", ready=False, degraded_reason="x") == (503, "not ready")
+
+
+def test_decide_healthz_ignores_degraded() -> None:
+    # Liveness must never degrade for sink failures — data is safe and retrying;
+    # a restart would not help.
+    assert decide("/healthz", ready=True, degraded_reason="x") == (200, "ok")
+    assert decide("/healthz", ready=False, degraded_reason="x") == (200, "ok")
+
+
+@pytest.mark.asyncio
+async def test_readyz_degrades_and_recovers_via_installed_check() -> None:
+    h = Health()
+    reason: list[str | None] = [None]
+    h.set_degraded_check(lambda: reason[0])
+    await h.start(":0")
+    try:
+        h.set_ready()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{h.port}/readyz")
+            assert r.status_code == 200
+
+            reason[0] = "degraded: loki pushes failing for 17m"
+            r = await client.get(f"http://127.0.0.1:{h.port}/readyz")
+            assert r.status_code == 503
+            assert r.text == "degraded: loki pushes failing for 17m"
+            # Liveness stays green throughout.
+            r = await client.get(f"http://127.0.0.1:{h.port}/healthz")
+            assert r.status_code == 200
+
+            reason[0] = None  # e.g. next push succeeded
+            r = await client.get(f"http://127.0.0.1:{h.port}/readyz")
+            assert r.status_code == 200
+    finally:
+        await h.stop()
+
+
+@pytest.mark.asyncio
+async def test_readyz_no_degraded_check_installed_behaves_as_before() -> None:
+    h = Health()
+    await h.start(":0")
+    try:
+        h.set_ready()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{h.port}/readyz")
+        assert r.status_code == 200
+        assert r.text == "ready"
+    finally:
+        await h.stop()
+
+
 # --- hardening (D9): status reason phrase + read timeout ---
 
 

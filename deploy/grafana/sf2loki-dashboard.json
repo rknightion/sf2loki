@@ -42,6 +42,12 @@
     },
     {
       "type": "panel",
+      "id": "state-timeline",
+      "name": "State timeline",
+      "version": ""
+    },
+    {
+      "type": "panel",
       "id": "table",
       "name": "Table",
       "version": ""
@@ -56,7 +62,7 @@
   "id": null,
   "uid": "sf2loki-overview",
   "title": "sf2loki \u2014 Salesforce \u2192 Loki",
-  "description": "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion volume/lag, Salesforce org API limits, the Loki sink, and the connector's own self-observability (auth, internal queue, Pub/Sub, decode errors, replay/watermark staleness, build info).",
+  "description": "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion volume/lag, Salesforce org API limits, the Loki sink (incl. last successful push age), and the connector's own self-observability (auth, internal queue, Pub/Sub stream health, SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark staleness, build info).",
   "tags": [
     "sf2loki",
     "salesforce",
@@ -968,7 +974,7 @@
       "gridPos": {
         "x": 0,
         "y": 49,
-        "w": 24,
+        "w": 18,
         "h": 6
       },
       "targets": [
@@ -1031,6 +1037,75 @@
     },
     {
       "id": 16,
+      "title": "Last successful push age",
+      "description": "Time since the last successful Loki push. Climbs continuously while the sink is down (pushes retried, nothing lost). The connector's /readyz flips to 503 once pushes have been failing for longer than service.unready_after_sink_failing (default 15m).",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 49,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - sf2loki_last_push_success_timestamp_seconds{job=~\"$job\"}",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 300,
+                "color": "yellow"
+              },
+              {
+                "value": 900,
+                "color": "red"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 17,
       "title": "Connector health",
       "type": "row",
       "collapsed": false,
@@ -1043,7 +1118,7 @@
       "panels": []
     },
     {
-      "id": 17,
+      "id": 18,
       "title": "Auth refreshes & errors rate",
       "description": "Salesforce OAuth token refresh rate vs auth error rate. Refreshes-with-no-errors is healthy steady state; any sustained error rate means credentials/connected-app config need attention.",
       "type": "timeseries",
@@ -1130,7 +1205,7 @@
       }
     },
     {
-      "id": 18,
+      "id": 19,
       "title": "Internal queue depth",
       "description": "Depth of the internal in-process event queue between ingestion and the Loki sink. Healthy \u2248 0; sustained growth means the sink can't keep up with ingestion (backpressure risk).",
       "type": "timeseries",
@@ -1207,7 +1282,7 @@
       }
     },
     {
-      "id": 19,
+      "id": 20,
       "title": "Pub/Sub pending credits by topic",
       "description": "Outstanding flow-control credits owed to Salesforce Pub/Sub per topic. A persistently high or climbing value means the consumer is not keeping pace with the credit window.",
       "type": "timeseries",
@@ -1267,7 +1342,7 @@
       }
     },
     {
-      "id": 20,
+      "id": 21,
       "title": "Pub/Sub reconnects rate",
       "description": "Pub/Sub gRPC stream reconnect rate per topic. Occasional reconnects are normal (stream lifetime limits); a sustained high rate indicates network instability or server-side issues.",
       "type": "timeseries",
@@ -1327,7 +1402,241 @@
       }
     },
     {
-      "id": 21,
+      "id": 22,
+      "title": "Pub/Sub stream up by topic",
+      "description": "Per-topic Pub/Sub subscribe stream health: 1 while connected and receiving, 0 while erroring/reconnecting. Short red blips are normal stream churn; a topic stuck at 0 means its real-time events aren't flowing (ingestion falls back to nothing for that topic).",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sf2loki_pubsub_stream_up{job=~\"$job\"}",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{topic}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down",
+                  "color": "red",
+                  "index": 1
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "red"
+              },
+              {
+                "value": 1,
+                "color": "green"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "rowHeight": 0.85,
+        "mergeValues": true,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "SOQL poll errors rate",
+      "description": "Failed SOQL poll cycles per source and object/event type (eventlog_objects and eventlogfile pollers). Healthy = 0; sustained errors mean that object's watermark isn't advancing \u2014 pair with the replay/watermark age panel.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 72,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source, object) (rate(sf2loki_soql_poll_errors_total{job=~\"$job\"}[5m]))",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{source}}/{{object}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.001,
+                "color": "red"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "title": "Timestamp fallbacks rate",
+      "description": "Entries whose event timestamp was missing/unparseable and a fallback (e.g. ingest time) was used, per source. Non-zero means log timestamps in Loki may not match the true Salesforce event time \u2014 a data-fidelity signal, not data loss.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 72,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source) (rate(sf2loki_timestamp_fallbacks_total{job=~\"$job\"}[5m]))",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{source}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.001,
+                "color": "yellow"
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 25,
       "title": "Decode errors rate",
       "description": "Avro/payload decode error rate by reason. Healthy = 0; non-zero means events are being dropped before they ever reach Loki \u2014 a silent-data-loss signal worth alerting on.",
       "type": "timeseries",
@@ -1337,7 +1646,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 80,
         "w": 12,
         "h": 8
       },
@@ -1400,7 +1709,7 @@
       }
     },
     {
-      "id": 22,
+      "id": 26,
       "title": "Replay/watermark age",
       "description": "Age (now minus last committed checkpoint) of the Pub/Sub replay_id commit and the EventLogFile polling watermark. A climbing age means that checkpoint isn't advancing \u2014 the connector may be stuck, even if the queue/ingestion panels still look fine.",
       "type": "stat",
@@ -1410,7 +1719,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 72,
+        "y": 80,
         "w": 12,
         "h": 8
       },
@@ -1479,7 +1788,7 @@
       }
     },
     {
-      "id": 23,
+      "id": 27,
       "title": "Build info",
       "description": "Connector build/version metadata per running instance (sf2loki_build_info, value always 1). Use to confirm which version is deployed and that all instances agree.",
       "type": "table",
@@ -1489,7 +1798,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 80,
+        "y": 88,
         "w": 24,
         "h": 5
       },

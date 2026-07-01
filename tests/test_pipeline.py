@@ -454,6 +454,205 @@ async def test_producer_updates_queue_depth_gauge() -> None:
     assert metrics.registry.get_sample_value("sf2loki_queue_depth") == 3.0
 
 
+# --- byte-aware queue bounding (issue #16) ---------------------------------
+
+
+def test_queue_maxsize_defaults_from_batch_config() -> None:
+    pipe = Pipeline(
+        sources=[],
+        sink=FakeSink(),
+        state=FakeState(),
+        batch=_batch_cfg(queue_maxsize=123),
+        metrics=Metrics(),
+    )
+    assert pipe._queue_maxsize == 123
+
+
+def test_explicit_queue_maxsize_overrides_batch_config() -> None:
+    pipe = Pipeline(
+        sources=[],
+        sink=FakeSink(),
+        state=FakeState(),
+        batch=_batch_cfg(queue_maxsize=123),
+        metrics=Metrics(),
+        queue_maxsize=7,
+    )
+    assert pipe._queue_maxsize == 7
+
+
+async def test_producer_blocks_on_byte_budget_and_resumes_as_consumer_drains() -> None:
+    # cost per entry = 100-byte line + 64 overhead = 164; budget 150 admits one
+    # entry at a time (admitted while under budget, blocked once at/over it).
+    line = "x" * 100
+    entries = [_entry("k", str(i), line=line) for i in range(3)]
+    pipe = Pipeline(
+        sources=[],
+        sink=FakeSink(),
+        state=FakeState(),
+        batch=_batch_cfg(queue_max_bytes=150),
+        metrics=Metrics(),
+    )
+    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
+    task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
+
+    await asyncio.sleep(0.05)
+    assert queue.qsize() == 1  # entry 0 admitted, entry 1 blocked on bytes
+    assert not task.done()
+
+    # Drain one item the way the consumer does; the producer resumes.
+    item = await queue.get()
+    await pipe._release(item)
+    await asyncio.sleep(0.05)
+    assert queue.qsize() == 1  # entry 1 admitted, entry 2 blocked
+
+    item = await queue.get()
+    await pipe._release(item)
+    item = await asyncio.wait_for(queue.get(), timeout=1)
+    await pipe._release(item)
+    sentinel = await asyncio.wait_for(queue.get(), timeout=1)
+    assert not isinstance(sentinel, LogEntry)
+    await asyncio.wait_for(task, timeout=1)
+
+
+async def test_single_oversized_entry_still_admitted() -> None:
+    # An entry whose cost alone exceeds the whole budget must still flow
+    # end-to-end (never deadlock the pipeline).
+    src = FakeSource([_entry("k", "v", line="y" * 10_000)])
+    sink = FakeSink()
+    state = FakeState()
+    pipe = Pipeline(
+        sources=[src],
+        sink=sink,
+        state=state,
+        batch=_batch_cfg(queue_max_bytes=100),
+        metrics=Metrics(),
+    )
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    assert sum(len(b.entries) for b in sink.pushed) == 1
+    assert state.committed == {"k": "v"}
+
+
+async def test_count_bound_still_enforced_when_byte_accounting_disabled() -> None:
+    entries = [_entry("k", str(i)) for i in range(105)]
+    pipe = Pipeline(
+        sources=[],
+        sink=FakeSink(),
+        state=FakeState(),
+        batch=_batch_cfg(queue_maxsize=100, queue_max_bytes=0),
+        metrics=Metrics(),
+    )
+    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=pipe._queue_maxsize)
+    task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
+
+    await asyncio.sleep(0.05)
+    assert queue.qsize() == 100  # count bound reached
+    assert not task.done()
+
+    while not task.done():
+        await asyncio.wait_for(queue.get(), timeout=1)
+        await asyncio.sleep(0)
+    await asyncio.wait_for(task, timeout=1)
+
+
+async def test_checkpoint_only_entries_cost_no_bytes() -> None:
+    # Keepalives (and the sentinel) must never block on the byte budget.
+    keepalives = [_keepalive("k", str(i)) for i in range(5)]
+    pipe = Pipeline(
+        sources=[],
+        sink=FakeSink(),
+        state=FakeState(),
+        batch=_batch_cfg(queue_max_bytes=1),
+        metrics=Metrics(),
+    )
+    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
+
+    await asyncio.wait_for(pipe._produce(FakeSource(keepalives), queue, asyncio.Event()), timeout=1)
+
+    assert queue.qsize() == 6  # 5 keepalives + sentinel, none blocked
+
+
+async def test_clean_shutdown_with_byte_blocked_producer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stop must unblock a producer stuck on the byte budget (via consumer drain)."""
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 0.01)
+    line = "x" * 200
+    src = FakeSource([_entry("k", str(i), line=line) for i in range(10)])
+    sink = FakeSink(fail_times=10**6)  # sink down: consumer stuck retrying
+    pipe = Pipeline(
+        sources=[src],
+        sink=sink,
+        state=FakeState(),
+        batch=_batch_cfg(max_entries=1, queue_max_bytes=100),
+        metrics=Metrics(),
+    )
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(pipe.run(stop))
+    await asyncio.sleep(0.1)  # producer now blocked on bytes, consumer in retry
+    assert not task.done()
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+
+# --- sink failing-since + last push success metric (issue #17) ---------------
+
+
+async def test_flush_success_sets_last_push_metric_and_clears_failing_since(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 0.0)
+    sink = FakeSink(fail_times=2)
+    metrics = Metrics()
+    pipe = Pipeline(sources=[], sink=sink, state=FakeState(), batch=_batch_cfg(), metrics=metrics)
+
+    await asyncio.wait_for(pipe._flush([_entry("k", "v")], asyncio.Event()), timeout=2)
+
+    assert pipe.sink_failing_since is None  # cleared on the eventual success
+    val = metrics.registry.get_sample_value("sf2loki_last_push_success_timestamp_seconds")
+    assert val is not None and val > 0.0
+
+
+async def test_failing_since_set_while_sink_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 5.0)
+    src = FakeSource([_entry("k", "v")])
+    sink = FakeSink(fail_times=10**6)
+    pipe = _pipeline(src, sink, FakeState())
+    assert pipe.sink_failing_since is None
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(pipe.run(stop))
+    await asyncio.sleep(0.1)  # flush_interval 0.05s -> first push attempt failed
+    assert pipe.sink_failing_since is not None
+    stop.set()
+    await asyncio.wait_for(task, timeout=1)
+
+
+async def test_permanent_drop_clears_failing_since(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent drop advances the pipeline — it is not a stuck sink."""
+    monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 0.0)
+
+    class RetryThenPermanent:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def push(self, batch: Batch) -> None:
+            self.attempts += 1
+            if self.attempts <= 2:
+                raise RetryableSinkError("transient")
+            raise PermanentSinkError("nope")
+
+        async def aclose(self) -> None:
+            return None
+
+    src = FakeSource([_entry("k", "v")])
+    pipe = _pipeline(src, RetryThenPermanent(), FakeState())  # type: ignore[arg-type]
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=2)
+
+    assert pipe.sink_failing_since is None
+
+
 async def test_commit_watermark_falls_back_to_now_on_unparseable_value() -> None:
     """A checkpoint value that isn't a parseable timestamp doesn't crash the pipeline."""
     src = FakeSource([_entry("eventlog_objects:LoginEvent", "not-a-timestamp")])

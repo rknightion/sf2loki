@@ -89,11 +89,14 @@ def panel(
     overrides: list[dict] | None = None,
     options_extra: dict | None = None,
     decimals: int | None = None,
+    mappings: list[dict] | None = None,
 ) -> dict:
     """Build one classic-schema panel dict with gridPos."""
     field_defaults: dict = {"unit": unit}
     if decimals is not None:
         field_defaults["decimals"] = decimals
+    if mappings:
+        field_defaults["mappings"] = mappings
     if thresholds:
         field_defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
         field_defaults["color"] = {"mode": "thresholds"}
@@ -112,6 +115,8 @@ def panel(
         if stacking:
             custom["stacking"] = {"mode": stacking, "group": "A"}
         field_defaults["custom"] = custom
+    elif viz == "state-timeline":
+        field_defaults["custom"] = {"fillOpacity": 70, "lineWidth": 0, "spanNulls": False}
 
     options: dict = {}
     if viz == "timeseries":
@@ -138,6 +143,15 @@ def panel(
             "reduceOptions": {"calcs": ["lastNotNull"], "values": False},
             "orientation": "horizontal",
             "displayMode": "gradient",
+        }
+    elif viz == "state-timeline":
+        options = {
+            "showValue": "never",
+            "rowHeight": 0.85,
+            "mergeValues": True,
+            "alignValue": "left",
+            "legend": {"displayMode": "list", "placement": "bottom", "showLegend": True},
+            "tooltip": {"mode": "single", "sort": "none"},
         }
     elif viz == "table":
         options = {"showHeader": True, "cellHeight": "sm"}
@@ -455,7 +469,7 @@ panels.append(
         ],
         x=0,
         y=y,
-        w=24,
+        w=18,
         h=6,
         unit="ops",
         desc="Log entries permanently dropped as undeliverable, per reason (bad_request = Loki rejected "
@@ -464,6 +478,28 @@ panels.append(
         "ERROR by the connector and worth alerting on. Auth failures (401/403) are NOT counted "
         "here: those are retried indefinitely without dropping.",
         thresholds=thr([(None, "green"), (0.001, "red")]),
+    )
+)
+panels.append(
+    panel(
+        "Last successful push age",
+        "stat",
+        [
+            target(
+                f"time() - sf2loki_last_push_success_timestamp_seconds{JOB}",
+                legend="age",
+                instant=True,
+            )
+        ],
+        x=18,
+        y=y,
+        w=6,
+        h=6,
+        unit="s",
+        desc="Time since the last successful Loki push. Climbs continuously while the sink is down "
+        "(pushes retried, nothing lost). The connector's /readyz flips to 503 once pushes have "
+        "been failing for longer than service.unready_after_sink_failing (default 15m).",
+        thresholds=thr([(None, "green"), (300, "yellow"), (900, "red")]),
     )
 )
 y += 6
@@ -546,6 +582,75 @@ panels.append(
         unit="ops",
         desc="Pub/Sub gRPC stream reconnect rate per topic. Occasional reconnects are normal (stream "
         "lifetime limits); a sustained high rate indicates network instability or server-side issues.",
+    )
+)
+y += 8
+
+panels.append(
+    panel(
+        "Pub/Sub stream up by topic",
+        "state-timeline",
+        [target(f"sf2loki_pubsub_stream_up{JOB}", legend="{{topic}}")],
+        x=0,
+        y=y,
+        w=8,
+        h=8,
+        unit="short",
+        desc="Per-topic Pub/Sub subscribe stream health: 1 while connected and receiving, 0 while "
+        "erroring/reconnecting. Short red blips are normal stream churn; a topic stuck at 0 means "
+        "its real-time events aren't flowing (ingestion falls back to nothing for that topic).",
+        thresholds=thr([(None, "red"), (1, "green")]),
+        mappings=[
+            {
+                "type": "value",
+                "options": {
+                    "0": {"text": "down", "color": "red", "index": 1},
+                    "1": {"text": "up", "color": "green", "index": 0},
+                },
+            }
+        ],
+    )
+)
+panels.append(
+    panel(
+        "SOQL poll errors rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (source, object) (rate(sf2loki_soql_poll_errors_total{JOB}[5m]))",
+                legend="{{source}}/{{object}}",
+            )
+        ],
+        x=8,
+        y=y,
+        w=8,
+        h=8,
+        unit="ops",
+        desc="Failed SOQL poll cycles per source and object/event type (eventlog_objects and "
+        "eventlogfile pollers). Healthy = 0; sustained errors mean that object's watermark isn't "
+        "advancing — pair with the replay/watermark age panel.",
+        thresholds=thr([(None, "green"), (0.001, "red")]),
+    )
+)
+panels.append(
+    panel(
+        "Timestamp fallbacks rate",
+        "timeseries",
+        [
+            target(
+                f"sum by (source) (rate(sf2loki_timestamp_fallbacks_total{JOB}[5m]))",
+                legend="{{source}}",
+            )
+        ],
+        x=16,
+        y=y,
+        w=8,
+        h=8,
+        unit="ops",
+        desc="Entries whose event timestamp was missing/unparseable and a fallback (e.g. ingest time) "
+        "was used, per source. Non-zero means log timestamps in Loki may not match the true "
+        "Salesforce event time — a data-fidelity signal, not data loss.",
+        thresholds=thr([(None, "green"), (0.001, "yellow")]),
     )
 )
 y += 8
@@ -670,6 +775,7 @@ dashboard = {
         {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
         {"type": "panel", "id": "stat", "name": "Stat", "version": ""},
         {"type": "panel", "id": "bargauge", "name": "Bar gauge", "version": ""},
+        {"type": "panel", "id": "state-timeline", "name": "State timeline", "version": ""},
         {"type": "panel", "id": "table", "name": "Table", "version": ""},
         {"type": "panel", "id": "row", "name": "Row", "version": ""},
     ],
@@ -678,9 +784,10 @@ dashboard = {
     "title": "sf2loki — Salesforce → Loki",
     "description": (
         "Monitors the Salesforce Event Monitoring -> Loki pipeline shipped by sf2loki: ingestion "
-        "volume/lag, Salesforce org API limits, the Loki sink, "
-        "and the connector's own self-observability (auth, internal queue, Pub/Sub, decode errors, "
-        "replay/watermark staleness, build info)."
+        "volume/lag, Salesforce org API limits, the Loki sink (incl. last successful push age), "
+        "and the connector's own self-observability (auth, internal queue, Pub/Sub stream health, "
+        "SOQL poll errors, timestamp fallbacks, decode errors, replay/watermark staleness, "
+        "build info)."
     ),
     "tags": ["sf2loki", "salesforce", "loki"],
     "timezone": "browser",

@@ -314,7 +314,11 @@ chmod 640 secrets/*        # or chown the files to uid 10001
 
 **Health check target — use `/readyz`, not `/healthz`.** `/healthz` is *liveness* (200 whenever the
 process is up, even mid-startup before Salesforce auth); `/readyz` is *readiness* (200 only once auth
-resolved and the pipeline is running). Docker/ECS collapse container health into a single signal, so
+resolved and the pipeline is running). `/readyz` also degrades to 503 (with a reason in the body)
+when Loki pushes have been failing continuously for longer than
+`service.unready_after_sink_failing` (default 15m; 0 disables) — data is checkpointed and retried,
+so this signals "degraded, surface me", not "restart me"; `/healthz` deliberately stays 200 through
+a Loki outage. Docker/ECS collapse container health into a single signal, so
 they should probe `/readyz` — the Dockerfile `HEALTHCHECK` already does. For **ECS**, set the task
 definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || exit 1` with a
 `startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a fast-fail

@@ -1,8 +1,14 @@
 """Asyncio HTTP health server for sf2loki.
 
 Two endpoints:
-  GET /healthz  — liveness:  always 200 "ok"
-  GET /readyz   — readiness: 200 "ready" | 503 "not ready"
+  GET /healthz  — liveness:  always 200 "ok" (never degrades for sink outages —
+                  data is safe and retried; a restart would not help)
+  GET /readyz   — readiness: 200 "ready" | 503 "not ready" | 503 "<degraded reason>"
+
+Readiness degradation is pluggable: the app installs a predicate via
+:meth:`Health.set_degraded_check` (e.g. "Loki pushes failing for > N minutes")
+which is evaluated per /readyz request, so readiness recovers on its own as
+soon as the condition clears — no state transitions to manage here.
 
 Design is split into a pure routing helper (decide) and a server class (Health)
 so unit tests can exercise routing without touching sockets.
@@ -11,14 +17,23 @@ so unit tests can exercise routing without touching sockets.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 
-def decide(path: str, *, ready: bool) -> tuple[int, str]:
-    """Return (status_code, body) for the given request path and readiness state."""
+def decide(path: str, *, ready: bool, degraded_reason: str | None = None) -> tuple[int, str]:
+    """Return (status_code, body) for the given request path and readiness state.
+
+    ``degraded_reason`` only affects /readyz, and only once the service went
+    ready at all (startup "not ready" wins over degradation).
+    """
     if path == "/healthz":
         return 200, "ok"
     if path == "/readyz":
-        return (200, "ready") if ready else (503, "not ready")
+        if not ready:
+            return 503, "not ready"
+        if degraded_reason:
+            return 503, degraded_reason
+        return 200, "ready"
     return 404, "not found"
 
 
@@ -41,11 +56,20 @@ class Health:
         self._ready: bool = False
         self._server: asyncio.Server | None = None
         self._read_timeout: float = read_timeout
+        self._degraded_check: Callable[[], str | None] | None = None
         self.port: int = 0  # set after start(); reflects actual bound port
 
     @property
     def ready(self) -> bool:
         return self._ready
+
+    def set_degraded_check(self, check: Callable[[], str | None]) -> None:
+        """Install a readiness-degradation predicate, evaluated per /readyz request.
+
+        Returning a reason string makes /readyz report 503 with that body;
+        returning None means healthy. /healthz is never affected.
+        """
+        self._degraded_check = check
 
     def set_ready(self) -> None:
         self._ready = True
@@ -97,7 +121,8 @@ class Health:
             parts = request_line.split()
             path = parts[1].decode("utf-8", errors="replace") if len(parts) >= 2 else "/"
 
-            status, body = decide(path, ready=self._ready)
+            degraded = self._degraded_check() if self._degraded_check is not None else None
+            status, body = decide(path, ready=self._ready, degraded_reason=degraded)
             reason = _REASON_PHRASES.get(status, "")
             body_bytes = body.encode()
             response = (

@@ -3,8 +3,9 @@
 `sf2loki-dashboard.json` monitors both the Salesforce Event Monitoring -> Loki data pipeline
 (events ingested, ingest lag SLI, EventLogFile row throughput, Salesforce org API limits) and the
 sf2loki connector's own
-self-observability (Loki push outcomes/latency, internal queue depth, auth refreshes/errors,
-Pub/Sub credits/reconnects, decode errors, replay/watermark staleness, build info). It uses a
+self-observability (Loki push outcomes/latency, last successful push age, internal queue depth,
+auth refreshes/errors, Pub/Sub credits/reconnects, per-topic Pub/Sub stream up/down, SOQL poll
+errors, timestamp fallbacks, decode errors, replay/watermark staleness, build info). It uses a
 `Prometheus datasource` template variable plus a `$job` variable (defaults to `sf2loki`) so every
 panel is portable across environments. See [DESIGN.md §12](../../DESIGN.md#12-self-observability)
 for the full metric list and how metrics reach Grafana (OTLP push, no scrape endpoint), and the main

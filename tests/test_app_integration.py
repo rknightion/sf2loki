@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import time
+from typing import Any, ClassVar
 
+import httpx
 import pytest
 
+from sf2loki import app as app_module
 from sf2loki.app import App, _drain_with_grace
 from sf2loki.config import Config
 from sf2loki.sinks.loki.labels import LabelGuardError
@@ -163,6 +166,118 @@ def test_build_allows_overlap_when_opted_in() -> None:
     )
     appn = App.build(cfg)
     assert {PubSubSource, EventLogObjectsSource} == set(_source_types(appn))
+
+
+# ---------------------------------------------------------------------------
+# Queue bounds wiring (issue #16)
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_queue_maxsize_wired_from_batch_config() -> None:
+    cfg = _cfg(sink={"loki": {"url": "http://x/loki/api/v1/push", "batch": {"queue_maxsize": 250}}})
+    appn = App.build(cfg)
+    assert appn._pipeline._queue_maxsize == 250
+
+
+# ---------------------------------------------------------------------------
+# Readiness degradation wiring (issue #17)
+# ---------------------------------------------------------------------------
+
+
+async def test_readyz_degrades_after_prolonged_sink_failure_and_recovers() -> None:
+    cfg = _cfg(service={"health_addr": "127.0.0.1:0", "unready_after_sink_failing": "10m"})
+    appn = App.build(cfg)
+    health = appn._health
+    await health.start("127.0.0.1:0")
+    try:
+        health.set_ready()
+        async with httpx.AsyncClient() as client:
+            base = f"http://127.0.0.1:{health.port}"
+            r = await client.get(f"{base}/readyz")
+            assert r.status_code == 200
+
+            # Sink failing continuously for an hour (> 10m threshold).
+            appn._pipeline._sink_failing_since = time.monotonic() - 3600
+            r = await client.get(f"{base}/readyz")
+            assert r.status_code == 503
+            assert r.text.startswith("degraded: loki pushes failing for")
+            # Liveness must NOT degrade for sink failures.
+            r = await client.get(f"{base}/healthz")
+            assert r.status_code == 200
+
+            # Failing for less than the threshold: still ready.
+            appn._pipeline._sink_failing_since = time.monotonic() - 60
+            r = await client.get(f"{base}/readyz")
+            assert r.status_code == 200
+
+            # Next successful push clears the mark -> ready again.
+            appn._pipeline._sink_failing_since = None
+            r = await client.get(f"{base}/readyz")
+            assert r.status_code == 200
+    finally:
+        await health.stop()
+
+
+async def test_readyz_degradation_disabled_when_threshold_zero() -> None:
+    cfg = _cfg(service={"health_addr": "127.0.0.1:0", "unready_after_sink_failing": 0})
+    appn = App.build(cfg)
+    health = appn._health
+    await health.start("127.0.0.1:0")
+    try:
+        health.set_ready()
+        appn._pipeline._sink_failing_since = time.monotonic() - 10**6
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"http://127.0.0.1:{health.port}/readyz")
+        assert r.status_code == 200
+    finally:
+        await health.stop()
+
+
+# ---------------------------------------------------------------------------
+# owned_categories wiring into PubSubSource (mirror of the ELF exclusion)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPubSubSource:
+    """Stands in for PubSubSource to capture App.build's constructor kwargs."""
+
+    captured: ClassVar[dict[str, Any]] = {}
+
+    def __init__(self, cfg: Any, client: Any, **kwargs: Any) -> None:
+        type(self).captured = dict(kwargs)
+
+    def resolve_topics(self) -> list[str]:
+        return []
+
+
+def test_build_passes_owned_categories_to_pubsub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pub/Sub must be told which categories eventlog_objects + explicit ELF
+    event types own, so its wildcard discovery can auto-exclude them."""
+    monkeypatch.setattr(app_module, "PubSubSource", _RecordingPubSubSource)
+    cfg = _cfg(
+        sources={
+            "pubsub": {"enabled": True, "topics": ["/event/ApiEventStream"]},
+            "eventlog_objects": {"enabled": True, "objects": [{"name": "LoginEvent"}]},
+            "eventlogfile": {"enabled": True, "event_types": ["Report"]},
+        }
+    )
+    App.build(cfg)
+    assert _RecordingPubSubSource.captured["owned_categories"] == frozenset({"login", "report"})
+
+
+def test_build_passes_empty_owned_categories_when_overlap_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_module, "PubSubSource", _RecordingPubSubSource)
+    cfg = _cfg(
+        sources={
+            "allow_overlap": True,
+            "pubsub": {"enabled": True, "topics": ["/event/LoginEventStream"]},
+            "eventlog_objects": {"enabled": True, "objects": [{"name": "LoginEvent"}]},
+        }
+    )
+    App.build(cfg)
+    assert _RecordingPubSubSource.captured["owned_categories"] == frozenset()
 
 
 # ---------------------------------------------------------------------------
