@@ -25,8 +25,10 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - **Loki-safe lines**: one entry per ELF row (never a whole file as one line), plus a per-line byte cap
   (`batch.max_line_bytes`, default 256 KiB) that truncates an oversized line before push so one fat row
   can't get its whole batch rejected.
-- **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a local JSON file;
-  at-least-once delivery, structural backpressure (no silent drops).
+- **Resumable**: per-topic `replay_id` / per-object watermark checkpointing to a local JSON file or
+  an S3-compatible object store (`sf2loki[s3]` — no persistent volume needed); at-least-once
+  delivery, structural backpressure (no silent drops). Optional active-passive HA via a shared
+  file lease with commit fencing.
 - **Self-observable (OTel-native)**: all metrics — connector self-observability **and** Salesforce org
   limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
@@ -322,6 +324,31 @@ Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/), alongside a gen
 data-loss and degradation signal — see [docs/alerts.md](docs/alerts.md) for what each alert means
 and how to provision it.
 
+### Stateless deployments (S3 checkpoint store)
+
+By default sf2loki persists checkpoints to a local JSON file, which needs a mounted volume that
+survives restarts. For stateless deployments (Fargate, Cloud Run, ECS with ephemeral storage) point
+sf2loki at an S3-compatible object store instead — no volume needed:
+
+```yaml
+state:
+  store: s3
+  s3:
+    bucket: my-sf2loki-checkpoints
+    key: sf2loki/state.json       # default; one object per sf2loki instance
+    region: us-east-1             # omit to use the AWS default-chain region
+    # endpoint_url: http://minio:9000   # any S3-compatible provider (MinIO/R2/Ceph)
+```
+
+Requires the `s3` extra (`pip install 'sf2loki[s3]'`); credentials come from the standard AWS
+default chain (env vars, task role, shared config). Commits are **conditional writes** (ETag
+compare-and-swap): if a second instance is pointed at the same bucket/key and races a commit, it
+fails fast with a conflict error instead of silently clobbering the other's checkpoints — the
+object-store analogue of the file store's flock. Two instances must not share a checkpoint object,
+with one exception: an active-passive HA pair (below), where commit fencing guarantees only the
+leader writes. Write rate is one full-object GET+conditional-PUT per checkpoint flush (~= flush
+rate, not event rate).
+
 ## Backfilling history
 
 `sf2loki backfill` is a one-shot CLI for pushing historical EventLogFile data into Loki — useful
@@ -415,13 +442,61 @@ definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || e
 `startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a fast-fail
 (e.g. bad Salesforce credentials → process exits) restarts the task.
 
-**Run exactly one replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API delivers
-events independently per subscriber connection, so a second instance double-delivers. See
-[DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha) for the full HA/replica model and the
-`Coordinator` seam that will allow active-passive failover later.
+**Run exactly one ACTIVE replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API
+delivers events independently per subscriber connection, so a second active instance
+double-delivers. For automatic failover, run an active-passive pair with the file-lease
+coordinator (next section); see [DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha) for the
+full HA/replica model.
 
 > **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:
 > true`** (default on Grafana Cloud; must be enabled self-hosted / in Alloy's Loki).
+
+## High availability (active-passive)
+
+By default sf2loki runs standalone: a single instance is always the leader and streams
+continuously. For hands-off failover, run **two replicas** in an active-passive pair coordinated by
+a **file lease** on shared storage. Exactly one replica (the leader) ingests at a time; the other
+stands by and takes over within one lease `ttl` if the leader dies.
+
+The leader owns a small JSON lease file on storage shared by both replicas (NFS/EFS/a shared
+volume), renewing it every `renew_interval`; the standby polls the lease and takes over once it has
+gone stale. Takeover is resolved by atomic tmp+rename with a verification re-read, so two standbys
+contending for an expired lease never both win. Failover is protected by **fencing**: checkpoint
+commits are gated on still holding the lease, so a stale leader (one that lost the lease during a
+GC or scheduling pause) is refused at commit time and cannot race the new leader's checkpoints.
+Semantics are **at-least-once**: a mid-batch takeover may re-ingest up to one `ttl` of events, but
+acknowledged data is never lost.
+
+```yaml
+coordinate:
+  type: file_lease
+  file_lease:
+    path: /var/lib/sf2loki/leader.lease   # on shared storage, same for both replicas
+    ttl: 30s              # failover time: standby takes over this long after renewals stop
+    renew_interval: 10s   # must be < ttl/2, so one missed renewal never costs leadership
+    holder_id: ""         # blank -> hostname-pid; set explicitly if hostnames aren't unique
+```
+
+Both replicas run the same config; the **checkpoint state store must also be shared** (the same
+volume, or the S3 store above) so the standby resumes exactly where the leader left off. For a
+compose pair, mount one shared volume at `/var/lib/sf2loki` in both services; for VMs, mount the
+same NFS/EFS export on both hosts.
+
+Operational caveats:
+
+- **Shared storage is required** for the lease file AND the checkpoints — a local disk per replica
+  gives you two independent leaders, not a failover pair.
+- **Keep the hosts NTP-synced.** Lease expiry compares wall-clock time across hosts, so `ttl` must
+  comfortably exceed worst-case inter-host clock skew.
+- **Failover time = `ttl`.** Lower it for faster takeover, at the cost of tighter clock-skew and
+  renew-latency margins (`renew_interval` must stay below `ttl/2`).
+- **Duplicates, not loss.** Expect a bounded re-ingest window (up to one `ttl`) around a takeover;
+  downstream should tolerate duplicate log lines.
+
+Observability: `sf2loki_leader` is `1` on the active leader (and on any standalone instance), `0`
+on the standby — `sum(sf2loki_leader)` should always be exactly `1`, and the shipped alert pack
+fires on anything else (leaderless gap or split-brain). The standby reports `503 standby` on
+`/readyz` (a load balancer routes only to the leader) while staying `200` on `/healthz`.
 
 ## Development
 
