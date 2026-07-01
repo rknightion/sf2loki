@@ -28,6 +28,11 @@ test:
 # the green bar: lint + type + test
 gate: lint type test
 
+# regenerate the committed config docs from the schema
+gen-config:
+    uv run python -m sf2loki config example > config.example.yaml
+    uv run python -m sf2loki config reference > docs/config-reference.md
+
 # run the service locally (needs a config file)
 run config="config.yaml":
     uv run python -m sf2loki --config {{config}}

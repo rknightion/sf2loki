@@ -174,8 +174,14 @@ Simpler than JWT bearer — no keypair, certificate, or user pre-authorisation. 
 
 Config loads from a YAML file and/or environment (`SF2LOKI_*` with `__` nesting; env overrides YAML
 overrides defaults). Secrets are injected from `*_file` paths or `${ENV}` interpolation; a missing or
-unreadable secret is fatal at startup. See [`config.example.yaml`](config.example.yaml) for the full
-annotated schema.
+unreadable secret is fatal at startup. See [`config.example.yaml`](config.example.yaml) for a runnable
+annotated example, and [`docs/config-reference.md`](docs/config-reference.md) for the complete
+generated reference (every key, type, default, and description).
+
+Both `config.example.yaml` and `docs/config-reference.md` are **generated from the Pydantic config
+schema** — do not hand-edit them. Regenerate after changing config models with `just gen-config`
+(or `sf2loki config example` / `sf2loki config reference` directly). CI fails the build if either
+file drifts from the schema.
 
 ```bash
 # run locally against a config file
