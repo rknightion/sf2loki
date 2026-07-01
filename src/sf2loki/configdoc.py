@@ -178,8 +178,13 @@ def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) ->
         else:
             value_str = f"{_SECRET_PLACEHOLDER_ROOT}/{name.removesuffix('_file').replace('_', '-')}"
             value_str = _fmt_scalar(value_str)
-        suffix = f"  # {comment}" if comment else ""
-        lines.append(f"{indent}{name}: {value_str}{suffix}")
+        required_tag = " (required)" if is_required else ""
+        if comment:
+            lines.append(f"{indent}{name}: {value_str}  # {comment}{required_tag}")
+        elif required_tag:
+            lines.append(f"{indent}{name}: {value_str}  #{required_tag}")
+        else:
+            lines.append(f"{indent}{name}: {value_str}")
         return
 
     value = _resolve_value(field)
