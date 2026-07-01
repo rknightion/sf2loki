@@ -15,6 +15,5 @@ services:
       - ./secrets:/etc/sf2loki/secrets:ro
     command: ["--config", "/etc/sf2loki/config.yaml"]
     ports:
-      - "9090:9090"   # Prometheus /metrics
-      - "8080:8080"   # /healthz, /readyz
+      - "8080:8080"   # /healthz, /readyz (metrics are OTLP-push, no scrape port)
     restart: unless-stopped

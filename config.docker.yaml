@@ -25,12 +25,18 @@ sources:
       - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
   eventlogfile:
     enabled: true
-    interval: Hourly
+    interval: Hourly                                # Hourly needs the "Generate Event Log Files"
+                                                    # opt-in + Event Monitoring; Daily is the safe
+                                                    # default (settled, once-a-day, lower dup risk).
     event_types:
       - Report
       - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
     poll_interval: 10m
     lookback: 24h
+    settle_window: 5m                               # skip files created within this grace window so a
+                                                    # half-written Hourly CSV isn't pulled mid-write
+    download_max_age: 24h                            # abandon a file whose body keeps 404ing once older
+                                                    # than this, so it can't wedge the checkpoint
 
 sink:
   type: loki
@@ -52,5 +58,12 @@ state:
 service:
   log_level: info
   log_format: json
-  metrics_addr: ":9090"
-  health_addr: ":8080"
+  health_addr: ":8080"                              # /healthz, /readyz
+  # Metrics are OTLP-push-native (no Prometheus scrape endpoint). To export the
+  # sf2loki_* + salesforce_* metrics to Grafana Cloud, enable telemetry below:
+  # telemetry:
+  #   enabled: true
+  #   endpoint: ${GC_OTLP_ENDPOINT}                 # https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics
+  #   basic_auth_user: ${GC_OTLP_USER}
+  #   basic_auth_token_file: /etc/sf2loki/secrets/otlp-token
+  #   export_interval: 60s
