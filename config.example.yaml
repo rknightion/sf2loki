@@ -50,14 +50,40 @@ sources:
       # durations accept shorthand (5m, 1h30m), ISO-8601 (PT5M), or plain seconds
       - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
   eventlogfile:
-    # EventLogFile (CSV) ingestion. ~70 event types; schema is read per-file.
+    # EventLogFile (CSV) ingestion. Salesforce exposes 63 EventType values (query
+    # SELECT EventType FROM EventLogFile, or the EventType picklist, to see which
+    # your org actually produces); schema is read per-file. This is the workhorse
+    # for breadth — most activity only surfaces here, not as a streaming event.
     enabled: false
-    interval: Hourly                              # Hourly (3-6h fresh) | Daily (>=1d) — pick ONE
-    event_types:                                  # ELF EventTypes to ingest (required when enabled)
-      # Each item is a bare string OR a per-type object. A bare string uses the
-      # global structured_metadata_fields below and promotes no extra labels.
-      - Login
-      - API
+    interval: Daily                               # Daily (settled, ~1d lag) | Hourly (fresher, needs the
+                                                  # Event Monitoring hourly opt-in in Setup) — pick ONE.
+                                                  # Many orgs generate ONLY Daily files; check before Hourly.
+    event_types:                                  # ELF EventTypes to ingest (required when enabled).
+      # A rich mix that demonstrates the breadth an active org produces. NOTE:
+      # "Login" is intentionally NOT here — it's covered by /event/LoginEventStream
+      # above, and listing it in both would trip the overlap guard. Each item is a
+      # bare string (uses the global structured_metadata_fields, promotes no labels)
+      # OR a per-type object (below).
+      - API                                       # REST/SOAP/Bulk API calls, SOQL
+      - RestApi
+      - BulkApi
+      - BulkApi2
+      - Search                                    # SOSL searches
+      - ApexExecution                             # anonymous + triggered Apex
+      - MetadataApiOperation                      # describe / metadata calls
+      - ContentTransfer                           # file up/downloads
+      - ContentDistribution
+      - Dashboard                                 # dashboard reads
+      - Report                                    # report runs
+      - AsyncReportRun
+      - Logout
+      - DatabaseSave                              # row-level DML volume
+      - ApiTotalUsage
+      # UI-only types — only populate from real browser sessions (not the API):
+      - URI
+      - VisualforceRequest
+      - LightningPageView
+      - LightningInteraction
       # Per-type object: override structured metadata and/or promote columns to
       # stream labels for just this type. structured_metadata_fields overrides
       # the global list (omit to inherit it; [] to suppress it). labels MUST be
@@ -65,13 +91,14 @@ sources:
       - name: ReportExport
         structured_metadata_fields: [REPORT_ID, OWNER_ID]
         labels: [DELEGATED_USER]
-    poll_interval: 1h                             # how often to list new files
-    lookback: 24h                                 # initial window on first run (no checkpoint = "from now")
+    poll_interval: 1h                             # how often to list new files (Daily files land ~once/day)
+    lookback: 72h                                 # initial window on first run (no checkpoint); reach back
+                                                  # far enough to catch the last few settled Daily files
     timestamp_column: TIMESTAMP_DERIVED           # per-row event time column
     page_size: 1000                              # SOQL LIMIT for the file-listing query
     settle_window: 0s                             # skip files created within this grace window (avoids
                                                   # half-written Hourly CSVs); 0 = off. Use a few min for Hourly.
-    download_max_age: 24h                          # abandon a file whose body keeps 404ing once older than
+    download_max_age: 96h                          # abandon a file whose body keeps 404ing once older than
                                                   # this, so a permanently-missing file can't wedge the checkpoint
 
 sink:
