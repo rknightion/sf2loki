@@ -21,3 +21,12 @@ tests
 .vscode
 .claude
 ko.md
+# NEVER bake secrets or runtime state into an image (the documented local-build
+# path runs `docker build .` in a working tree that contains live secrets).
+secrets
+*.key
+*.crt
+*.pem
+.env
+.env.*
+state

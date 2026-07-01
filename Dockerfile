@@ -3,7 +3,9 @@
 # --- Builder: resolve deps + install the project with uv ----------------------
 FROM python:3.14-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pinned minor tag: reproducible builds + Renovate can propose bumps
+# (":latest" defeats both).
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -39,8 +41,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER sf2loki
 
-# metrics (9090) and health (8080)
-EXPOSE 9090 8080
+# health endpoints (/healthz, /readyz); metrics are OTLP push — no scrape port
+EXPOSE 8080
 
 # Use /readyz (readiness), not /healthz (liveness): Docker/ECS collapse health
 # into a single signal, and for that signal we want "actually serving" — i.e.

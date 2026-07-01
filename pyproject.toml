@@ -4,7 +4,8 @@ version = "0.2.0"
 description = "Ship Salesforce Event Monitoring data into Grafana Loki"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "Apache-2.0" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Rob Knight" }]
 dependencies = [
     "grpcio>=1.60",
@@ -40,7 +41,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26"]  # >=1.26 for PEP 639 SPDX license expressions
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

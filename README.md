@@ -139,12 +139,26 @@ holds. Optional hardening: add a **login-IP restriction** here if your pod egres
   30 days (up to 365) with the Event Monitoring add-on.
 - **API Enabled** — for the Pub/Sub and REST APIs.
 
+> **No Event Monitoring add-on? Expect a short ELF menu.** Without the Shield/Event Monitoring
+> add-on, orgs get only the free EventLogFile subset: Login, Logout, API Total Usage, Apex
+> Unexpected Exception, and the CORS/CSP-violation + hostname-redirect types — **Daily interval
+> only, 1-day retention**. An `event_types: ["*"]` wildcard on a free org silently yields just
+> those (that's discovery working correctly, not a bug), and `interval: Hourly` needs the add-on's
+> hourly opt-in. The full ~70-type catalogue and RTEM streaming channels require the add-on.
+
 ### 5. Point the service at your org
 
 Set `salesforce.environment` to `production` or `sandbox` (this derives the login URL), or set
 `salesforce.login_url` explicitly to a custom My Domain URL (it takes precedence over `environment`).
 Then set `salesforce.client_id` to the Consumer Key, `salesforce.username` to the integration user
 (jwt_bearer only), and the private key via `salesforce.private_key_file`.
+
+> **Prefer your My Domain URL over the generic hosts.** For `client_credentials` it's mandatory
+> (see below). For `jwt_bearer` the generic `login.salesforce.com` still works as the JWT `aud`,
+> but Salesforce is tightening this: Spring '26 removed legacy hostname redirects, and External
+> Client Apps reject `test.salesforce.com` as an `aud` — so setting `salesforce.login_url` to
+> `https://yourorg.my.salesforce.com` (or `...sandbox.my.salesforce.com`) is the future-proof
+> choice for both flows.
 
 > Topic availability depends on your Shield/Threat-Detection entitlements. Topic inclusion/exclusion
 > is operator config (`sources.pubsub.topics` + `include`/`exclude` globs); defaults stay
@@ -164,11 +178,26 @@ Simpler than JWT bearer — no keypair, certificate, or user pre-authorisation. 
 4. **Config** — `salesforce.auth_mode: client_credentials`, `salesforce.client_id` = Consumer Key, and
    the Consumer Secret via `salesforce.client_secret_file` (or `client_secret`). `username` and the
    private key are unused in this mode.
+5. **`salesforce.login_url` MUST be your My Domain URL** (e.g.
+   `https://yourorg.my.salesforce.com`) — Salesforce rejects the client_credentials grant at the
+   generic `login.salesforce.com` / `test.salesforce.com` endpoints, so the `environment`-derived
+   default cannot work for this flow. sf2loki fails fast at config load if you leave it generic.
 
 > Trade-off: client credentials transmits a shared secret (symmetric); JWT bearer never sends a secret
 > over the wire (asymmetric key). Both yield an access token that works identically for the Pub/Sub,
 > REST/SOQL, and EventLogFile paths. See [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials)
 > for the protocol-level detail.
+
+### Token lifetime and reconnect churn (ops note)
+
+Neither flow returns `expires_in` or a refresh token — the access token's real lifetime is your
+org's **session timeout** (Setup → Session Settings), which can be as short as 15 minutes. sf2loki
+handles expiry reactively (re-mints on 401/UNAUTHENTICATED and resubscribes from the stored
+replay_id — no data loss), so a short timeout shows up as periodic reconnect churn, not an outage:
+a sawtooth on `sf2loki_pubsub_reconnects` and `sf2loki_auth_refreshes` roughly every
+session-timeout interval is your org's timeout at work, not a fault. To reduce the churn, raise the
+integration user's session timeout (a profile-level Session Settings override works) and set
+`salesforce.token_ttl` to match so proactive re-mints land before Salesforce kills the session.
 
 ## Configuration
 
@@ -191,6 +220,31 @@ uv run python -m sf2loki --config config.example.yaml
 # any network calls — exits 0 (ok) or 1 (invalid)
 uv run python -m sf2loki --config config.example.yaml --check
 ```
+
+> Note: `config.example.yaml` is a **template** — it references `${ENV}` placeholders (e.g.
+> `${SF_CLIENT_ID}`, `${GC_LOKI}`) and `*_file` secret paths that must exist before even `--check`
+> passes. Export the referenced env vars and put real files at the secret paths (or point the
+> `*_file` keys at your own), then run `--check`.
+
+### Grafana Cloud credentials
+
+What sf2loki needs from your Grafana Cloud stack, and where to find it:
+
+- **Token** — create an **Access Policy** token (Cloud Portal → Access Policies) with the
+  `logs:write` scope (add `metrics:write` if you enable OTLP telemetry). One token can serve both
+  Loki push and OTLP push. This goes in `sink.loki.auth_token_file` (and is reused for telemetry by
+  default).
+- **Loki push URL + tenant id** — Cloud Portal → your stack → Loki → **Details**: the push URL is
+  `https://logs-prod-<zone>.grafana.net/loki/api/v1/push` (→ `sink.loki.url`) and the numeric
+  **User / tenant id** shown there (→ `sink.loki.tenant_id`).
+- **OTLP endpoint + instance id** — Cloud Portal → your stack → OpenTelemetry → **Details**: the
+  gateway is `https://otlp-gateway-<zone>.grafana.net/otlp` (sf2loki needs the full signal path,
+  `.../otlp/v1/metrics` → `service.telemetry.endpoint`) with its own numeric **instance id** (→
+  `service.telemetry.basic_auth_user`).
+- **Trap:** the OTLP **instance id is NOT the Loki tenant id** — they are different numbers on the
+  same stack. `service.telemetry.basic_auth_user` defaults to the Loki `tenant_id` when unset,
+  which 401s on Grafana Cloud; set it explicitly (see
+  [`config.docker.yaml`](config.docker.yaml)'s `GC_OTLP_USER` vs `GC_LOKI_USER`).
 
 ### Source recipes
 
@@ -241,11 +295,22 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 
 [`docker-compose.yml`](docker-compose.yml) mounts [`config.docker.yaml`](config.docker.yaml) (no
 secrets — env-driven via `${VAR}` + `*_file`) at `/etc/sf2loki/config.yaml` and `./secrets` (the
-private key + Loki token) read-only at `/etc/sf2loki/secrets`. Create `.env.dev` from the values in
-the config (Salesforce login URL / consumer key / username, Loki URL + tenant); `.env*`, `*.key`,
-`*.crt`, and `secrets/` are gitignored. Checkpoint state persists to `./state` (bind-mounted at
-`/var/lib/sf2loki`) so resume survives container recreation — the container runs as uid 10001, so
-make it writable first: `mkdir -p state && chmod 777 state`.
+private key + Loki token) read-only at `/etc/sf2loki/secrets`. The env file is named **`.env.dev`**
+(that exact filename is what the documented `--env-file .env.dev` commands expect) — create it from
+the values the config interpolates (Salesforce login URL / consumer key / username, Loki URL +
+tenant); `.env*`, `*.key`, `*.crt`, and `secrets/` are gitignored **and** `.dockerignore`d so they
+can never be baked into a locally built image. Checkpoint state persists to `./state` (bind-mounted
+at `/var/lib/sf2loki`) so resume survives container recreation — the container runs as uid 10001,
+so make it writable first: `mkdir -p state && chmod 777 state`.
+
+**Secret file permissions — same uid-10001 rule.** The files in `./secrets` must be *readable* by
+uid 10001 or the service crash-loops at startup with an actionable "permission denied" error. A
+root-owned `chmod 0600` key file (the natural way to store one) is exactly the trap: use
+`chmod 640` plus a group the container user can read, e.g.
+
+```bash
+chmod 640 secrets/*        # or chown the files to uid 10001
+```
 
 **Health check target — use `/readyz`, not `/healthz`.** `/healthz` is *liveness* (200 whenever the
 process is up, even mid-startup before Salesforce auth); `/readyz` is *readiness* (200 only once auth
@@ -274,3 +339,11 @@ just image         # build the container image
 
 Python 3.14, `uv`-managed. Generated proto stubs are committed; CI fails on drift. Tooling: `uv`,
 `ruff`, `mypy --strict`, `pytest` + `pytest-asyncio`, `just`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
+[SECURITY.md](SECURITY.md) for reporting vulnerabilities (privately, please).
+
+## License
+
+[AGPL-3.0-or-later](LICENSE) — free to use, modify, and self-host; if you run a modified version
+as a network service, the AGPL requires you to offer its source to those users.

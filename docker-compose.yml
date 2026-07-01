@@ -20,6 +20,9 @@ services:
       - .env.dev
     volumes:
       - ./config.docker.yaml:/etc/sf2loki/config.yaml:ro
+      # The container runs as uid 10001: secret files must be readable by it
+      # (e.g. `chmod 640` + group-readable). Root-owned chmod 0600 files make
+      # the service crash-loop at startup with "permission denied".
       - ./secrets:/etc/sf2loki/secrets:ro
       # Durable checkpoint state (replay_id / watermark per source) survives
       # container recreation. The container runs as uid 10001, so ./state must
@@ -27,5 +30,11 @@ services:
       - ./state:/var/lib/sf2loki
     command: ["--config", "/etc/sf2loki/config.yaml"]
     ports:
-      - "8080:8080"   # /healthz, /readyz (metrics are OTLP-push, no scrape port)
+      # Loopback-only by default: the health endpoints are unauthenticated, so
+      # don't expose them to the network. Change to "8080:8080" if an external
+      # probe (load balancer, monitoring host) needs to reach them.
+      - "127.0.0.1:8080:8080"   # /healthz, /readyz (metrics are OTLP-push, no scrape port)
+    # Note: Docker does NOT restart a container because its HEALTHCHECK fails —
+    # "unless-stopped" only covers process exit. Pair an unhealthy-state restart
+    # with an orchestrator (ECS/K8s) or something like willfarrell/autoheal.
     restart: unless-stopped
