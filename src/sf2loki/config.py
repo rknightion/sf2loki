@@ -630,6 +630,15 @@ class EventLogFileConfig(StrictModel):
             "Redaction/filter rules applied to each CSV row before shaping (see TransformRule)."
         ),
     )
+    concurrency: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Event types processed concurrently per poll cycle (per-type ordering "
+            "and checkpoints are unaffected — types are independent). Peak memory "
+            "is roughly concurrency x 8 MiB of download spool."
+        ),
+    )
 
     @property
     def discover(self) -> bool:
@@ -866,12 +875,119 @@ class FileStateConfig(StrictModel):
     )
 
 
+class S3StateConfig(StrictModel):
+    """S3-compatible object-storage checkpoint store (stateless deployments).
+
+    The whole checkpoint document lives at one key; commits use conditional
+    writes (ETag If-Match) so two instances against the same key fail fast
+    instead of clobbering each other. Requires the ``s3`` extra
+    (``pip install sf2loki[s3]``). Credentials come from the standard AWS
+    default chain (env vars, instance/task role, shared config).
+    """
+
+    bucket: str = Field(
+        default="",
+        description="Bucket name (required when state.store is s3).",
+    )
+    key: str = Field(
+        default="sf2loki/state.json",
+        description="Object key holding the checkpoint document.",
+    )
+    region: str | None = Field(
+        default=None,
+        description="AWS region; omit to use the default-chain region.",
+    )
+    endpoint_url: str | None = Field(
+        default=None,
+        description="Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3.",
+        examples=["http://minio:9000"],
+    )
+
+
 class StateConfig(StrictModel):
-    store: Literal["file"] = Field(
-        default="file", description="State backend (local JSON file is the only backend)."
+    store: Literal["file", "s3"] = Field(
+        default="file",
+        description=(
+            "State backend: file (local JSON, needs a persistent volume) | s3 "
+            "(S3-compatible object storage, for stateless deployments; needs the "
+            "sf2loki[s3] extra)."
+        ),
     )
     file: FileStateConfig = Field(
         default_factory=FileStateConfig, description="File-backed state store settings."
+    )
+    s3: S3StateConfig = Field(
+        default_factory=S3StateConfig, description="S3-backed state store settings."
+    )
+
+    @model_validator(mode="after")
+    def _require_bucket_for_s3(self) -> StateConfig:
+        if self.store == "s3" and not self.s3.bucket:
+            raise ValueError("state.store is 's3' but state.s3.bucket is empty")
+        return self
+
+
+class FileLeaseConfig(StrictModel):
+    """File lease on shared storage (NFS/EFS) for active-passive failover.
+
+    Lease-expiry semantics rather than flock (advisory locks are unreliable
+    over NFS): the leader renews a holder+expiry document via atomic
+    tmp+rename; a standby takes over once the lease has expired. Expiry uses
+    wall-clock time, so keep the hosts NTP-synced — the ttl must comfortably
+    exceed worst-case clock skew between replicas.
+    """
+
+    path: Path = Field(
+        default=Path("/var/lib/sf2loki/leader.lease"),
+        description="Lease file path on storage shared by all replicas.",
+    )
+    ttl: Duration = Field(
+        default=timedelta(seconds=30),
+        description=(
+            "Lease lifetime: a standby takes over once the lease is this stale. "
+            "Failover time is bounded by ttl; must exceed inter-host clock skew."
+        ),
+    )
+    renew_interval: Duration = Field(
+        default=timedelta(seconds=10),
+        description="How often the leader re-writes the lease (must be < ttl/2).",
+    )
+    holder_id: str = Field(
+        default="",
+        description=(
+            "Stable identity written into the lease; defaults to hostname-pid at "
+            "startup. Set explicitly when hostnames aren't unique."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _renew_must_beat_ttl(self) -> FileLeaseConfig:
+        if self.renew_interval.total_seconds() * 2 >= self.ttl.total_seconds():
+            raise ValueError(
+                "coordinate.file_lease.renew_interval must be less than half the ttl "
+                f"(renew {self.renew_interval.total_seconds():g}s vs "
+                f"ttl {self.ttl.total_seconds():g}s) so a single missed renewal "
+                "cannot cost leadership"
+            )
+        return self
+
+
+class CoordinateConfig(StrictModel):
+    """Leadership coordination for active-passive HA.
+
+    ``noop`` (default) = single instance, always leader. ``file_lease`` lets
+    two replicas share a lease file on common storage: the standby takes over
+    within one ttl when the leader dies, resuming from committed checkpoints
+    (at-least-once — brief double-ingest during a takeover window is possible,
+    loss is not).
+    """
+
+    type: Literal["noop", "file_lease"] = Field(
+        default="noop",
+        description="noop (single instance) | file_lease (active-passive via a shared lease file).",
+    )
+    file_lease: FileLeaseConfig = Field(
+        default_factory=FileLeaseConfig, description="File-lease coordinator settings."
     )
 
 
@@ -986,6 +1102,10 @@ class Config(BaseSettings):
     sink: SinkConfig = Field(description="Log sink settings.")
     state: StateConfig = Field(
         default_factory=StateConfig, description="Checkpoint/state store settings."
+    )
+    coordinate: CoordinateConfig = Field(
+        default_factory=CoordinateConfig,
+        description="Leadership coordination for active-passive HA.",
     )
     service: ServiceConfig = Field(
         default_factory=ServiceConfig, description="Application-level service settings."

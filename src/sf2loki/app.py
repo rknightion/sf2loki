@@ -45,7 +45,7 @@ from sf2loki.sources.overlap import (
     check_overlap,
 )
 from sf2loki.sources.pubsub_source import PubSubSource
-from sf2loki.state.file_store import FileCheckpointStore
+from sf2loki.state import build_store
 
 if TYPE_CHECKING:
     from sf2loki.obs.limits_poller import LimitsPoller
@@ -469,7 +469,7 @@ async def _drain_with_grace(awaitable: Awaitable[None], stop: asyncio.Event, gra
 
 
 def _build_state(cfg: Config) -> CheckpointStore:
-    return FileCheckpointStore(cfg.state.file.path)
+    return build_store(cfg.state)
 
 
 def _format_failing_duration(seconds: float) -> str:

@@ -8,6 +8,7 @@
 | `sources` | `SourcesConfig` |  | no | Event source selection and settings. |
 | `sink` | `SinkConfig` |  | yes | Log sink settings. |
 | `state` | `StateConfig` |  | no | Checkpoint/state store settings. |
+| `coordinate` | `CoordinateConfig` |  | no | Leadership coordination for active-passive HA. |
 | `service` | `ServiceConfig` |  | no | Application-level service settings. |
 
 ## SalesforceConfig
@@ -105,6 +106,7 @@
 | `settle_window` | `Duration` | 0s | no | Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly. |
 | `download_max_age` | `Duration` | 1d | no | A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried. |
 | `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each CSV row before shaping (see TransformRule). |
+| `concurrency` | `int` | 4 | no | Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool. |
 
 ## EventLogFileTypeConfig
 
@@ -161,14 +163,40 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `store` | `Literal['file']` | file | no | State backend (local JSON file is the only backend). |
+| `store` | `Literal['file', 's3']` | file | no | State backend: file (local JSON, needs a persistent volume) \| s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra). |
 | `file` | `FileStateConfig` |  | no | File-backed state store settings. |
+| `s3` | `S3StateConfig` |  | no | S3-backed state store settings. |
 
 ## FileStateConfig
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `path` | `Path` | /var/lib/sf2loki/state.json | no | Checkpoint file path; persist on a mounted volume for durable resume. |
+
+## S3StateConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `bucket` | `str` | "" | no | Bucket name (required when state.store is s3). |
+| `key` | `str` | sf2loki/state.json | no | Object key holding the checkpoint document. |
+| `region` | `str` | null | no | AWS region; omit to use the default-chain region. |
+| `endpoint_url` | `str` | http://minio:9000 | no | Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3. |
+
+## CoordinateConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `type` | `Literal['noop', 'file_lease']` | noop | no | noop (single instance) \| file_lease (active-passive via a shared lease file). |
+| `file_lease` | `FileLeaseConfig` |  | no | File-lease coordinator settings. |
+
+## FileLeaseConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `path` | `Path` | /var/lib/sf2loki/leader.lease | no | Lease file path on storage shared by all replicas. |
+| `ttl` | `Duration` | 30s | no | Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by ttl; must exceed inter-host clock skew. |
+| `renew_interval` | `Duration` | 10s | no | How often the leader re-writes the lease (must be < ttl/2). |
+| `holder_id` | `str` | "" | no | Stable identity written into the lease; defaults to hostname-pid at startup. Set explicitly when hostnames aren't unique. |
 
 ## ServiceConfig
 
