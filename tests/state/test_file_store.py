@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from sf2loki.state.file_store import FileCheckpointStore
+from sf2loki.state.file_store import (
+    FileCheckpointStore,
+    StateFileCorruptError,
+    StateFileLockError,
+)
 
 
 @pytest.mark.asyncio
@@ -31,6 +35,7 @@ async def test_persistence_across_instances(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     store1 = FileCheckpointStore(path)
     await store1.commit("stream-a", "offset-42")
+    store1.close()  # release the exclusive lock so a successor instance can start
 
     store2 = FileCheckpointStore(path)
     result = await store2.load("stream-a")
@@ -74,6 +79,66 @@ async def test_atomic_write_produces_valid_json(tmp_path: Path) -> None:
     # File on disk should be valid JSON with the expected content
     data = json.loads(path.read_text())
     assert data == {"k1": "v1"}
+
+
+@pytest.mark.asyncio
+async def test_second_instance_on_same_state_file_fails_fast(tmp_path: Path) -> None:
+    """Two instances sharing a state file would double-ingest and clobber each
+    other's checkpoints — the second must fail fast with a clear error."""
+    path = tmp_path / "state.json"
+    store1 = FileCheckpointStore(path)
+    await store1.commit("k", "v")  # first use acquires the exclusive lock
+
+    store2 = FileCheckpointStore(path)
+    with pytest.raises(StateFileLockError) as exc_info:
+        await store2.load("k")
+
+    msg = str(exc_info.value)
+    assert str(path) in msg
+    assert "another" in msg.lower()  # points at the concurrent-instance cause
+
+    # Releasing the first instance's lock lets a successor start.
+    store1.close()
+    store3 = FileCheckpointStore(path)
+    assert await store3.load("k") == "v"
+
+
+@pytest.mark.asyncio
+async def test_corrupt_state_file_raises_actionable_error(tmp_path: Path) -> None:
+    """Corrupt/truncated JSON must raise a clear, actionable error — not a raw
+    traceback crash-loop, and never a silent state discard."""
+    path = tmp_path / "state.json"
+    path.write_text('{"k1": "v1"')  # truncated
+
+    store = FileCheckpointStore(path)
+    with pytest.raises(StateFileCorruptError) as exc_info:
+        await store.load("k1")
+
+    msg = str(exc_info.value)
+    assert str(path) in msg
+    assert "aside" in msg  # tells the operator moving the file aside resets state
+    # The corrupt file is preserved, not discarded.
+    assert path.read_text() == '{"k1": "v1"'
+
+
+@pytest.mark.asyncio
+async def test_non_object_state_file_raises_actionable_error(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text('["not", "a", "dict"]')
+
+    store = FileCheckpointStore(path)
+    with pytest.raises(StateFileCorruptError) as exc_info:
+        await store.load("k1")
+
+    assert str(path) in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent(tmp_path: Path) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")
+    await store.commit("k", "v")
+    store.close()
+    store.close()  # second close must not raise
 
 
 @pytest.mark.asyncio

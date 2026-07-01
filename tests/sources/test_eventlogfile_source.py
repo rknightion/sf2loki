@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -16,7 +17,12 @@ from typing import Literal
 import pytest
 
 from sf2loki.config import EventLogFileConfig, EventLogFileTypeConfig
-from sf2loki.salesforce.eventlogfile_client import EventLogFileError, EventLogFileMeta
+from sf2loki.model import LogEntry
+from sf2loki.salesforce.eventlogfile_client import (
+    EventLogFileError,
+    EventLogFileMeta,
+    EventLogFileThrottledError,
+)
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.state.file_store import FileCheckpointStore
 
@@ -28,13 +34,23 @@ from sf2loki.state.file_store import FileCheckpointStore
 class FakeEventLogFileClient:
     """Duck-typed stand-in for EventLogFileClient with deterministic responses.
 
-    Ids listed in ``errors`` raise :class:`EventLogFileError` on ``download`` (as
-    the real client does on a non-2xx LogFile response, e.g. a body-not-ready 404).
+    ``download`` is an async generator, matching the real streaming client: the
+    fetch happens before the first row is yielded, so failures surface at the
+    first ``anext()``. Ids listed in ``errors`` raise :class:`EventLogFileError`
+    (as the real client does on a non-2xx LogFile response, e.g. a body-not-ready
+    404); ids in ``throttled`` raise :class:`EventLogFileThrottledError`; ids in
+    ``mid_stream_errors`` yield their first row then fail (CSV parse error
+    mid-file). ``list_error`` / ``discover_error`` raise on listing/discovery —
+    the real client wraps everything (incl. inner SOQL failures) into the
+    EventLogFileError family, so that is what the fake raises too.
     """
 
     files: list[EventLogFileMeta]
     rows_by_id: dict[str, list[dict[str, str]]]
     errors: set[str] = field(default_factory=set)
+    throttled: set[str] = field(default_factory=set)
+    mid_stream_errors: set[str] = field(default_factory=set)
+    list_error: Exception | None = None
     discovered_types: list[str] = field(default_factory=list)
     discover_error: bool = False
     list_calls: list[tuple[str, str, str, int]] = field(default_factory=list)
@@ -45,6 +61,8 @@ class FakeEventLogFileClient:
         self, event_type: str, interval: str, since: str, page_size: int
     ) -> list[EventLogFileMeta]:
         self.list_calls.append((event_type, interval, since, page_size))
+        if self.list_error is not None:
+            raise self.list_error
         return list(self.files)
 
     async def list_event_types(self, interval: str) -> list[str]:
@@ -53,11 +71,27 @@ class FakeEventLogFileClient:
             raise EventLogFileError("discovery failed")
         return list(self.discovered_types)
 
-    async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]:
+    async def download(self, file_meta: EventLogFileMeta) -> AsyncIterator[dict[str, str]]:
         self.download_calls.append(file_meta.id)
+        if file_meta.id in self.throttled:
+            raise EventLogFileThrottledError(
+                f"download throttled for {file_meta.id}: HTTP 403 REQUEST_LIMIT_EXCEEDED"
+            )
         if file_meta.id in self.errors:
             raise EventLogFileError(f"download failed for {file_meta.id}: HTTP 404")
-        return self.rows_by_id.get(file_meta.id, [])
+        rows = self.rows_by_id.get(file_meta.id, [])
+        for i, row in enumerate(rows):
+            yield row
+            if i == 1 and file_meta.id in self.mid_stream_errors:
+                raise EventLogFileError(f"CSV parse failed mid-file for {file_meta.id}")
+
+
+async def _run_cycle(source: EventLogFileSource, store: FileCheckpointStore) -> list[LogEntry]:
+    """One poll cycle + a pipeline-style commit of the final entry's checkpoint."""
+    entries = [e async for e in source.events(store, asyncio.Event())]
+    if entries:
+        await store.commit(entries[-1].checkpoint.key, entries[-1].checkpoint.value)
+    return entries
 
 
 def _created_ago(delta: timedelta) -> str:
@@ -392,7 +426,7 @@ async def test_checkpoint_carrying_invariant_across_files(
     assert pre_f1["ids"] == []
 
     post_f1 = json.loads(row_b.checkpoint.value)
-    assert post_f1["ids"] == ["f1"]
+    assert post_f1["ids"] == [["f1", f1.created_date]]
     assert post_f1["last_created"] == f1.created_date
 
     # c is the first (non-last) row of f2: it carries the pre-f2 checkpoint,
@@ -400,7 +434,7 @@ async def test_checkpoint_carrying_invariant_across_files(
     assert json.loads(row_c.checkpoint.value) == post_f1
 
     post_f2 = json.loads(row_d.checkpoint.value)
-    assert post_f2["ids"] == ["f1", "f2"]
+    assert post_f2["ids"] == [["f1", f1.created_date], ["f2", f2.created_date]]
     assert post_f2["last_created"] == f2.created_date
 
 
@@ -428,7 +462,7 @@ async def test_zero_row_file_contributes_nothing_to_checkpoint(
     assert "f_empty" in client.download_calls
 
     last_checkpoint = json.loads(entries[-1].checkpoint.value)
-    assert last_checkpoint["ids"] == ["f1", "f2"]
+    assert [i for i, _ in last_checkpoint["ids"]] == ["f1", "f2"]
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +471,14 @@ async def test_zero_row_file_contributes_nothing_to_checkpoint(
 
 
 @pytest.mark.asyncio
-async def test_download_failure_does_not_crash_and_skips_file(
+async def test_download_failure_does_not_crash_and_stops_cycle_at_failed_file(
     tmp_path: pytest.TempPathFactory,
 ) -> None:
-    """A transient download error (e.g. body-not-ready 404) is caught: the file is
-    skipped, later files still process, and the connector does not crash."""
+    """A transient download error (e.g. body-not-ready 404) is caught — the
+    connector does not crash — and the per-type file loop STOPS at the failed
+    file for this cycle: processing a later file would advance the watermark
+    past the failed one, silently losing it forever (listing is
+    CreatedDate >= watermark)."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
     f_bad = make_file_meta(id="f_bad", created_date=_created_ago(timedelta(hours=2)))
@@ -450,26 +487,37 @@ async def test_download_failure_does_not_crash_and_skips_file(
         files=[f1, f_bad, f3],
         rows_by_id={
             "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"}],
+            "f_bad": [{"TIMESTAMP_DERIVED": "20260630020000.000", "ROW": "b"}],
             "f3": [{"TIMESTAMP_DERIVED": "20260630030000.000", "ROW": "c"}],
         },
         errors={"f_bad"},
     )
     cfg = make_elf_cfg()
     source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
-    stop = asyncio.Event()
-    entries = [e async for e in source.events(store, stop)]
 
-    # f1 and f3 emitted; f_bad produced nothing and did not raise.
-    assert len(entries) == 2
-    assert client.download_calls == ["f1", "f_bad", "f3"]
+    entries = await _run_cycle(source, store)
+
+    # Only f1 emitted this cycle; f_bad failed and f3 was NOT attempted.
+    assert len(entries) == 1
+    assert client.download_calls == ["f1", "f_bad"]
+
+    # Next cycle (error resolved): f_bad and f3 are ingested, in order — nothing lost.
+    client.errors.clear()
+    entries2 = await _run_cycle(source, store)
+    assert len(entries2) == 2
+    assert '"ROW": "b"' in entries2[0].line
+    assert '"ROW": "c"' in entries2[1].line
+    assert client.download_calls == ["f1", "f_bad", "f_bad", "f3"]
 
 
 @pytest.mark.asyncio
 async def test_transient_download_failure_does_not_advance_checkpoint_past_file(
     tmp_path: pytest.TempPathFactory,
 ) -> None:
-    """A recent (within download_max_age) failing file is skipped WITHOUT folding its
-    id into the carried checkpoint, so it is retried on the next cycle."""
+    """After a cycle where f_bad fails transiently, the committed watermark must
+    still allow f_bad to be re-listed next cycle (last_created stays at the last
+    successful file BEFORE it), and the files after it are ingested on a later
+    cycle — order preserved, nothing lost."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
     f_bad = make_file_meta(id="f_bad", created_date=_created_ago(timedelta(hours=2)))
@@ -478,19 +526,76 @@ async def test_transient_download_failure_does_not_advance_checkpoint_past_file(
         files=[f1, f_bad, f3],
         rows_by_id={
             "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "f_bad": [{"TIMESTAMP_DERIVED": "20260630020000.000"}],
             "f3": [{"TIMESTAMP_DERIVED": "20260630030000.000"}],
         },
         errors={"f_bad"},
     )
     cfg = make_elf_cfg()
     source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
-    stop = asyncio.Event()
-    entries = [e async for e in source.events(store, stop)]
 
-    # The failed (recent) file's id must NOT be recorded, so it will be retried.
+    entries = await _run_cycle(source, store)
+
+    # The committed checkpoint must not have advanced past f_bad: its watermark
+    # is f1's CreatedDate (< f_bad's), and neither f_bad nor f3 is recorded.
     final = json.loads(entries[-1].checkpoint.value)
-    assert final["ids"] == ["f1", "f3"]
-    assert "f_bad" not in final["ids"]
+    recorded_ids = [i for i, _ in final["ids"]]
+    assert recorded_ids == ["f1"]
+    assert final["last_created"] == f1.created_date
+
+    # Cycle 2 (still failing): f_bad is re-listed and re-attempted, f3 still deferred.
+    entries2 = await _run_cycle(source, store)
+    assert entries2 == []
+    assert client.download_calls == ["f1", "f_bad", "f_bad"]
+
+    # Cycle 3 (recovered): f_bad then f3 ingested; watermark advances to f3.
+    client.errors.clear()
+    entries3 = await _run_cycle(source, store)
+    assert len(entries3) == 2
+    final3 = json.loads(entries3[-1].checkpoint.value)
+    assert [i for i, _ in final3["ids"]] == ["f1", "f_bad", "f3"]
+    assert final3["last_created"] == f3.created_date
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_download_failure_stops_cycle_without_advancing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A failure AFTER some rows were yielded (e.g. CSV parse error mid-file) is
+    treated like a transient failure: rows already emitted carried the PRE-file
+    checkpoint, the cycle stops, and the whole file is retried next cycle."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
+    f2 = make_file_meta(id="f2", created_date=_created_ago(timedelta(hours=2)))
+    client = FakeEventLogFileClient(
+        files=[f1, f2],
+        rows_by_id={
+            "f1": [
+                {"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"},
+                {"TIMESTAMP_DERIVED": "20260630010001.000", "ROW": "b"},
+                {"TIMESTAMP_DERIVED": "20260630010002.000", "ROW": "c"},
+            ],
+            "f2": [{"TIMESTAMP_DERIVED": "20260630020000.000", "ROW": "d"}],
+        },
+        mid_stream_errors={"f1"},
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+
+    # Only the row(s) before the failure emitted, all carrying the PRE-file
+    # checkpoint (empty), and f2 was not attempted.
+    assert len(entries) == 1
+    assert json.loads(entries[-1].checkpoint.value)["ids"] == []
+    assert client.download_calls == ["f1"]
+
+    # Recovery: the whole file is re-processed from the start next cycle.
+    client.mid_stream_errors.clear()
+    entries2 = await _run_cycle(source, store)
+    assert len(entries2) == 4  # a, b, c (f1 re-read in full) + d (f2)
+    final = json.loads(entries2[-1].checkpoint.value)
+    assert [i for i, _ in final["ids"]] == ["f1", "f2"]
 
 
 @pytest.mark.asyncio
@@ -515,7 +620,7 @@ async def test_persistently_failing_old_file_is_abandoned_past_max_age(
     assert len(entries) == 1  # only f_recent has rows
     final = json.loads(entries[-1].checkpoint.value)
     # The abandoned ancient file is recorded so it won't be retried indefinitely.
-    assert final["ids"] == ["f_ancient", "f_recent"]
+    assert [i for i, _ in final["ids"]] == ["f_ancient", "f_recent"]
     assert final["last_created"] == f_recent.created_date
 
 
@@ -544,8 +649,189 @@ async def test_settle_window_skips_too_fresh_files(
     assert client.download_calls == ["f_old"]
     assert len(entries) == 1
     final = json.loads(entries[-1].checkpoint.value)
-    assert final["ids"] == ["f_old"]
-    assert "f_fresh" not in final["ids"]
+    assert [i for i, _ in final["ids"]] == ["f_old"]
+
+
+# ---------------------------------------------------------------------------
+# Re-issued daily files (C4): Salesforce regenerates DAILY EventLogFile records
+# in place — SAME Id, CreatedDate bumped, blob replaced with the full superset.
+# Hourly late events instead create NEW sibling records (new Id, Sequence++).
+
+
+@pytest.mark.asyncio
+async def test_daily_reissued_file_same_id_newer_created_is_reprocessed(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A daily file re-listed with the SAME Id but a NEWER CreatedDate carries
+    late rows (full superset) — it must be re-downloaded, not skipped."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    created_v1 = _created_ago(timedelta(hours=6))
+    created_v2 = _created_ago(timedelta(hours=1))
+    f_v1 = make_file_meta(id="fd", interval="Daily", created_date=created_v1)
+    client = FakeEventLogFileClient(
+        files=[f_v1],
+        rows_by_id={"fd": [{"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"}]},
+    )
+    cfg = make_elf_cfg(interval="Daily")
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+    assert len(entries) == 1
+
+    # Salesforce regenerates the record in place: same Id, bumped CreatedDate,
+    # superset content.
+    client.files = [make_file_meta(id="fd", interval="Daily", created_date=created_v2)]
+    client.rows_by_id["fd"] = [
+        {"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"},
+        {"TIMESTAMP_DERIVED": "20260630013000.000", "ROW": "late"},
+    ]
+    entries2 = await _run_cycle(source, store)
+
+    # Re-processed in full (duplicate row "a" is the accepted at-least-once cost).
+    assert len(entries2) == 2
+    assert '"ROW": "late"' in entries2[1].line
+    final = json.loads(entries2[-1].checkpoint.value)
+    assert final["ids"] == [["fd", created_v2]]
+    assert final["last_created"] == created_v2
+
+
+@pytest.mark.asyncio
+async def test_same_id_same_created_not_reprocessed(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """An unchanged file (same Id, same CreatedDate) re-listed on the next cycle
+    is skipped — hourly sibling records (NEW ids) are still ingested exactly once."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=3)))
+    client = FakeEventLogFileClient(
+        files=[f1],
+        rows_by_id={"f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+    assert len(entries) == 1
+
+    # Cycle 2: f1 unchanged, plus a NEW hourly sibling record (new Id, Sequence++).
+    f2 = make_file_meta(id="f2", created_date=_created_ago(timedelta(hours=1)))
+    client.files = [f1, f2]
+    client.rows_by_id["f2"] = [{"TIMESTAMP_DERIVED": "20260630030000.000", "ROW": "s2"}]
+    entries2 = await _run_cycle(source, store)
+
+    assert len(entries2) == 1  # only the sibling; f1 not re-ingested
+    assert '"ROW": "s2"' in entries2[0].line
+    assert client.download_calls == ["f1", "f2"]
+
+    # Cycle 3: nothing new -> nothing ingested.
+    entries3 = await _run_cycle(source, store)
+    assert entries3 == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_checkpoint_plain_id_list_loads_and_matches_any_created(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A pre-upgrade checkpoint carries bare id strings; they must load without
+    crashing and match ANY CreatedDate (legacy semantics: skip)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    key = "eventlogfile:Login"
+    await store.commit(key, json.dumps({"last_created": "2026-06-30T00:00:00Z", "ids": ["f1"]}))
+
+    # f1 re-listed with a (different) CreatedDate: legacy id matches any -> skipped.
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=2)))
+    f2 = make_file_meta(id="f2", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f1, f2],
+        rows_by_id={
+            "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "f2": [{"TIMESTAMP_DERIVED": "20260630020000.000"}],
+        },
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+
+    assert client.download_calls == ["f2"]
+    assert len(entries) == 1
+    final = json.loads(entries[-1].checkpoint.value)
+    # The legacy bare id is carried through unchanged; the new file is a pair.
+    assert final["ids"] == ["f1", ["f2", f2.created_date]]
+
+
+# ---------------------------------------------------------------------------
+# Cycle-level resiliency (C2/C5): listing failures and API throttling must not
+# crash the connector or hammer remaining work in the same cycle.
+
+
+@pytest.mark.asyncio
+async def test_listing_failure_skips_cycle_without_raising(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=2)))
+    client = FakeEventLogFileClient(
+        files=[f1],
+        rows_by_id={"f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+        list_error=EventLogFileError("listing failed: HTTP 503"),
+    )
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)  # must not raise
+    assert entries == []
+    assert client.download_calls == []
+
+    # Next cycle proceeds normally once the error clears.
+    client.list_error = None
+    entries2 = await _run_cycle(source, store)
+    assert len(entries2) == 1
+
+
+@pytest.mark.asyncio
+async def test_throttled_listing_aborts_rest_of_cycle(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """REQUEST_LIMIT_EXCEEDED on one type's listing must stop the remaining
+    types this cycle (backing off until the next poll) instead of burning more
+    of the exhausted API budget."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    client = FakeEventLogFileClient(
+        files=[],
+        rows_by_id={},
+        list_error=EventLogFileThrottledError("HTTP 403 REQUEST_LIMIT_EXCEEDED"),
+    )
+    cfg = make_elf_cfg(event_types=["Login", "API", "Report"])
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)  # must not raise
+    assert entries == []
+    assert len(client.list_calls) == 1  # aborted after the first throttled type
+
+
+@pytest.mark.asyncio
+async def test_throttled_download_aborts_rest_of_cycle(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=2)))
+    f2 = make_file_meta(id="f2", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f1, f2],
+        rows_by_id={
+            "f1": [{"TIMESTAMP_DERIVED": "20260630010000.000"}],
+            "f2": [{"TIMESTAMP_DERIVED": "20260630020000.000"}],
+        },
+        throttled={"f1"},
+    )
+    cfg = make_elf_cfg(event_types=["Login", "API"])
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)  # must not raise
+    assert entries == []
+    assert client.download_calls == ["f1"]  # f2 skipped
+    assert len(client.list_calls) == 1  # second type never listed this cycle
 
 
 # ---------------------------------------------------------------------------

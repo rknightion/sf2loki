@@ -6,6 +6,24 @@ Supports any sObject that Salesforce surfaces as a queryable EventLog object
 (e.g. LoginEvent, ApiEvent). Uses FIELDS(ALL) which requires LIMIT <=200
 (Salesforce documented constraint).
 
+Checkpoint format (JSON string, per ``eventlog_objects:<name>`` key):
+``{"last_ts": "<timestamp_field value>", "ids": ["<record Id>", ...]}``.
+The query cursor is ``timestamp_field >= last_ts`` (not ``>``): with a strict
+``>`` a timestamp tie at the page boundary (the 201st record sharing the
+200th's timestamp) would be skipped forever. The re-fetched boundary records
+are deduped via the rolling ``ids`` window (mirroring the ELF source's
+carried-ids design). Within a cycle, full pages trigger follow-up queries
+(drain-until-short-page) so throughput is not capped at 200 per poll interval.
+Backward compatibility: a pre-upgrade checkpoint is the bare timestamp string;
+it loads as ``last_ts`` with an empty id window (the single boundary record is
+re-emitted once — an accepted at-least-once duplicate).
+
+Checkpoint poisoning guards: a record with a null/unparseable timestamp is
+still shipped but carries the previous good watermark (never ``""``/``"None"``,
+which would render ``WHERE EventDate > `` -> MALFORMED_QUERY -> crash-loop),
+and a loaded watermark is validated before being interpolated into SOQL —
+garbage falls back to the lookback default with a WARNING.
+
 BigObject caveat (from DESIGN §7): objects in the EventStore family (e.g.
 ApiEventStream) have restrictive SOQL support — FIELDS(ALL) and ORDER BY may
 not work. Standard EventLog objects (LoginEvent, etc.) are fine.
@@ -15,20 +33,74 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
-from sf2loki.config import EventLogObjectsConfig
+from sf2loki.config import EventLogObjectConfig, EventLogObjectsConfig
 from sf2loki.model import CheckpointToken, LogEntry
-from sf2loki.salesforce.soql_client import SoqlClient, to_soql_datetime_literal
+from sf2loki.salesforce.soql_client import (
+    SoqlClient,
+    SoqlError,
+    SoqlThrottledError,
+    to_soql_datetime_literal,
+)
 from sf2loki.shaping import extract_timestamp, route_fields
 from sf2loki.state.base import CheckpointStore
+
+# FIELDS(ALL) requires LIMIT <=200 (Salesforce documented constraint).
+_PAGE_LIMIT = 200
+
+# Rolling id-dedup window carried in the checkpoint. Must exceed _PAGE_LIMIT so
+# a full page of boundary ties can never evict its own ids mid-drain.
+_MAX_CARRIED_IDS = 500
+
+# Consecutive per-object cycle failures at which the skip log escalates to ERROR.
+_ERROR_LOG_THRESHOLD = 3
+
+_log = logging.getLogger(__name__)
+
+
+def _is_valid_watermark(value: str) -> bool:
+    """True when *value* parses as an ISO-8601-ish datetime (SF ``+0000`` included)."""
+    if not value:
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_checkpoint(raw: str) -> tuple[str, list[str]]:
+    """Decode a stored checkpoint, accepting both formats.
+
+    New format: JSON ``{"last_ts": ..., "ids": [...]}``. Legacy format: the bare
+    timestamp string (loads with an empty id window).
+    """
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw, []
+    if isinstance(parsed, dict):
+        wm = str(parsed.get("last_ts") or "")
+        raw_ids = parsed.get("ids", [])
+        ids = [str(i) for i in raw_ids] if isinstance(raw_ids, list) else []
+        return wm, ids
+    # Some other JSON scalar (a legacy value that happened to parse): treat the
+    # raw string as the timestamp.
+    return raw, []
 
 
 class EventLogObjectsSource:
     """Polls Salesforce EventLog sObjects via SOQL and yields :class:`~sf2loki.model.LogEntry`.
 
-    Satisfies the :class:`~sf2loki.sources.base.Source` protocol.
+    Satisfies the :class:`~sf2loki.sources.base.Source` protocol. SOQL failures
+    are contained per cycle (WARNING, escalating to ERROR after repeated
+    consecutive failures) — the poll loop sleeps and retries; checkpoints make
+    the retry safe. A 403 ``REQUEST_LIMIT_EXCEEDED`` aborts the rest of the
+    cycle so an exhausted API budget isn't hammered further.
     """
 
     name = "eventlog_objects"
@@ -47,6 +119,8 @@ class EventLogObjectsSource:
         # poll_once=True runs a single cycle and returns (useful in tests to avoid
         # an infinite polling loop).
         self._poll_once = poll_once
+        self._consecutive_failures: dict[str, int] = {}
+        self._cycle_throttled = False
 
     async def events(
         self,
@@ -55,12 +129,14 @@ class EventLogObjectsSource:
     ) -> AsyncIterator[LogEntry]:
         """Yield log entries for all enabled EventLog objects.
 
-        Each poll cycle:
-        1. Load the stored watermark per object (or default to now-lookback).
-        2. Issue SOQL with WHERE timestamp_field > <watermark> ORDER BY ASC LIMIT 200.
-        3. Yield a :class:`~sf2loki.model.LogEntry` per record, with a
-           :class:`~sf2loki.model.CheckpointToken` carrying the record's timestamp
-           field value as the new watermark (so the pipeline can commit it after push).
+        Each poll cycle, per object:
+        1. Load the stored watermark + id window (or default to now-lookback).
+        2. Issue SOQL ``WHERE timestamp_field >= <watermark> ORDER BY ASC LIMIT 200``,
+           repeating while full pages return (drain-until-short-page), deduping
+           already-seen record ids.
+        3. Yield a :class:`~sf2loki.model.LogEntry` per new record, with a
+           :class:`~sf2loki.model.CheckpointToken` carrying the advanced
+           watermark + id window (so the pipeline can commit it after push).
         4. Sleep for poll_interval before the next cycle.
 
         Stop semantics: checks ``stop`` before each cycle and between records;
@@ -73,70 +149,18 @@ class EventLogObjectsSource:
             if stop.is_set():
                 return
 
+            self._cycle_throttled = False
             for obj in self._cfg.objects:
                 if stop.is_set():
                     return
 
-                # --- 1. Resolve watermark ---
-                watermark = await state.load(f"eventlog_objects:{obj.name}")
-                if watermark is None:
-                    # No stored watermark: look back from now.
-                    default_wm = datetime.now(UTC) - obj.lookback
-                    # Format as SOQL datetime literal: ISO-8601 with Z suffix.
-                    watermark = default_wm.strftime("%Y-%m-%dT%H:%M:%SZ")
-                else:
-                    # A stored watermark is the raw EventDate Salesforce returned
-                    # (e.g. "…+0000"), which is NOT a legal SOQL literal — reformat
-                    # before interpolating it into the WHERE clause.
-                    watermark = to_soql_datetime_literal(watermark)
+                async for entry in self._process_object(obj, state, stop):
+                    yield entry
 
-                # --- 2. Build SOQL ---
-                # FIELDS(ALL) is a Salesforce convenience that selects every field;
-                # it requires LIMIT <=200 (platform constraint).
-                # Note: EventStore BigObjects (e.g. ApiEventStream) may not support
-                # FIELDS(ALL) or ORDER BY — use standard EventLog objects with this source.
-                soql = (
-                    f"SELECT FIELDS(ALL) FROM {obj.name} "
-                    f"WHERE {obj.timestamp_field} > {watermark} "
-                    f"ORDER BY {obj.timestamp_field} ASC "
-                    f"LIMIT 200"
-                )
-
-                # --- 3. Yield entries in ascending timestamp order ---
-                async for record in self._soql.query(soql):
-                    if stop.is_set():
-                        return
-
-                    # Prefer the configured timestamp field (e.g. LoginTime) so the
-                    # entry time is the event time, not ingest time; fall back to the
-                    # generic EventDate/CreatedDate names for objects without it.
-                    ts = extract_timestamp(
-                        record, field_names=(obj.timestamp_field, "EventDate", "CreatedDate")
-                    )
-                    line, sm = route_fields(record, self._sm_fields)
-
-                    # labels: source and event_type only — job/sf_org_id/environment
-                    # are injected downstream by the pipeline.
-                    labels: dict[str, str] = {
-                        "source": "eventlog_objects",
-                        "event_type": obj.name,
-                    }
-
-                    # Checkpoint value: the record's timestamp field as ISO-8601
-                    # string (the new watermark for the next poll cycle).
-                    ts_field_val = str(record.get(obj.timestamp_field, ""))
-                    checkpoint = CheckpointToken(
-                        key=f"eventlog_objects:{obj.name}",
-                        value=ts_field_val,
-                    )
-
-                    yield LogEntry(
-                        timestamp=ts,
-                        labels=labels,
-                        line=line,
-                        structured_metadata=sm,
-                        checkpoint=checkpoint,
-                    )
+                if self._cycle_throttled:
+                    # API budget exhausted: leave the remaining objects for the
+                    # next poll interval.
+                    break
 
             if self._poll_once:
                 return
@@ -149,3 +173,139 @@ class EventLogObjectsSource:
                         stop.wait(),
                         timeout=self._cfg.objects[0].poll_interval.total_seconds(),
                     )
+
+    async def _process_object(
+        self,
+        obj: EventLogObjectConfig,
+        state: CheckpointStore,
+        stop: asyncio.Event,
+    ) -> AsyncIterator[LogEntry]:
+        key = f"eventlog_objects:{obj.name}"
+
+        # --- 1. Resolve watermark + id window ---
+        raw = await state.load(key)
+        if raw is None:
+            watermark = ""
+            window: list[str] = []
+        else:
+            watermark, window = _parse_checkpoint(raw)
+
+        if not _is_valid_watermark(watermark):
+            if raw is not None:
+                # A stored-but-garbage watermark ("", "None", junk) would render a
+                # malformed WHERE clause and crash-loop until hand-edited.
+                _log.warning(
+                    "eventlog_objects[%s]: stored watermark %r is not a valid "
+                    "datetime; falling back to now-lookback (%s)",
+                    obj.name,
+                    watermark,
+                    obj.lookback,
+                )
+            default_wm = datetime.now(UTC) - obj.lookback
+            # Format as SOQL datetime literal: ISO-8601 with Z suffix.
+            watermark = default_wm.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # --- 2/3. Drain pages until a short page (or no progress) ---
+        while True:
+            # A stored watermark is the raw value Salesforce returned (e.g.
+            # "…+0000"), which is NOT a legal SOQL literal — reformat before
+            # interpolating it into the WHERE clause.
+            # FIELDS(ALL) is a Salesforce convenience that selects every field;
+            # it requires LIMIT <=200 (platform constraint). ``>=`` (with the id
+            # window) instead of ``>`` so a timestamp tie at the page boundary
+            # is never skipped.
+            # Note: EventStore BigObjects (e.g. ApiEventStream) may not support
+            # FIELDS(ALL) or ORDER BY — use standard EventLog objects with this source.
+            soql = (
+                f"SELECT FIELDS(ALL) FROM {obj.name} "
+                f"WHERE {obj.timestamp_field} >= {to_soql_datetime_literal(watermark)} "
+                f"ORDER BY {obj.timestamp_field} ASC "
+                f"LIMIT {_PAGE_LIMIT}"
+            )
+
+            try:
+                page = [record async for record in self._soql.query(soql)]
+            except SoqlThrottledError as exc:
+                self._cycle_throttled = True
+                _log.error(
+                    "eventlog_objects[%s]: Salesforce API request limit exceeded; "
+                    "backing off until the next poll interval: %s",
+                    obj.name,
+                    exc,
+                )
+                return
+            except SoqlError as exc:
+                count = self._consecutive_failures.get(obj.name, 0) + 1
+                self._consecutive_failures[obj.name] = count
+                level = logging.ERROR if count >= _ERROR_LOG_THRESHOLD else logging.WARNING
+                _log.log(
+                    level,
+                    "eventlog_objects[%s]: SOQL poll failed (%d consecutive "
+                    "failure(s); will retry next cycle): %s",
+                    obj.name,
+                    count,
+                    exc,
+                )
+                return
+
+            seen = set(window)
+            new_records = [r for r in page if str(r.get("Id") or "") not in seen]
+
+            if not new_records:
+                if len(page) >= _PAGE_LIMIT:
+                    _log.warning(
+                        "eventlog_objects[%s]: a full page at watermark %s contained "
+                        "only already-seen records (>%d records share one timestamp?); "
+                        "stopping this cycle to avoid a hot loop",
+                        obj.name,
+                        watermark,
+                        _PAGE_LIMIT,
+                    )
+                break
+
+            for record in new_records:
+                if stop.is_set():
+                    return
+
+                # Prefer the configured timestamp field (e.g. LoginTime) so the
+                # entry time is the event time, not ingest time; fall back to the
+                # generic EventDate/CreatedDate names for objects without it.
+                ts = extract_timestamp(
+                    record, field_names=(obj.timestamp_field, "EventDate", "CreatedDate")
+                )
+                line, sm = route_fields(record, self._sm_fields)
+
+                # labels: source and event_type only — job/sf_org_id/environment
+                # are injected downstream by the pipeline.
+                labels: dict[str, str] = {
+                    "source": "eventlog_objects",
+                    "event_type": obj.name,
+                }
+
+                # Advance the watermark only on a VALID timestamp value; a
+                # null/garbage one keeps the previous good watermark so the
+                # committed checkpoint can never poison the next query.
+                ts_field_val = str(record.get(obj.timestamp_field) or "")
+                if _is_valid_watermark(ts_field_val):
+                    watermark = ts_field_val
+                record_id = str(record.get("Id") or "")
+                if record_id:
+                    window = [*window, record_id][-_MAX_CARRIED_IDS:]
+
+                checkpoint = CheckpointToken(
+                    key=key,
+                    value=json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True),
+                )
+
+                yield LogEntry(
+                    timestamp=ts,
+                    labels=labels,
+                    line=line,
+                    structured_metadata=sm,
+                    checkpoint=checkpoint,
+                )
+
+            self._consecutive_failures.pop(obj.name, None)
+
+            if len(page) < _PAGE_LIMIT:
+                break  # short page: caught up for this cycle

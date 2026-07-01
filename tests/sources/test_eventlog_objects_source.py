@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
@@ -110,9 +111,9 @@ async def test_no_stored_watermark_yields_log_entries(tmp_path: pytest.TempPathF
     # Ascending timestamp order
     assert entries[0].timestamp <= entries[1].timestamp
 
-    # Checkpoint values are the EventDate strings
-    assert entries[0].checkpoint.value == "2026-06-30T10:00:00Z"
-    assert entries[1].checkpoint.value == "2026-06-30T10:01:00Z"
+    # Checkpoint values are JSON: the record's EventDate as watermark + id window.
+    assert json.loads(entries[0].checkpoint.value)["last_ts"] == "2026-06-30T10:00:00Z"
+    assert json.loads(entries[1].checkpoint.value)["last_ts"] == "2026-06-30T10:01:00Z"
 
 
 @pytest.mark.asyncio
@@ -223,8 +224,9 @@ async def test_watermark_resume_uses_stored_watermark(tmp_path: pytest.TempPathF
     # The raw +0000 watermark is normalized to a SOQL-legal Z literal in the query.
     assert "2026-06-30T09:00:00.000Z" in captured_q[0]
     assert "2026-06-30T09:00:00.000+0000" not in captured_q[0]
-    # Verify it's in the WHERE clause
-    assert "WHERE EventDate >" in captured_q[0]
+    # Verify it's in the WHERE clause; >= (not >) so a timestamp tie at a page
+    # boundary can't be skipped (the id window dedups the boundary records).
+    assert "WHERE EventDate >=" in captured_q[0]
 
 
 @pytest.mark.asyncio
@@ -286,3 +288,346 @@ async def test_stop_during_inter_cycle_sleep_returns_promptly(
         await asyncio.sleep(0.05)  # let the first (empty) cycle complete and enter the sleep
         stop.set()
         await asyncio.wait_for(task, timeout=1.0)  # << would be 60s without the fix
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint poisoning (C3): null/garbage timestamps must never produce a
+# broken watermark (empty WHERE literal -> MALFORMED_QUERY crash-loop).
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_null_timestamp_record_carries_previous_watermark(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A record with a null/missing timestamp field is still shipped, but its
+    checkpoint carries the PREVIOUS good watermark, never ''/'None'."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"Id": "a", "EventDate": "2026-06-30T10:00:00Z"},
+                    {"Id": "b", "EventDate": None},  # null timestamp
+                    {"Id": "c", "EventDate": "2026-06-30T10:02:00Z"},
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 3  # all shipped, including the null-timestamp record
+    wm_a = json.loads(entries[0].checkpoint.value)["last_ts"]
+    wm_b = json.loads(entries[1].checkpoint.value)["last_ts"]
+    wm_c = json.loads(entries[2].checkpoint.value)["last_ts"]
+    assert wm_a == "2026-06-30T10:00:00Z"
+    assert wm_b == "2026-06-30T10:00:00Z"  # carried, not "" / "None"
+    assert wm_c == "2026-06-30T10:02:00Z"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_garbage_stored_watermark_falls_back_to_lookback(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A poisoned/legacy-corrupt stored watermark (empty, 'None', garbage) must
+    not be interpolated into SOQL — fall back to now-lookback with a warning."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    await store.commit("eventlog_objects:LoginEvent", "None")
+
+    captured_q: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured_q.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        return httpx.Response(200, json={"records": [], "done": True})
+
+    respx.get(_query_url()).mock(side_effect=capture)
+
+    cfg = make_elo_cfg(lookback=timedelta(hours=2))
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        _ = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(captured_q) == 1
+    q = captured_q[0]
+    assert "None" not in q
+    # The literal is ~now-2h, not garbage.
+    wm = q.split(">= ")[1].split(" ")[0]
+    wm_dt = datetime.fromisoformat(wm.replace("Z", "+00:00"))
+    expected = datetime.now(UTC) - timedelta(hours=2)
+    assert abs((expected - wm_dt).total_seconds()) < 5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_empty_stored_watermark_falls_back_to_lookback(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    await store.commit("eventlog_objects:LoginEvent", "")
+
+    captured_q: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured_q.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        return httpx.Response(200, json={"records": [], "done": True})
+
+    respx.get(_query_url()).mock(side_effect=capture)
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        _ = [e async for e in source.events(store, asyncio.Event())]  # must not raise
+
+    assert len(captured_q) == 1
+    # A well-formed datetime literal, not "WHERE EventDate >= " (empty).
+    assert "WHERE EventDate >=  " not in captured_q[0]
+    assert "WHERE EventDate >= 20" in captured_q[0]
+
+
+# ---------------------------------------------------------------------------
+# Tie-loss + throughput (C6): >= cursor with an id-dedup window, and a
+# drain-until-short-page loop within each cycle.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_boundary_tie_records_deduped_by_id(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Records at the exact watermark timestamp are re-fetched by the >= query
+    but deduped via the id window — no re-emit, and no tie loss."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    tie_ts = "2026-06-30T10:00:00Z"
+    await store.commit(
+        "eventlog_objects:LoginEvent",
+        json.dumps({"last_ts": tie_ts, "ids": ["a"]}),
+    )
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"Id": "a", "EventDate": tie_ts},  # already seen: deduped
+                    {"Id": "b", "EventDate": tie_ts},  # same-ts sibling: MUST emit
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    assert '"Id": "b"' in entries[0].line
+    final = json.loads(entries[0].checkpoint.value)
+    assert final["last_ts"] == tie_ts
+    assert "a" in final["ids"] and "b" in final["ids"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_drain_until_short_page_catches_up_within_one_cycle(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A full page (200 records) triggers a follow-up query in the SAME cycle,
+    so throughput is not capped at 200 per poll interval."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    base = datetime(2026, 6, 30, 10, 0, 0, tzinfo=UTC)
+    page1 = [
+        {"Id": f"r{i}", "EventDate": (base + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        for i in range(200)
+    ]
+    page2 = [{"Id": "r200", "EventDate": "2026-06-30T11:00:00Z"}]
+
+    captured_q: list[str] = []
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        captured_q.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        records = page1 if len(captured_q) == 1 else page2
+        return httpx.Response(200, json={"records": records, "done": True})
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 201
+    assert len(captured_q) == 2
+    # The follow-up query advances the cursor to the last record's timestamp.
+    assert "2026-06-30T10:03:19" in captured_q[1]  # base + 199s
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_full_page_of_only_seen_ids_terminates_cycle(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Pathological tie overflow (a full page of already-seen ids) must not
+    loop forever within a cycle."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    tie_ts = "2026-06-30T10:00:00Z"
+    ids = [f"r{i}" for i in range(200)]
+    await store.commit(
+        "eventlog_objects:LoginEvent",
+        json.dumps({"last_ts": tie_ts, "ids": ids}),
+    )
+
+    call_count = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            200,
+            json={"records": [{"Id": i, "EventDate": tie_ts} for i in ids], "done": True},
+        )
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert entries == []
+    assert call_count == 1  # terminated, no infinite drain loop
+
+
+# ---------------------------------------------------------------------------
+# Cycle-level resiliency (C2/C5): SOQL failures must not crash the process;
+# REQUEST_LIMIT_EXCEEDED aborts the rest of the cycle.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_soql_error_skips_cycle_without_raising(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    calls = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(500, text="Internal Server Error")
+        return httpx.Response(
+            200,
+            json={
+                "records": [{"Id": "a", "EventDate": "2026-06-30T10:00:00Z"}],
+                "done": True,
+            },
+        )
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+
+        # Cycle 1: the 500 is contained — no exception, no entries.
+        entries = [e async for e in source.events(store, asyncio.Event())]
+        assert entries == []
+
+        # Cycle 2: proceeds normally.
+        entries2 = [e async for e in source.events(store, asyncio.Event())]
+        assert len(entries2) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_throttled_aborts_rest_of_cycle(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """REQUEST_LIMIT_EXCEEDED on the first object stops the remaining objects
+    this cycle instead of burning more of the exhausted API budget."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    call_count = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            403, json=[{"message": "limit", "errorCode": "REQUEST_LIMIT_EXCEEDED"}]
+        )
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = EventLogObjectsConfig(
+        enabled=True,
+        objects=[
+            EventLogObjectConfig(name="LoginEvent", poll_interval=timedelta(seconds=0)),
+            EventLogObjectConfig(name="ApiEvent", poll_interval=timedelta(seconds=0)),
+        ],
+    )
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]  # must not raise
+
+    assert entries == []
+    assert call_count == 1  # second object never queried this cycle

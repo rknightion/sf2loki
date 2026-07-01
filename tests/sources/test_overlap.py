@@ -44,6 +44,17 @@ def test_pubsub_and_stored_object_agree_on_category() -> None:
     assert category_of_pubsub("/event/LoginEventStream") == category_of_stored_object("LoginEvent")
 
 
+def test_category_of_login_history_aliases_to_login() -> None:
+    # LoginHistory (a standard object, no Event/EventStream suffix) covers the
+    # same login activity as LoginEvent/LoginEventStream/ELF "Login" — it must
+    # land in the same category or the guard silently misses the overlap.
+    assert category_of_stored_object("LoginHistory") == "login"
+    assert category_of_stored_object("LoginHistory") == category_of_elf("Login")
+    assert category_of_stored_object("LoginHistory") == category_of_pubsub(
+        "/event/LoginEventStream"
+    )
+
+
 # --- check_overlap ----------------------------------------------------------
 
 
@@ -60,6 +71,24 @@ def test_stream_plus_elf_same_category_raises() -> None:
         check_overlap(
             pubsub_topics=["/event/LoginEventStream"],
             elf_event_types=["Login"],
+        )
+
+
+def test_login_history_plus_elf_login_raises() -> None:
+    # Regression: the login-history preset documents this protection; before the
+    # loginhistory->login alias it silently double-ingested.
+    with pytest.raises(OverlapError, match="login"):
+        check_overlap(
+            stored_objects=["LoginHistory"],
+            elf_event_types=["Login"],
+        )
+
+
+def test_login_history_plus_login_event_stream_raises() -> None:
+    with pytest.raises(OverlapError, match="login"):
+        check_overlap(
+            pubsub_topics=["/event/LoginEventStream"],
+            stored_objects=["LoginHistory"],
         )
 
 

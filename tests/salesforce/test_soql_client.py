@@ -10,7 +10,8 @@ import respx
 
 from sf2loki.auth.jwt_auth import AccessToken
 from sf2loki.config import SalesforceConfig
-from sf2loki.salesforce.soql_client import SoqlClient, SoqlError
+from sf2loki.obs.metrics import Metrics
+from sf2loki.salesforce.soql_client import SoqlClient, SoqlError, SoqlThrottledError
 
 # ---------------------------------------------------------------------------
 # Fake TokenProvider (no real JWT machinery needed in tests)
@@ -142,6 +143,91 @@ async def test_500_raises_soql_error() -> None:
                 pass
 
     assert "500" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_transport_error_wrapped_in_soql_error() -> None:
+    """A raw httpx transport error (connect/timeout) is normalized to SoqlError."""
+    query_url = "https://x.my.salesforce.com/services/data/v60.0/query"
+    respx.get(query_url).mock(side_effect=httpx.ConnectError("connection refused"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        soql = SoqlClient(make_cfg(), tokens, client)
+        with pytest.raises(SoqlError) as exc_info:
+            async for _ in soql.query("SELECT Id FROM Account"):
+                pass
+
+    assert "connection refused" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_timeout_error_wrapped_in_soql_error() -> None:
+    query_url = "https://x.my.salesforce.com/services/data/v60.0/query"
+    respx.get(query_url).mock(side_effect=httpx.ReadTimeout("read timed out"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        soql = SoqlClient(make_cfg(), tokens, client)
+        with pytest.raises(SoqlError):
+            async for _ in soql.query("SELECT Id FROM Account"):
+                pass
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_403_request_limit_exceeded_raises_throttled_and_increments_metric() -> None:
+    """A 403 REQUEST_LIMIT_EXCEEDED raises SoqlThrottledError (a SoqlError subclass)
+    and increments the salesforce_api_throttled counter with api=soql."""
+    query_url = "https://x.my.salesforce.com/services/data/v60.0/query"
+    respx.get(query_url).mock(
+        return_value=httpx.Response(
+            403,
+            json=[
+                {
+                    "message": "TotalRequests Limit exceeded.",
+                    "errorCode": "REQUEST_LIMIT_EXCEEDED",
+                }
+            ],
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        soql = SoqlClient(make_cfg(), tokens, client, metrics=metrics)
+        with pytest.raises(SoqlThrottledError):
+            async for _ in soql.query("SELECT Id FROM Account"):
+                pass
+
+    throttled = metrics.registry.get_sample_value(
+        "sf2loki_salesforce_api_throttled_total", {"api": "soql"}
+    )
+    assert throttled == 1.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_plain_403_is_soql_error_not_throttled() -> None:
+    """A 403 without REQUEST_LIMIT_EXCEEDED is a plain SoqlError."""
+    query_url = "https://x.my.salesforce.com/services/data/v60.0/query"
+    respx.get(query_url).mock(
+        return_value=httpx.Response(
+            403, json=[{"message": "no access", "errorCode": "INSUFFICIENT_ACCESS"}]
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        soql = SoqlClient(make_cfg(), tokens, client)
+        with pytest.raises(SoqlError) as exc_info:
+            async for _ in soql.query("SELECT Id FROM Account"):
+                pass
+
+    assert not isinstance(exc_info.value, SoqlThrottledError)
 
 
 # ---------------------------------------------------------------------------

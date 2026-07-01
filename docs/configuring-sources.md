@@ -33,6 +33,17 @@ sources:
   allow_overlap: true
 ```
 
+> **Wildcard caveat — the guard only sees what's configured at startup.** Identifiers discovered
+> at *runtime* are not visible to the startup guard. ELF wildcard discovery
+> (`event_types: ["*"]`) compensates by skipping discovered types whose category another source
+> already owns, but wildcard-discovered **Pub/Sub topics** (`topics: ["*"]`) get no such runtime
+> check — combining `topics: ["*"]` with `event_types: ["*"]` (or with explicit types) can still
+> double-ingest a category the guard never saw. Prefer an explicit list on at least one side.
+
+> **Change Data Capture caveat.** `/data/…ChangeEvent` topics are subscribable, but the
+> `ChangeEventHeader.changedFields` / `nulledFields` bitmap fields are shipped as their raw
+> encoded strings — sf2loki does not expand them into field-name lists.
+
 **Picking a source per category:**
 - Use `pubsub` for low-latency, real-time categories that have a streaming topic.
 - Use `eventlog_objects` for categories you'd rather poll than stream, or that have no streaming
@@ -51,14 +62,17 @@ Each configured object is queried every `poll_interval` as:
 
 ```sql
 SELECT FIELDS(ALL) FROM <name>
-WHERE <timestamp_field> > <watermark>
+WHERE <timestamp_field> >= <watermark>
 ORDER BY <timestamp_field> ASC
 LIMIT 200
 ```
 
 `FIELDS(ALL)` selects every field on the object without hand-listing columns, but it is a
 Salesforce convenience that **requires `LIMIT <= 200`** — that limit is hardcoded by the source
-and is not configurable.
+and is not configurable. Throughput is *not* capped at 200 per interval, though: a full page
+triggers follow-up queries within the same cycle (drain-until-short-page), so backlogs catch up
+in one poll. The cursor is `>=` (not `>`) with a rolling record-Id dedup window, so records that
+share the exact boundary timestamp are never skipped.
 
 ```yaml
 sources:
@@ -88,8 +102,13 @@ Requirements and caveats:
   built for standard queryable sObjects (custom objects, `LoginEvent`, `SetupAuditTrail`, etc.);
   EventStore BigObjects are out of scope.
 - The watermark is the previous record's `timestamp_field` value, stored per-object under state
-  key `eventlog_objects:<name>`; a crash mid-poll re-queries from the last committed watermark
-  (gap recovery, never a gap in coverage).
+  key `eventlog_objects:<name>` as JSON (`{"last_ts": ..., "ids": [...]}` — the Id list is the
+  boundary dedup window); a crash mid-poll re-queries from the last committed watermark
+  (gap recovery, never a gap in coverage). Pre-existing bare-timestamp checkpoints are read
+  transparently and upgraded on the next commit.
+- Records whose `timestamp_field` comes back null/unparseable are still shipped but never advance
+  the watermark, and a garbage stored watermark falls back to `lookback` with a warning — a bad
+  value can't wedge the source in a malformed-query loop.
 
 ## 3. Login history & setup audit trail
 
@@ -99,7 +118,9 @@ category per the overlap rule in §1.
 ### LoginHistory (standard object, polled)
 
 `LoginHistory` is a standard queryable object — no Shield/Event Monitoring entitlement required,
-just standard API access.
+just standard API access. The overlap guard maps it to the same `login` category as
+`LoginEvent`, `/event/LoginEventStream`, and the ELF `Login` type — it covers the same login
+activity, so enable exactly one of them.
 
 ```yaml
 sources:

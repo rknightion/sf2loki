@@ -19,11 +19,19 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 
-# ELF EventType values whose lowercased name does NOT already match the
-# normalised RTEM stem. Most do (e.g. ELF "API" -> "api" matches the
-# ApiEventStream/ApiEvent stem "api"), so this map only holds true exceptions.
-# Keyed by lowercased ELF EventType -> canonical category.
-_ELF_CATEGORY_ALIASES: dict[str, str] = {}
+# Identifiers whose normalised (suffix-stripped, lowercased, de-spaced) stem
+# does NOT already match the canonical category. Most do (e.g. ELF "API" ->
+# "api" matches the ApiEventStream/ApiEvent stem "api"), so this map only
+# holds true exceptions. Applied uniformly to Pub/Sub topics, stored objects,
+# and ELF EventTypes. Keyed by normalised stem -> canonical category.
+#
+# - loginhistory: the standard LoginHistory object covers the same login
+#   activity as LoginEvent / /event/LoginEventStream / ELF "Login" — without
+#   this alias it would normalise to its own category and silently bypass the
+#   guard, double-ingesting login data.
+_CATEGORY_ALIASES: dict[str, str] = {
+    "loginhistory": "login",
+}
 
 # Suffixes that distinguish a Salesforce channel name from its category stem.
 # Ordered longest-first so "EventStream"/"EventStore" win over "Event".
@@ -48,12 +56,15 @@ def _strip_channel_suffix(name: str) -> str:
 
 def category_of_pubsub(topic: str) -> str:
     """Canonical category for a Pub/Sub topic (``/event/LoginEventStream`` -> ``login``)."""
-    return _strip_channel_suffix(_basename(topic)).lower()
+    key = _strip_channel_suffix(_basename(topic)).lower()
+    return _CATEGORY_ALIASES.get(key, key)
 
 
 def category_of_stored_object(name: str) -> str:
-    """Canonical category for a stored event object (``LoginEvent`` -> ``login``)."""
-    return _strip_channel_suffix(name).lower()
+    """Canonical category for a stored event object (``LoginEvent`` -> ``login``,
+    ``LoginHistory`` -> ``login``)."""
+    key = _strip_channel_suffix(name).lower()
+    return _CATEGORY_ALIASES.get(key, key)
 
 
 def category_of_elf(event_type: str) -> str:
@@ -63,7 +74,7 @@ def category_of_elf(event_type: str) -> str:
     RTEM stem (``LoginAsEventStream`` -> ``loginas``).
     """
     key = event_type.lower().replace(" ", "")
-    return _ELF_CATEGORY_ALIASES.get(key, key)
+    return _CATEGORY_ALIASES.get(key, key)
 
 
 def check_overlap(

@@ -16,6 +16,7 @@ from sf2loki.salesforce.eventlogfile_client import (
     EventLogFileClient,
     EventLogFileError,
     EventLogFileMeta,
+    EventLogFileThrottledError,
 )
 
 # ---------------------------------------------------------------------------
@@ -243,7 +244,7 @@ async def test_download_parses_csv_with_embedded_newline() -> None:
     tokens = FakeTokenProvider()
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
-        rows = await elf_client.download(file_meta)
+        rows = [r async for r in elf_client.download(file_meta)]
 
     assert len(rows) == 2
     assert rows[0]["QUERY"] == "SELECT Id\nFROM Account"
@@ -270,7 +271,7 @@ async def test_download_401_invalidates_and_retries_with_fresh_token() -> None:
     tokens = FakeTokenProvider()
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
-        rows = await elf_client.download(file_meta)
+        rows = [r async for r in elf_client.download(file_meta)]
 
     assert rows == [{"A": "1", "B": "2"}]
     assert tokens._invalidated is True
@@ -288,7 +289,7 @@ async def test_download_increments_metrics_on_success() -> None:
     metrics = Metrics()
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client, metrics=metrics)
-        await elf_client.download(file_meta)
+        _ = [r async for r in elf_client.download(file_meta)]
 
     bytes_val = metrics.registry.get_sample_value(
         "sf2loki_eventlogfile_download_bytes_total", {"event_type": "Login"}
@@ -314,7 +315,7 @@ async def test_download_non_2xx_raises_and_increments_error_metric() -> None:
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client, metrics=metrics)
         with pytest.raises(EventLogFileError) as exc_info:
-            await elf_client.download(file_meta)
+            _ = [r async for r in elf_client.download(file_meta)]
 
     assert "500" in str(exc_info.value)
 
@@ -352,3 +353,159 @@ async def test_list_event_types_builds_grouped_soql_and_dedupes() -> None:
     assert types == ["API", "RestApi"]
     assert "GROUP BY EventType" in captured_q[0]
     assert "Interval='Hourly'" in captured_q[0]
+
+
+# ---------------------------------------------------------------------------
+# Error normalization: one exception family (EventLogFileError) per client,
+# transport errors included; REQUEST_LIMIT_EXCEEDED is distinguishable.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_transport_error_wrapped_in_eventlogfile_error() -> None:
+    file_meta = make_file_meta()
+    respx.get(_logfile_url(file_meta.id)).mock(side_effect=httpx.ConnectError("refused"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        with pytest.raises(EventLogFileError) as exc_info:
+            _ = [r async for r in elf_client.download(file_meta)]
+
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_files_soql_failure_wrapped_in_eventlogfile_error() -> None:
+    """list_files goes through SoqlClient; its SoqlError must surface as
+    EventLogFileError so the source has ONE exception family to catch."""
+    respx.get(_query_url()).mock(return_value=httpx.Response(500, text="boom"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        with pytest.raises(EventLogFileError):
+            await elf_client.list_files(
+                event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
+            )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_event_types_soql_failure_wrapped_in_eventlogfile_error() -> None:
+    respx.get(_query_url()).mock(return_value=httpx.Response(500, text="boom"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        with pytest.raises(EventLogFileError):
+            await elf_client.list_event_types("Hourly")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_request_limit_exceeded_raises_throttled_and_increments_metric() -> None:
+    file_meta = make_file_meta()
+    respx.get(_logfile_url(file_meta.id)).mock(
+        return_value=httpx.Response(
+            403,
+            json=[
+                {
+                    "message": "TotalRequests Limit exceeded.",
+                    "errorCode": "REQUEST_LIMIT_EXCEEDED",
+                }
+            ],
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client, metrics=metrics)
+        with pytest.raises(EventLogFileThrottledError):
+            _ = [r async for r in elf_client.download(file_meta)]
+
+    throttled = metrics.registry.get_sample_value(
+        "sf2loki_salesforce_api_throttled_total", {"api": "eventlogfile"}
+    )
+    assert throttled == 1.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_files_request_limit_exceeded_raises_throttled() -> None:
+    """A throttled listing (403 via the inner SoqlClient) maps to the ELF
+    throttled subclass, so the source can back off distinctly."""
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            403, json=[{"message": "limit", "errorCode": "REQUEST_LIMIT_EXCEEDED"}]
+        )
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        with pytest.raises(EventLogFileThrottledError):
+            await elf_client.list_files(
+                event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
+            )
+
+
+# ---------------------------------------------------------------------------
+# Malformed CSV rows (C8): overflow columns must not land under key None
+# (json.dumps would TypeError on a None key) and short rows must not yield None
+# values.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_row_with_extra_columns_does_not_produce_none_key() -> None:
+    file_meta = make_file_meta()
+    csv_body = "A,B\r\n1,2,3,4\r\n"  # two overflow columns beyond the header
+    respx.get(_logfile_url(file_meta.id)).mock(return_value=httpx.Response(200, text=csv_body))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        rows = [r async for r in elf_client.download(file_meta)]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert None not in row
+    assert row["A"] == "1"
+    assert row["B"] == "2"
+    # Overflow captured under a stable string key, as a string (JSON-safe).
+    assert row["_extra"] == "3,4"
+    import json
+
+    json.dumps(row, sort_keys=True)  # must not raise
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_short_row_fills_missing_columns_with_empty_string() -> None:
+    file_meta = make_file_meta()
+    csv_body = "A,B,C\r\n1,2\r\n"
+    respx.get(_logfile_url(file_meta.id)).mock(return_value=httpx.Response(200, text=csv_body))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        rows = [r async for r in elf_client.download(file_meta)]
+
+    assert rows == [{"A": "1", "B": "2", "C": ""}]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_zero_rows_header_only() -> None:
+    file_meta = make_file_meta()
+    respx.get(_logfile_url(file_meta.id)).mock(return_value=httpx.Response(200, text="A,B\r\n"))
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
+        rows = [r async for r in elf_client.download(file_meta)]
+
+    assert rows == []

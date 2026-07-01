@@ -1,12 +1,20 @@
 """EventLogFile REST client: lists ELF metadata via SOQL, downloads + parses LogFile CSVs.
 
 Ref: DESIGN.md §8.
+
+All failures surface as the :class:`EventLogFileError` family (SOQL errors from
+the internal listing client and httpx transport errors are re-wrapped), so the
+source has exactly one exception type to handle per client. A 403
+``REQUEST_LIMIT_EXCEEDED`` raises the :class:`EventLogFileThrottledError`
+subclass so callers can back off distinctly.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -14,7 +22,23 @@ import httpx
 from sf2loki.auth.jwt_auth import TokenProvider
 from sf2loki.config import SalesforceConfig
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.soql_client import SoqlClient, to_soql_datetime_literal
+from sf2loki.salesforce.soql_client import (
+    SoqlClient,
+    SoqlError,
+    SoqlThrottledError,
+    to_soql_datetime_literal,
+)
+
+# Downloaded CSV bodies up to this size stay in memory; larger ones spill to a
+# temp file on disk (Salesforce documents ELF blobs exceeding 100MB — buffering
+# those in RAM, let alone as decoded str + parsed rows, is not acceptable).
+_SPOOL_MAX_MEMORY_BYTES = 8 * 1024 * 1024
+
+# DictReader key for row cells beyond the header width. A stable string (never
+# the default ``None`` restkey) so json.dumps on the row can't TypeError.
+_OVERFLOW_KEY = "_extra"
+
+_REQUEST_LIMIT_ERROR_CODE = "REQUEST_LIMIT_EXCEEDED"
 
 
 def _as_int(value: object) -> int:
@@ -33,7 +57,12 @@ def _as_int(value: object) -> int:
 
 
 class EventLogFileError(Exception):
-    """Raised when the EventLogFile LogFile download endpoint returns a non-2xx response."""
+    """Raised when an EventLogFile listing or LogFile download fails (HTTP, SOQL,
+    transport, or CSV parse)."""
+
+
+class EventLogFileThrottledError(EventLogFileError):
+    """Raised on a 403 REQUEST_LIMIT_EXCEEDED — back off until the next poll."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +97,7 @@ class EventLogFileClient:
         self._tokens = tokens
         self._client = client
         self._metrics = metrics if metrics is not None else Metrics()
-        self._soql = SoqlClient(sf_cfg, tokens, client)
+        self._soql = SoqlClient(sf_cfg, tokens, client, metrics=self._metrics)
 
     async def list_files(
         self,
@@ -94,21 +123,26 @@ class EventLogFileClient:
             f"LIMIT {page_size}"
         )
         files: list[EventLogFileMeta] = []
-        async for record in self._soql.query(soql):
-            files.append(
-                EventLogFileMeta(
-                    id=str(record["Id"]),
-                    event_type=str(record.get("EventType", event_type)),
-                    interval=str(record.get("Interval", interval)),
-                    log_date=str(record.get("LogDate", "")),
-                    created_date=str(record.get("CreatedDate", "")),
-                    # Salesforce returns Sequence/LogFileLength as JSON numbers that
-                    # decode to floats (e.g. 12899.0); go via float() so int() doesn't
-                    # choke on the ".0" (int("12899.0") raises).
-                    sequence=_as_int(record.get("Sequence")),
-                    length=_as_int(record.get("LogFileLength")),
+        try:
+            async for record in self._soql.query(soql):
+                files.append(
+                    EventLogFileMeta(
+                        id=str(record["Id"]),
+                        event_type=str(record.get("EventType", event_type)),
+                        interval=str(record.get("Interval", interval)),
+                        log_date=str(record.get("LogDate", "")),
+                        created_date=str(record.get("CreatedDate", "")),
+                        # Salesforce returns Sequence/LogFileLength as JSON numbers that
+                        # decode to floats (e.g. 12899.0); go via float() so int() doesn't
+                        # choke on the ".0" (int("12899.0") raises).
+                        sequence=_as_int(record.get("Sequence")),
+                        length=_as_int(record.get("LogFileLength")),
+                    )
                 )
-            )
+        except SoqlError as exc:
+            raise self._wrap_soql_error(
+                exc, f"EventLogFile listing failed for {event_type}"
+            ) from exc
         return files
 
     async def list_event_types(self, interval: str) -> list[str]:
@@ -120,52 +154,118 @@ class EventLogFileClient:
         """
         soql = f"SELECT EventType FROM EventLogFile WHERE Interval='{interval}' GROUP BY EventType"
         types: set[str] = set()
-        async for record in self._soql.query(soql):
-            value = record.get("EventType")
-            if value:
-                types.add(str(value))
+        try:
+            async for record in self._soql.query(soql):
+                value = record.get("EventType")
+                if value:
+                    types.add(str(value))
+        except SoqlError as exc:
+            raise self._wrap_soql_error(exc, "EventLogFile EventType discovery failed") from exc
         return sorted(types)
 
-    async def download(self, file_meta: EventLogFileMeta) -> list[dict[str, str]]:
-        """Download and parse the CSV body for *file_meta*.
+    def _wrap_soql_error(self, exc: SoqlError, context: str) -> EventLogFileError:
+        """Re-wrap a SoqlError from the internal listing client into this client's family."""
+        self._metrics.eventlogfile_download_errors.labels(reason="listing").inc()
+        if isinstance(exc, SoqlThrottledError):
+            return EventLogFileThrottledError(f"{context}: {exc}")
+        return EventLogFileError(f"{context}: {exc}")
 
-        NOTE: the entire response body is buffered in memory before parsing.
-        Acceptable for v1; EventLogFiles larger than ~100MB are a known
-        limitation (DESIGN.md §8).
+    async def download(self, file_meta: EventLogFileMeta) -> AsyncIterator[dict[str, str]]:
+        """Download the CSV body for *file_meta*, yielding one dict per row.
+
+        The body is **streamed** to a spooled temp file (in-memory up to
+        ``_SPOOL_MAX_MEMORY_BYTES``, then disk) and parsed incrementally, so peak
+        RAM is O(row) instead of O(file) — Salesforce documents ELF blobs
+        exceeding 100MB. The full body is fetched *before* the first row is
+        yielded, so all network failures surface at the first ``anext()`` and a
+        partially-downloaded file never emits rows.
 
         Uses ``csv.DictReader`` (not naive line-splitting) because ELF CSV
         fields (e.g. ``QUERY``) may contain embedded newlines inside quoted
-        values — splitting on ``\\n`` would corrupt those rows.
+        values — splitting on ``\\n`` would corrupt those rows. Overflow cells
+        beyond the header land under the string key ``"_extra"`` (joined) and
+        short rows are padded with ``""`` — a malformed row must never produce
+        a ``None`` key/value that breaks downstream JSON serialization.
         """
-        tok = await self._tokens.token()
-        url = (
-            f"{tok.instance_url}/services/data/v{self._cfg.api_version}"
-            f"/sobjects/EventLogFile/{file_meta.id}/LogFile"
-        )
-        headers = {"Authorization": f"Bearer {tok.value}"}
-        response = await self._client.get(url, headers=headers)
-
-        if response.status_code == 401:
-            self._tokens.invalidate()
-            tok = await self._tokens.token()
-            headers = {"Authorization": f"Bearer {tok.value}"}
-            response = await self._client.get(url, headers=headers)
-
-        if not response.is_success:
-            self._metrics.eventlogfile_download_errors.labels(
-                reason=f"HTTP {response.status_code}"
-            ).inc()
+        try:
+            spool, total_bytes = await self._fetch_to_spool(file_meta)
+        except httpx.HTTPError as exc:
+            self._metrics.eventlogfile_download_errors.labels(reason="transport").inc()
             raise EventLogFileError(
-                f"EventLogFile download failed for {file_meta.id}: "
-                f"HTTP {response.status_code} — {response.text}"
-            )
-
-        reader: csv.DictReader[str] = csv.DictReader(io.StringIO(response.text))
-        rows: list[dict[str, str]] = [dict(row) for row in reader]
+                f"EventLogFile download failed for {file_meta.id}: {type(exc).__name__}: {exc}"
+            ) from exc
 
         self._metrics.eventlogfile_download_bytes.labels(event_type=file_meta.event_type).inc(
-            len(response.content)
+            total_bytes
         )
         self._metrics.eventlogfile_files_processed.labels(event_type=file_meta.event_type).inc()
 
-        return rows
+        with spool:
+            text = io.TextIOWrapper(spool, encoding="utf-8", errors="replace", newline="")
+            reader: csv.DictReader[str] = csv.DictReader(text, restkey=_OVERFLOW_KEY, restval="")
+            try:
+                for row in reader:
+                    extra = row.get(_OVERFLOW_KEY)
+                    if isinstance(extra, list):
+                        row[_OVERFLOW_KEY] = ",".join(extra)
+                    yield row
+            except csv.Error as exc:
+                raise EventLogFileError(
+                    f"EventLogFile CSV parse failed for {file_meta.id} "
+                    f"at line {reader.line_num}: {exc}"
+                ) from exc
+            finally:
+                # Detach so closing the TextIOWrapper doesn't double-close spool
+                # (the `with spool` above owns it).
+                text.detach()
+
+    async def _fetch_to_spool(
+        self, file_meta: EventLogFileMeta
+    ) -> tuple[tempfile.SpooledTemporaryFile[bytes], int]:
+        """Stream the LogFile body into a spooled temp file (with one 401 retry).
+
+        Returns the spool (rewound to 0) and the total byte count.
+        """
+        tok = await self._tokens.token()
+        for attempt in (0, 1):
+            url = (
+                f"{tok.instance_url}/services/data/v{self._cfg.api_version}"
+                f"/sobjects/EventLogFile/{file_meta.id}/LogFile"
+            )
+            headers = {"Authorization": f"Bearer {tok.value}"}
+            async with self._client.stream("GET", url, headers=headers) as response:
+                if response.status_code == 401 and attempt == 0:
+                    self._tokens.invalidate()
+                    tok = await self._tokens.token()
+                    continue
+
+                if not response.is_success:
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    self._metrics.eventlogfile_download_errors.labels(
+                        reason=f"HTTP {response.status_code}"
+                    ).inc()
+                    if response.status_code == 403 and _REQUEST_LIMIT_ERROR_CODE in body:
+                        self._metrics.salesforce_api_throttled.labels(api="eventlogfile").inc()
+                        raise EventLogFileThrottledError(
+                            f"EventLogFile download throttled for {file_meta.id}: "
+                            f"HTTP 403 {_REQUEST_LIMIT_ERROR_CODE} — {body}"
+                        )
+                    raise EventLogFileError(
+                        f"EventLogFile download failed for {file_meta.id}: "
+                        f"HTTP {response.status_code} — {body}"
+                    )
+
+                spool: tempfile.SpooledTemporaryFile[bytes] = tempfile.SpooledTemporaryFile(
+                    max_size=_SPOOL_MAX_MEMORY_BYTES
+                )
+                total = 0
+                try:
+                    async for chunk in response.aiter_bytes():
+                        spool.write(chunk)
+                        total += len(chunk)
+                except BaseException:
+                    spool.close()
+                    raise
+                spool.seek(0)
+                return spool, total
+        raise AssertionError("unreachable: 401 retry loop exhausted")
