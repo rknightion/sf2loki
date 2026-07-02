@@ -41,6 +41,7 @@ from sf2loki.config import (
 )
 from sf2loki.model import Batch, CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
+from sf2loki.salesforce.apexlog_client import ApexLogClient, ApexLogError
 from sf2loki.salesforce.eventlogfile_client import EventLogFileClient, EventLogFileError
 from sf2loki.salesforce.limits_client import LimitsClient, LimitsError
 from sf2loki.salesforce.pubsub_client import PubSubClient
@@ -300,6 +301,36 @@ async def _check_entitlement(
 
 
 # ---------------------------------------------------------------------------
+# Check 5b: traceflags (apexlog prerequisite)
+# ---------------------------------------------------------------------------
+
+
+async def _check_traceflags(
+    cfg: Config,
+    sf: SalesforceConfig,
+    tokens: TokenProvider,
+    http_client: httpx.AsyncClient,
+    metrics: Metrics,
+) -> CheckResult:
+    """Warn when apexlog is enabled but no active TraceFlags exist (no logs will flow)."""
+    if not cfg.sources.apexlog.enabled:
+        return CheckResult("traceflags", "SKIP", "apexlog source disabled")
+    client = ApexLogClient(sf, tokens, http_client, metrics=metrics)
+    try:
+        active = await client.count_active_traceflags()
+    except ApexLogError as exc:
+        return CheckResult("traceflags", "WARN", f"could not query TraceFlags: {exc}")
+    if active == 0:
+        return CheckResult(
+            "traceflags",
+            "WARN",
+            "apexlog enabled but no active TraceFlags — no ApexLog rows will be generated. "
+            "Enable debug logging for the target user(s) via `sf debug` or Setup -> Debug Logs.",
+        )
+    return CheckResult("traceflags", "PASS", f"{active} active TraceFlag(s)")
+
+
+# ---------------------------------------------------------------------------
 # Check 6: loki
 # ---------------------------------------------------------------------------
 
@@ -452,6 +483,7 @@ _CHECKS_AFTER_CONFIG: tuple[str, ...] = (
     "permissions",
     "pubsub",
     "entitlement",
+    "traceflags",
     "loki",
     "state",
     "limits",
@@ -497,11 +529,14 @@ async def run_doctor(
         results.append(auth_result)
 
         if tok is None:
-            _skip_remaining(results, ("permissions", "pubsub", "entitlement"), "auth failed")
+            _skip_remaining(
+                results, ("permissions", "pubsub", "entitlement", "traceflags"), "auth failed"
+            )
         else:
             results.append(await _check_permissions(cfg, sf, tok, sf_http, tokens, metrics))
             results.extend(await _check_pubsub(cfg, tokens, metrics))
             results.append(await _check_entitlement(cfg, sf, tokens, sf_http, metrics))
+            results.append(await _check_traceflags(cfg, sf, tokens, sf_http, metrics))
 
         results.append(await _check_loki(cfg))
         results.append(_check_state(cfg))

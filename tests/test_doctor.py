@@ -646,3 +646,81 @@ async def test_json_output_on_config_failure(capsys: pytest.CaptureFixture[str])
     assert payload["exit_code"] == 1
     config_check = next(c for c in payload["checks"] if c["name"] == "config")
     assert config_check["status"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# TraceFlags check (apexlog)
+# ---------------------------------------------------------------------------
+
+TOOLING_QUERY_URL = f"{INSTANCE_URL}/services/data/v{API_VERSION}/tooling/query"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_traceflags_skipped_when_apexlog_disabled(
+    base_config: Callable[..., Config], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _mock_token_ok()
+    _mock_describe_ok()
+    _mock_limits_ok()
+    _mock_loki_ok()
+    rc = await run_doctor(_write_yaml(base_config()))
+    out = capsys.readouterr().out
+    assert "traceflags" in out
+    assert "apexlog source disabled" in out
+    assert rc == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_traceflags_warns_when_none_active(
+    base_config: Callable[..., Config], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _mock_token_ok()
+    _mock_describe_ok()
+    _mock_limits_ok()
+    _mock_loki_ok()
+    respx.get(TOOLING_QUERY_URL).mock(
+        return_value=httpx.Response(200, json={"records": [], "done": True})
+    )
+    cfg = base_config(
+        sources={
+            "pubsub": {"enabled": False},
+            "eventlog_objects": {"enabled": False},
+            "eventlogfile": {"enabled": False},
+            "apexlog": {"enabled": True},
+        }
+    )
+    rc = await run_doctor(_write_yaml(cfg))
+    out = capsys.readouterr().out
+    assert "traceflags" in out
+    assert "WARN" in out
+    assert "TraceFlag" in out
+    assert rc == 0  # WARN never fails the run
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_traceflags_pass_when_active(
+    base_config: Callable[..., Config], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _mock_token_ok()
+    _mock_describe_ok()
+    _mock_limits_ok()
+    _mock_loki_ok()
+    respx.get(TOOLING_QUERY_URL).mock(
+        return_value=httpx.Response(200, json={"records": [{"Id": "7tf1"}], "done": True})
+    )
+    cfg = base_config(
+        sources={
+            "pubsub": {"enabled": False},
+            "eventlog_objects": {"enabled": False},
+            "eventlogfile": {"enabled": False},
+            "apexlog": {"enabled": True},
+        }
+    )
+    rc = await run_doctor(_write_yaml(cfg))
+    out = capsys.readouterr().out
+    assert "traceflags" in out
+    assert "1 active" in out
+    assert rc == 0
