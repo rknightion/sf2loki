@@ -18,14 +18,28 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any
+
+import tenacity
 
 if TYPE_CHECKING:
     from sf2loki.config import S3StateConfig
 
 ClientFactory = Callable[[], AbstractAsyncContextManager[Any]]
+
+# ---------------------------------------------------------------------------
+# Module-level retry knobs — monkeypatched in tests to keep them fast.
+# Mirrors sinks/loki/sink.py's discipline: bounded, jittered retry around
+# transient object-store errors (503 SlowDown, InternalError, TCP reset,
+# ...). The precondition-conflict (412) CAS failure is classified separately
+# below and is never retried — it means another writer won the race, not a
+# transient blip, and must fail fast (see StateStoreConflictError).
+# ---------------------------------------------------------------------------
+_MAX_ATTEMPTS: int = 4
+_WAIT_MIN: float = 0.1
+_WAIT_MAX: float = 2.0
 
 
 class StateStoreConflictError(RuntimeError):
@@ -78,6 +92,60 @@ def _status_code(exc: Exception) -> int | None:
 _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404"})
 _PRECONDITION_FAILED_CODES = frozenset({"PreconditionFailed", "412"})
 
+# Botocore error codes that mean "retry me" — throttling/overload/internal
+# blips, never a data or auth problem.
+_TRANSIENT_CODES = frozenset(
+    {
+        "SlowDown",
+        "InternalError",
+        "InternalFailure",
+        "ServiceUnavailable",
+        "RequestTimeout",
+        "RequestTimeTooSkewed",
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+    }
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for a transient object-store error that is safe to retry.
+
+    Never true for the precondition-conflict CAS failure (already converted
+    to :class:`StateStoreConflictError` by the time this predicate sees it,
+    which has neither a botocore error code nor an HTTP status) — that one
+    must fail fast, not retry.
+    """
+    if not isinstance(exc, Exception):
+        return False
+    if _error_code(exc) in _TRANSIENT_CODES:
+        return True
+    status = _status_code(exc)
+    if status is not None and status >= 500:
+        return True
+    # TCP resets / connection drops surface as bare OSError-family exceptions
+    # with no botocore response shape at all.
+    if isinstance(exc, TimeoutError | ConnectionError | OSError):
+        return True
+    return False
+
+
+async def _retry_transient(attempt: Callable[[], Any]) -> Any:
+    """Run *attempt* under a bounded, jittered retry for transient errors only.
+
+    Any non-transient exception (including StateStoreConflictError) is
+    re-raised immediately on the first failure — reraise=True means tenacity
+    surfaces the original exception, not a wrapped RetryError.
+    """
+    retrying: tenacity.AsyncRetrying = tenacity.AsyncRetrying(
+        reraise=True,
+        stop=tenacity.stop_after_attempt(_MAX_ATTEMPTS),
+        wait=tenacity.wait_random_exponential(min=_WAIT_MIN, max=_WAIT_MAX),
+        retry=tenacity.retry_if_exception(_is_transient),
+    )
+    return await retrying(attempt)
+
 
 class S3CheckpointStore:
     """CheckpointStore backed by one S3 object with compare-and-swap commits.
@@ -122,6 +190,17 @@ class S3CheckpointStore:
         """
         self._fence = fence
 
+    def reset(self) -> None:
+        """Invalidate the in-memory cache and cached ETag (issue #48).
+
+        Called on leadership loss so a later re-acquisition re-fetches the
+        object and its current ETag instead of committing against a stale
+        ETag — which would otherwise 412 (StateStoreConflictError) on the
+        first commit after re-promotion.
+        """
+        self._cache = None
+        self._etag = None
+
     def _default_client_factory(self) -> AbstractAsyncContextManager[Any]:
         """Build the default aiobotocore S3 client (lazy import; needs ``sf2loki[s3]``)."""
         from aiobotocore.session import get_session  # type: ignore[import-not-found]
@@ -147,14 +226,23 @@ class S3CheckpointStore:
         if self._cache is not None:
             return
         client = await self._get_client()
-        try:
-            resp = await client.get_object(Bucket=self._cfg.bucket, Key=self._cfg.key)
-        except Exception as exc:
-            if _error_code(exc) in _NOT_FOUND_CODES:
-                self._cache = {}
-                self._etag = None
-                return
-            raise
+
+        async def _do_get() -> dict[str, Any] | None:
+            try:
+                result: dict[str, Any] = await client.get_object(
+                    Bucket=self._cfg.bucket, Key=self._cfg.key
+                )
+                return result
+            except Exception as exc:
+                if _error_code(exc) in _NOT_FOUND_CODES:
+                    return None
+                raise
+
+        resp = await _retry_transient(_do_get)
+        if resp is None:
+            self._cache = {}
+            self._etag = None
+            return
         body = await resp["Body"].read()
         data = json.loads(body)
         if not isinstance(data, dict):
@@ -172,12 +260,20 @@ class S3CheckpointStore:
             return self._cache.get(key)
 
     async def commit(self, key: str, value: str) -> None:
+        await self.commit_many({key: value})
+
+    async def commit_many(self, items: Mapping[str, str]) -> None:
+        """Merge *items* into the state document with exactly one conditional PUT.
+
+        Replaces N per-key commits (N loads + N full-object PUTs) with one
+        load + one PUT for the whole batch — see issue #54.
+        """
         async with self._lock:
             if self._fence is not None:
                 self._fence()
             await self._ensure_loaded()
             assert self._cache is not None
-            new_cache = {**self._cache, key: value}
+            new_cache = {**self._cache, **items}
             client = await self._get_client()
             body = json.dumps(new_cache).encode("utf-8")
             put_kwargs: dict[str, Any] = {
@@ -189,20 +285,25 @@ class S3CheckpointStore:
                 put_kwargs["IfNoneMatch"] = "*"
             else:
                 put_kwargs["IfMatch"] = self._etag
-            try:
-                resp = await client.put_object(**put_kwargs)
-            except Exception as exc:
-                code = _error_code(exc)
-                status = _status_code(exc)
-                if code in _PRECONDITION_FAILED_CODES or status == 412:
-                    raise StateStoreConflictError(
-                        f"commit to s3://{self._cfg.bucket}/{self._cfg.key} lost a "
-                        "compare-and-swap race — another sf2loki instance is writing "
-                        "the same state object. Two instances sharing S3 checkpoint "
-                        "state would double-ingest and clobber each other's "
-                        "checkpoints; point each instance at its own key."
-                    ) from exc
-                raise
+
+            async def _do_put() -> dict[str, Any]:
+                try:
+                    result: dict[str, Any] = await client.put_object(**put_kwargs)
+                    return result
+                except Exception as exc:
+                    code = _error_code(exc)
+                    status = _status_code(exc)
+                    if code in _PRECONDITION_FAILED_CODES or status == 412:
+                        raise StateStoreConflictError(
+                            f"commit to s3://{self._cfg.bucket}/{self._cfg.key} lost a "
+                            "compare-and-swap race — another sf2loki instance is writing "
+                            "the same state object. Two instances sharing S3 checkpoint "
+                            "state would double-ingest and clobber each other's "
+                            "checkpoints; point each instance at its own key."
+                        ) from exc
+                    raise
+
+            resp = await _retry_transient(_do_put)
             self._cache = new_cache
             self._etag = resp.get("ETag")
 

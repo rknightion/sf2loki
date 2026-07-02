@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import sf2loki.state.s3_store as s3_store_module
 from sf2loki.config import S3StateConfig
 from sf2loki.state.s3_store import (
     S3CheckpointStore,
@@ -326,6 +327,174 @@ async def test_fence_allows_commit_when_it_does_not_raise() -> None:
 
     assert calls == ["checked"]
     assert backend.put_object_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# commit_many (#54): merge N keys into one conditional PUT.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_many_does_a_single_put() -> None:
+    store, backend, _ = make_store()
+    await store.commit_many({"k1": "v1", "k2": "v2", "k3": "v3"})
+    assert backend.put_object_calls == 1
+    assert await store.load("k1") == "v1"
+    assert await store.load("k2") == "v2"
+    assert await store.load("k3") == "v3"
+
+
+@pytest.mark.asyncio
+async def test_commit_many_preserves_existing_keys() -> None:
+    backend = FakeS3Backend()
+    store, _, _ = make_store(backend)
+    await store.commit("k0", "v0")
+    await store.commit_many({"k1": "v1", "k2": "v2"})
+    assert await store.load("k0") == "v0"
+    assert await store.load("k1") == "v1"
+
+
+@pytest.mark.asyncio
+async def test_commit_many_fence_raises_before_any_put() -> None:
+    store, backend, _ = make_store()
+
+    def fence() -> None:
+        raise RuntimeError("lease expired")
+
+    store.set_fence(fence)
+    with pytest.raises(RuntimeError, match="lease expired"):
+        await store.commit_many({"k1": "v1"})
+    assert backend.put_object_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# reset (#48): a demote -> external change -> promote cycle serves fresh
+# values and commits cleanly, instead of a stale-etag 412 crash.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reset_clears_cache_and_etag_serves_fresh_value() -> None:
+    backend = FakeS3Backend()
+    store1, _, _ = make_store(backend)
+    await store1.commit("k", "v1")
+
+    # Another instance leads in between and advances the object.
+    store2, _, _ = make_store(backend)
+    await store2.commit("k", "external")
+
+    store1.reset()
+    assert await store1.load("k") == "external"
+    # Without reset this would 412 on store1's stale etag.
+    await store1.commit("k2", "v2")
+    assert await store1.load("k2") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_reset_before_any_load_is_a_noop() -> None:
+    store, _, _ = make_store()
+    store.reset()
+    assert await store.load("k1") is None
+
+
+# ---------------------------------------------------------------------------
+# bounded retry on transient errors (#44); precondition conflicts still fail
+# fast, unretried.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_survives_two_transient_errors_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(s3_store_module, "_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeS3Backend()
+    store, _, _ = make_store(backend)
+
+    calls = {"n": 0}
+    original_put = backend.put_object
+
+    async def flaky_put(**kwargs: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise FakeClientError("SlowDown", 503, "PutObject")
+        result: dict[str, Any] = await original_put(**kwargs)
+        return result
+
+    monkeypatch.setattr(backend, "put_object", flaky_put)
+
+    await store.commit("k1", "v1")
+    assert await store.load("k1") == "v1"
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_load_survives_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(s3_store_module, "_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeS3Backend()
+    seed, _, _ = make_store(backend)
+    await seed.commit("k1", "v1")
+
+    store, _, _ = make_store(backend)
+    calls = {"n": 0}
+    original_get = backend.get_object
+
+    async def flaky_get(**kwargs: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 1:
+            raise FakeClientError("InternalError", 500, "GetObject")
+        result: dict[str, Any] = await original_get(**kwargs)
+        return result
+
+    monkeypatch.setattr(backend, "get_object", flaky_get)
+
+    assert await store.load("k1") == "v1"
+
+
+@pytest.mark.asyncio
+async def test_commit_exhausts_retries_and_raises_underlying_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(s3_store_module, "_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(s3_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeS3Backend()
+    store, _, _ = make_store(backend)
+
+    async def always_503(**kwargs: Any) -> dict[str, Any]:
+        raise FakeClientError("SlowDown", 503, "PutObject")
+
+    monkeypatch.setattr(backend, "put_object", always_503)
+
+    with pytest.raises(FakeClientError):
+        await store.commit("k1", "v1")
+
+
+@pytest.mark.asyncio
+async def test_precondition_conflict_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(s3_store_module, "_MAX_ATTEMPTS", 5)
+    backend = FakeS3Backend()
+    store1, _, _ = make_store(backend)
+    store2, _, _ = make_store(backend)
+
+    await store1.load("k1")
+    await store2.load("k1")
+    await store1.commit("k1", "from-1")
+
+    with pytest.raises(StateStoreConflictError):
+        await store2.commit("k1", "from-2")
+
+    # store1's successful PUT + store2's single failed PUT — no retries on
+    # the precondition conflict.
+    assert backend.put_object_calls == 2
 
 
 @pytest.mark.asyncio

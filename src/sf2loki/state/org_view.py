@@ -19,10 +19,18 @@ then migrates forward (the next commit writes the prefixed key).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from sf2loki.state.base import CheckpointStore
+
+
+class _CommitManyCapable(Protocol):
+    """The duck-typed commit_many(...) surface (#54), not part of the frozen
+    CheckpointStore Protocol — see state/base.py and the store implementations."""
+
+    async def commit_many(self, items: Mapping[str, str]) -> None: ...
 
 
 def org_prefix(name: str) -> str:
@@ -56,6 +64,17 @@ class OrgCheckpointView:
 
     async def commit(self, key: str, value: str) -> None:
         await self._inner.commit(self._prefix + key, value)
+
+    async def commit_many(self, items: Mapping[str, str]) -> None:
+        """Prefix every key and forward to the inner store's commit_many (#54).
+
+        Explicit (not left to __getattr__) because the keys need prefixing
+        before forwarding — unlike reset()/set_epoch(), which pass through
+        unprefixed via __getattr__ below.
+        """
+        prefixed = {self._prefix + key: value for key, value in items.items()}
+        inner = cast(_CommitManyCapable, self._inner)
+        await inner.commit_many(prefixed)
 
     def __getattr__(self, name: str) -> Any:
         # Passthrough for set_fence/close/etc. Only reached for attributes not

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import sf2loki.state.gcs_store as gcs_store_module
 from sf2loki.config import GcsStateConfig
 from sf2loki.state.gcs_store import GcsCheckpointStore
 from sf2loki.state.s3_store import StateObjectCorruptError, StateStoreConflictError
@@ -330,6 +331,180 @@ async def test_fence_allows_commit_when_it_does_not_raise() -> None:
 
     assert calls == ["checked"]
     assert backend.upload_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# commit_many (#54): merge N keys into one conditional upload.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_many_does_a_single_upload() -> None:
+    store, backend, _ = make_store()
+    await store.commit_many({"k1": "v1", "k2": "v2", "k3": "v3"})
+    assert backend.upload_calls == 1
+    assert await store.load("k1") == "v1"
+    assert await store.load("k2") == "v2"
+    assert await store.load("k3") == "v3"
+
+
+@pytest.mark.asyncio
+async def test_commit_many_preserves_existing_keys() -> None:
+    backend = FakeGcsBackend()
+    store, _, _ = make_store(backend)
+    await store.commit("k0", "v0")
+    await store.commit_many({"k1": "v1", "k2": "v2"})
+    assert await store.load("k0") == "v0"
+    assert await store.load("k1") == "v1"
+
+
+@pytest.mark.asyncio
+async def test_commit_many_fence_raises_before_any_upload() -> None:
+    store, backend, _ = make_store()
+
+    def fence() -> None:
+        raise RuntimeError("lease expired")
+
+    store.set_fence(fence)
+    with pytest.raises(RuntimeError, match="lease expired"):
+        await store.commit_many({"k1": "v1"})
+    assert backend.upload_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# reset (#48): a demote -> external change -> promote cycle serves fresh
+# values and commits cleanly, instead of a stale-generation 412 crash.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reset_clears_cache_and_generation_serves_fresh_value() -> None:
+    backend = FakeGcsBackend()
+    store1, _, _ = make_store(backend)
+    await store1.commit("k", "v1")
+
+    # Another instance leads in between and advances the object.
+    store2, _, _ = make_store(backend)
+    await store2.commit("k", "external")
+
+    store1.reset()
+    assert await store1.load("k") == "external"
+    # Without reset this would 412 on store1's stale generation.
+    await store1.commit("k2", "v2")
+    assert await store1.load("k2") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_reset_before_any_load_is_a_noop() -> None:
+    store, _, _ = make_store()
+    store.reset()
+    assert await store.load("k1") is None
+
+
+# ---------------------------------------------------------------------------
+# bounded retry on transient errors (#44); precondition conflicts still fail
+# fast, unretried.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_survives_two_transient_errors_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gcs_store_module, "_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeGcsBackend()
+    store, _, _ = make_store(backend)
+
+    calls = {"n": 0}
+    original_upload = backend.upload
+
+    async def flaky_upload(
+        bucket: str, object_name: str, data: bytes, *, parameters: dict[str, str]
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise FakeGcsError(503, "service unavailable")
+        result: dict[str, Any] = await original_upload(
+            bucket, object_name, data, parameters=parameters
+        )
+        return result
+
+    monkeypatch.setattr(backend, "upload", flaky_upload)
+
+    await store.commit("k1", "v1")
+    assert await store.load("k1") == "v1"
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_load_survives_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gcs_store_module, "_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeGcsBackend()
+    seed, _, _ = make_store(backend)
+    await seed.commit("k1", "v1")
+
+    store, _, _ = make_store(backend)
+    calls = {"n": 0}
+    original_download_metadata = backend.download_metadata
+
+    async def flaky_download_metadata(bucket: str, object_name: str) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 1:
+            raise FakeGcsError(500, "internal error")
+        result: dict[str, Any] = await original_download_metadata(bucket, object_name)
+        return result
+
+    monkeypatch.setattr(backend, "download_metadata", flaky_download_metadata)
+
+    assert await store.load("k1") == "v1"
+
+
+@pytest.mark.asyncio
+async def test_commit_exhausts_retries_and_raises_underlying_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gcs_store_module, "_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MIN", 0.0)
+    monkeypatch.setattr(gcs_store_module, "_WAIT_MAX", 0.0)
+    backend = FakeGcsBackend()
+    store, _, _ = make_store(backend)
+
+    async def always_503(
+        bucket: str, object_name: str, data: bytes, *, parameters: dict[str, str]
+    ) -> dict[str, Any]:
+        raise FakeGcsError(503, "service unavailable")
+
+    monkeypatch.setattr(backend, "upload", always_503)
+
+    with pytest.raises(FakeGcsError):
+        await store.commit("k1", "v1")
+
+
+@pytest.mark.asyncio
+async def test_precondition_conflict_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gcs_store_module, "_MAX_ATTEMPTS", 5)
+    backend = FakeGcsBackend()
+    store1, _, _ = make_store(backend)
+    store2, _, _ = make_store(backend)
+
+    await store1.load("k1")
+    await store2.load("k1")
+    await store1.commit("k1", "from-1")
+
+    with pytest.raises(StateStoreConflictError):
+        await store2.commit("k1", "from-2")
+
+    # store1's successful upload + store2's single failed upload — no
+    # retries on the precondition conflict.
+    assert backend.upload_calls == 2
 
 
 @pytest.mark.asyncio
