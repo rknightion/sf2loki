@@ -45,7 +45,8 @@ sources:
 
 > **Change Data Capture caveat.** `/data/…ChangeEvent` topics are subscribable, but the
 > `ChangeEventHeader.changedFields` / `nulledFields` bitmap fields are shipped as their raw
-> encoded strings — sf2loki does not expand them into field-name lists.
+> encoded strings — sf2loki does not expand them into field-name lists. See
+> [§8](#8-custom-platform-events--change-data-capture) for the full custom-event/CDC treatment.
 
 **Picking a source per category:**
 - Use `pubsub` for low-latency, real-time categories that have a streaming topic.
@@ -465,3 +466,54 @@ keep `poll_interval` sane, scope `users` tightly, and watch
 Watermark/resume works exactly like the stored-object source: a `StartTime >=`
 cursor plus a rolling `Id` dedup window (checkpoint key `apexlog`), so restarts
 resume without gaps or (beyond at-least-once) duplicates.
+
+## 8. Custom platform events & Change Data Capture
+
+The Pub/Sub source subscribes to **any explicit topic**, not only the RTEM
+monitoring streams — so your own custom platform events and Change Data Capture
+(CDC) channels stream to Loki with **no engine change**. Just list them under
+`sources.pubsub.topics`. See
+[`examples/presets/custom-platform-events.yaml`](../examples/presets/custom-platform-events.yaml).
+
+**Channel name shapes:**
+
+| Shape | Example | What it is |
+| --- | --- | --- |
+| `/event/<Name>__e` | `/event/Order_Shipped__e` | a custom platform event (your app's own event) |
+| `/data/<Object>ChangeEvent` | `/data/AccountChangeEvent` | CDC on a standard object |
+| `/data/<Object>__ChangeEvent` | `/data/Employee__ChangeEvent` | CDC on a custom object (`__c` → `__ChangeEvent`) |
+| `/data/<Name>__chn` | `/data/MyChannel__chn` | a custom channel (a curated CDC/platform-event bundle) |
+
+```yaml
+sources:
+  pubsub:
+    enabled: true
+    replay_preset: LATEST          # tip-only; use EARLIEST for a one-time ~72h catch-up
+    topics:
+      - /event/Order_Shipped__e
+      - /data/AccountChangeEvent
+    # do NOT use "*" here — that discovers RTEM streams, not your custom/CDC channels
+```
+
+**Allocations (budget for it).** Unlike the RTEM monitoring streams
+(`LoginEventStream`, …), custom platform events and CDC events **count against
+your org's event-delivery / event-publishing allocations**. A busy CDC object
+(e.g. every `Account` write) can dwarf RTEM volume — subscribe to the specific
+channels you need rather than `"*"`, and reach for `sources.pubsub.sample` (a
+`topic-glob → keep-fraction` map, deterministic by `replay_id`) if one channel
+is still too hot. Point at the daily byte budget / rate caps in [§6](#6-controlling-cost)
+for the sink-side ceiling.
+
+**CDC bitmap fields ship unexpanded.** `/data/…ChangeEvent` payloads carry
+`ChangeEventHeader.changedFields` / `nulledFields` as their **raw encoded bitmap
+strings** — sf2loki does not expand them into field-name lists. The rest of the
+change event (the changed field values, `ChangeEventHeader.entityName`,
+`changeType`, `commitTimestamp`, …) is shipped as-is. The event time comes from
+`ChangeEventHeader.commitTimestamp` when there's no `EventDate`/`CreatedDate`.
+
+**Overlap guard.** Custom-event and CDC categories are **orthogonal** to the
+RTEM/ELF categories (a custom event `/event/Order_Shipped__e` normalises to
+`order_shipped__e`; CDC `/data/AccountChangeEvent` to `accountchange`), so they
+never collide with `Login`/`API`/etc. — you can stream them alongside any ELF or
+stored-object ingestion without tripping the [either/or guard](#1-overview-three-sources-one-channel-per-category)
+or setting `allow_overlap`.

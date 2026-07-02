@@ -44,6 +44,37 @@ def test_pubsub_and_stored_object_agree_on_category() -> None:
     assert category_of_pubsub("/event/LoginEventStream") == category_of_stored_object("LoginEvent")
 
 
+def test_category_of_pubsub_custom_platform_event() -> None:
+    # Custom platform events (`/event/X__e`) have no Event/EventStream suffix to
+    # strip, so the `__e` stem IS the category. Distinct per event -> they never
+    # collide with an RTEM stream or an ELF EventType.
+    assert category_of_pubsub("/event/Order_Shipped__e") == "order_shipped__e"
+    assert category_of_pubsub("/event/My_Event__e") == "my_event__e"
+
+
+def test_category_of_pubsub_change_data_capture() -> None:
+    # CDC topics (`/data/<Object>ChangeEvent`) drop the trailing "Event" but keep
+    # the "Change" marker, so a CDC category can't alias onto the RTEM stem of the
+    # same-named object (e.g. AccountChangeEvent -> "accountchange", not "account").
+    assert category_of_pubsub("/data/AccountChangeEvent") == "accountchange"
+    # Custom-object CDC keeps the `__` from the object's `__c` API name.
+    assert category_of_pubsub("/data/Employee__ChangeEvent") == "employee__change"
+
+
+def test_category_of_pubsub_custom_channel() -> None:
+    # Custom channels (`/data/X__chn`) have no strippable suffix -> stem is the key.
+    assert category_of_pubsub("/data/MyChannel__chn") == "mychannel__chn"
+
+
+def test_custom_platform_event_does_not_collide_with_elf() -> None:
+    # A custom platform event category is orthogonal to the RTEM/ELF categories,
+    # so streaming it alongside ELF ingestion never trips the overlap guard.
+    check_overlap(
+        pubsub_topics=["/event/Order_Shipped__e"],
+        elf_event_types=["Login", "API"],
+    )
+
+
 def test_category_of_login_history_aliases_to_login() -> None:
     # LoginHistory (a standard object, no Event/EventStream suffix) covers the
     # same login activity as LoginEvent/LoginEventStream/ELF "Login" — it must

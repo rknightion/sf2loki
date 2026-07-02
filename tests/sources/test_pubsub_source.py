@@ -253,6 +253,25 @@ def test_resolve_topics_dedupes() -> None:
     assert src.resolve_topics() == [TOPIC, "/event/Other"]
 
 
+def test_resolve_topics_globs_match_custom_and_cdc_channels() -> None:
+    """Include/exclude globs work against custom platform event (`__e`), CDC
+    (`ChangeEvent`) and custom-channel (`__chn`) topic names, not just RTEM."""
+    cfg = make_cfg(
+        topics=[
+            "/event/Order_Shipped__e",
+            "/event/My_Event__e",
+            "/data/AccountChangeEvent",
+            "/data/MyChannel__chn",
+        ],
+        include=["/event/*__e", "/data/*ChangeEvent"],
+        exclude=["*My_Event*"],
+    )
+    src = make_source(cfg=cfg)
+    # `/event/*__e` keeps the custom events, `/data/*ChangeEvent` keeps the CDC
+    # topic; the custom channel matches no include; My_Event is excluded.
+    assert src.resolve_topics() == ["/event/Order_Shipped__e", "/data/AccountChangeEvent"]
+
+
 def test_resolve_topics_empty_when_all_excluded() -> None:
     """Empty list returned when all topics are excluded."""
     cfg = make_cfg(

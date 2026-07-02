@@ -1,0 +1,69 @@
+# Preset: stream your own custom platform events and Change Data Capture (CDC)
+# to Loki via the Pub/Sub source.
+#
+# The Pub/Sub source subscribes to ANY explicit topic, not just the RTEM
+# monitoring streams — so custom platform events and CDC channels work with no
+# engine change. Channel name shapes:
+#   /event/My_Event__e            custom platform event  (your app's own events)
+#   /data/AccountChangeEvent      CDC on a standard object
+#   /data/Employee__ChangeEvent   CDC on a custom object (__c -> __ChangeEvent)
+#   /data/MyChannel__chn          custom channel (a curated CDC/PE bundle)
+#
+# ALLOCATIONS: unlike the RTEM monitoring streams (LoginEventStream, ...), custom
+# platform events and CDC events DO count against your org's event-delivery /
+# event-publishing allocations. A busy CDC object (e.g. every Account write) can
+# dwarf RTEM volume — subscribe to the specific channels you need, not "*", and
+# use `sample:` if a single channel is still too hot.
+#
+# CDC caveat: the ChangeEventHeader.changedFields / nulledFields bitmap fields
+# are shipped as their raw encoded strings — sf2loki does not expand them into
+# field-name lists. See docs/configuring-sources.md.
+#
+# OVERLAP: custom-event / CDC categories are orthogonal to the RTEM/ELF
+# categories, so the overlap guard never flags them against Login/API/etc.
+#
+# replay_preset: LATEST starts at the tip (only new events); EARLIEST replays the
+# channel's full retention window (~72h) on first run — pick EARLIEST for a
+# one-time catch-up, LATEST for steady-state. CUSTOM resumes from the stored
+# replay_id and falls back to LATEST when there isn't one.
+#
+# This is a fragment, not a runnable standalone file — merge into config.yaml
+# (see config.example.yaml for the full schema, auth, sink, state, service).
+
+salesforce:
+  environment: production
+  auth_mode: jwt_bearer
+  client_id: ${SF_CLIENT_ID}
+  username: svc@example.com
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+
+sources:
+  pubsub:
+    enabled: true
+    replay_preset: LATEST
+    # Explicit channels only — do NOT use "*" here (that discovers RTEM streams,
+    # not your custom/CDC channels, and would over-subscribe against allocations).
+    topics:
+      - /event/Order_Shipped__e
+      - /event/Job_Completed__e
+      - /data/AccountChangeEvent
+    include: ["*"]
+    exclude: []
+    # Example: a single hot channel sampled to 25% (deterministic by replay_id,
+    # so a replay keeps the same rows). Sampled-out events still checkpoint.
+    sample: {/data/AccountChangeEvent: 0.25}
+
+sink:
+  type: loki
+  loki:
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    # Route high-value payload fields to structured metadata (queryable, but NOT
+    # stream labels — keep cardinality off the labels). CreatedById is on every
+    # platform/CDC event; add your own custom field API names here.
+    structured_metadata_fields:
+      - CreatedById
+      - Order_Number__c
+      - Job_Id__c

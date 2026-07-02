@@ -17,7 +17,10 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   overlap guard refuses to start if a category is enabled on more than one (bypass: `allow_overlap`).
   A separate opt-in **ApexLog** source (`sources.apexlog`) streams Apex debug logs via the Tooling
   API for developer debugging — off by default, one API call per log body (see
-  [configuring-sources §7](docs/configuring-sources.md#7-apex-debug-logs-apexlog)).
+  [configuring-sources §7](docs/configuring-sources.md#7-apex-debug-logs-apexlog)). The Pub/Sub
+  source also carries **your own custom platform events** (`/event/My_Event__e`) and **Change Data
+  Capture** channels (`/data/AccountChangeEvent`) — any explicit topic, no engine change (see
+  [configuring-sources §8](docs/configuring-sources.md#8-custom-platform-events--change-data-capture)).
 - **Loki sink**: protobuf + snappy by default (canonical push wire format), JSON + gzip as a debug
   encoding. Both carry structured metadata.
 - **Cardinality discipline**: a fixed label allowlist (`job`, `source`, `event_type`, `sf_org_id`,
@@ -363,6 +366,12 @@ the relevant keys into your `config.yaml` alongside sink/state/service — see
   shown as commented blocks (pick exactly one — they're the same overlap-guard category).
 - [`setup-audit-trail.yaml`](examples/presets/setup-audit-trail.yaml) — ingest admin/config change
   history via `SetupAuditTrail` polling.
+- [`custom-platform-events.yaml`](examples/presets/custom-platform-events.yaml) — stream your own
+  custom platform events (`/event/My_Event__e`) and Change Data Capture channels
+  (`/data/AccountChangeEvent`, `/data/MyChannel__chn`) via `sources.pubsub`. No engine change —
+  the source subscribes to any explicit topic. Note custom/CDC events count against event-delivery
+  allocations (RTEM streams don't), and CDC bitmap fields ship unexpanded — see
+  [`docs/configuring-sources.md`](docs/configuring-sources.md).
 
 ### Metrics (OTLP)
 
