@@ -7,15 +7,21 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import grpc
 import grpc.aio
 import pytest
 import structlog.testing
 
+from sf2loki.auth.jwt_auth import AccessToken
 from sf2loki.config import PubSubConfig
+from sf2loki.model import CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
-from sf2loki.salesforce.pubsub_client import DecodedEvent, KeepaliveEvent, preset_for
+from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
+from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
+from sf2loki.salesforce.avro_codec import SchemaFetchError
+from sf2loki.salesforce.pubsub_client import DecodedEvent, KeepaliveEvent, PubSubClient, preset_for
 from sf2loki.sources.pubsub_source import PubSubSource, _jitter
 
 # ---------------------------------------------------------------------------
@@ -1487,3 +1493,562 @@ async def test_hash_transform_redacts_payload_in_line() -> None:
     parsed = json.loads(entries[0].line)
     assert parsed["UserId"] != "005SENSITIVE"
     assert len(parsed["UserId"]) == 16
+
+
+# ---------------------------------------------------------------------------
+# Deterministic timestamp fallback for fieldless events (issue #42)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fieldless_event_gets_stable_timestamp_on_redelivery() -> None:
+    """A custom/CDC event with no parsable time field (#42) gets a STABLE
+    per-topic fallback timestamp — the SAME value both times it's delivered
+    (e.g. redelivered after a reconnect) — not a fresh now() each time, which
+    would break Loki's byte-identical dedup on replay. Also counted in
+    timestamp_fallbacks (unlike the old unchecked extract_timestamp call)."""
+    stop = asyncio.Event()
+    # Recent (within the 1h clamp window) so the fallback isn't itself
+    # re-clamped to a fresh (non-deterministic) now() on each lookup.
+    recent_ms = int(datetime.now(UTC).timestamp() * 1000)
+    good = DecodedEvent(
+        topic=TOPIC, replay_id=b"\x00\x01", schema_id="s", payload={"EventDate": recent_ms}
+    )
+    fieldless = DecodedEvent(
+        topic=TOPIC, replay_id=b"\x00\x02", schema_id="s", payload={"Foo": "bar"}
+    )
+    client = ScriptedClient(
+        [
+            [good, fieldless, _rpc_error(grpc.StatusCode.UNAVAILABLE)],
+            [fieldless],  # redelivered after the reconnect
+        ]
+    )
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]), client, sm_fields=[], reconnect_backoff=0.01, metrics=metrics
+    )
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=3)
+
+    assert len(entries) == 3
+    first_fieldless, redelivered_fieldless = entries[1], entries[2]
+    assert first_fieldless.timestamp == redelivered_fieldless.timestamp
+    assert first_fieldless.timestamp == datetime.fromtimestamp(recent_ms / 1000, tz=UTC)
+    val = metrics.registry.get_sample_value(
+        "sf2loki_timestamp_fallbacks_total", {"source": "pubsub"}
+    )
+    assert val == 2.0
+
+
+@pytest.mark.asyncio
+async def test_field_derived_timestamp_never_counts_fallback() -> None:
+    """An event WITH a parsable time field never counts a fallback."""
+    stop = asyncio.Event()
+    ev = make_event(replay_id=REPLAY_ID_1)  # has EventDate
+    client = FakePubSubClient({TOPIC: [ev]}, stop_after_first=stop)
+    metrics = Metrics()
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client, metrics=metrics)
+    state = FakeCheckpointStore()
+
+    await collect_n(src, state, stop, n=1)
+
+    assert (
+        metrics.registry.get_sample_value("sf2loki_timestamp_fallbacks_total", {"source": "pubsub"})
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint load moved inside the reconnect loop (issue #45)
+# ---------------------------------------------------------------------------
+
+
+class _FlakyLoadCheckpointStore:
+    """CheckpointStore whose load() raises N times before succeeding."""
+
+    def __init__(self, fail_times: int, value: str | None = None) -> None:
+        self._fail_times = fail_times
+        self._calls = 0
+        self._value = value
+        self.committed: dict[str, str] = {}
+
+    async def load(self, key: str) -> str | None:
+        self._calls += 1
+        if self._calls <= self._fail_times:
+            raise RuntimeError("transient state store error")
+        return self._value
+
+    async def commit(self, key: str, value: str) -> None:
+        self.committed[key] = value
+
+
+@pytest.mark.asyncio
+async def test_transient_checkpoint_load_error_retries_without_wedging() -> None:
+    """A state.load() that raises transiently must back off and retry — not kill
+    the topic task without its sentinel (#45), which would wedge events()
+    forever and let the process exit 0 under docker restart:on-failure."""
+    stop = asyncio.Event()
+    state = _FlakyLoadCheckpointStore(fail_times=2)
+    client = FakePubSubClient({TOPIC: [make_event()]}, stop_after_first=stop)
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client)
+
+    # wait_for proves events() actually terminates (doesn't wedge) once the
+    # load eventually succeeds and the stream delivers + stop fires.
+    entries = await collect_n(src, state, stop, n=1)  # type: ignore[arg-type]
+
+    assert len(entries) == 1
+    assert state._calls >= 3, "the load must have been retried after failing"
+
+
+@pytest.mark.asyncio
+async def test_corrupt_stored_replay_id_falls_back_with_metric_and_error_log() -> None:
+    """A corrupt (non-base64) stored checkpoint value is NOT retried forever —
+    it falls back to the configured replay_preset immediately, with an ERROR
+    log and the checkpoint_load_errors metric (#45)."""
+    stop = asyncio.Event()
+    state = FakeCheckpointStore({f"pubsub:{TOPIC}": "not-valid-base64!!!"})
+    client = FakePubSubClient({TOPIC: [make_event()]}, stop_after_first=stop)
+    metrics = Metrics()
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client, metrics=metrics)
+
+    with structlog.testing.capture_logs() as captured:
+        entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    val = metrics.registry.get_sample_value(
+        "sf2loki_checkpoint_load_errors_total", {"source": "pubsub"}
+    )
+    assert val == 1.0
+    errors = [e for e in captured if e["log_level"] == "error" and "corrupt" in e["event"]]
+    assert errors, "corrupt checkpoint value was not logged at ERROR"
+    # Falls back to configured preset (LATEST, make_cfg's default) — not CUSTOM.
+    assert client.calls[0]["replay_preset"] == preset_for("LATEST")
+    assert client.calls[0]["replay_id"] == b""
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_load_never_retried_after_first_success() -> None:
+    """Once the position is loaded, later reconnects must NOT reload from state
+    (they resume from the in-memory replay_id, not the original checkpoint)."""
+    stop = asyncio.Event()
+    state = _FlakyLoadCheckpointStore(fail_times=0)
+    # No stored id: several reconnects happen (empty stream each time after the
+    # first delivers one event), but load() must only be called once.
+    client = FakePubSubClient({TOPIC: [make_event()]})
+    src = make_source(cfg=make_cfg(topics=[TOPIC]), client=client)
+
+    async def consume() -> None:
+        async for _ in src.events(state, stop):  # type: ignore[arg-type]
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.1)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert state._calls == 1, "the checkpoint must be loaded exactly once, not per reconnect"
+
+
+# ---------------------------------------------------------------------------
+# Replay corruption gated on the error trailer, not bare INVALID_ARGUMENT (#65)
+# ---------------------------------------------------------------------------
+
+
+def _rpc_error_with_trailer(
+    code: grpc.StatusCode, trailer: list[tuple[str, str]]
+) -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(
+        code, grpc.aio.Metadata(), grpc.aio.Metadata(*trailer), "rejected", ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_trailer_confirming_corruption_falls_back_to_earliest() -> None:
+    """When the trailer explicitly confirms replay-id corruption/expiry, the
+    EARLIEST fallback fires (same as the no-trailer legacy heuristic)."""
+    stored_b64 = base64.b64encode(STORED_REPLAY_ID).decode("ascii")
+    state = FakeCheckpointStore({f"pubsub:{TOPIC}": stored_b64})
+    stop = asyncio.Event()
+    client = ScriptedClient(
+        [
+            _rpc_error_with_trailer(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                [("error-code", "sf.pubsub.fetch.replayid.corrupted")],
+            ),
+            [make_event(replay_id=REPLAY_ID_1)],
+        ]
+    )
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        metrics=metrics,
+    )
+
+    entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    assert client.calls[1]["replay_preset"] == preset_for("EARLIEST")
+    assert client.calls[1]["replay_id"] == b""
+    val = metrics.registry.get_sample_value(
+        "sf2loki_pubsub_replay_fallbacks_total", {"topic": TOPIC}
+    )
+    assert val == 1.0
+
+
+@pytest.mark.asyncio
+async def test_trailer_not_confirming_corruption_keeps_replay_position() -> None:
+    """An INVALID_ARGUMENT while resuming, whose trailer does NOT mention
+    replay-id corruption, must NOT trigger the EARLIEST re-drain — that would
+    be a large, silent, misattributed re-ingest for an unrelated error (e.g. a
+    malformed subscribe argument). Retry normally, keeping the replay id."""
+    stored_b64 = base64.b64encode(STORED_REPLAY_ID).decode("ascii")
+    state = FakeCheckpointStore({f"pubsub:{TOPIC}": stored_b64})
+    stop = asyncio.Event()
+    client = ScriptedClient(
+        [
+            _rpc_error_with_trailer(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                [("error-message", "num_requested must be positive")],
+            ),
+            [make_event(replay_id=REPLAY_ID_1)],
+        ]
+    )
+    metrics = Metrics()
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,  # type: ignore[arg-type]
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        metrics=metrics,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        entries = await collect_n(src, state, stop, n=1)
+
+    assert len(entries) == 1
+    # Replay position kept — still CUSTOM with the originally stored id.
+    assert client.calls[1]["replay_preset"] == preset_for("CUSTOM")
+    assert client.calls[1]["replay_id"] == STORED_REPLAY_ID
+    assert (
+        metrics.registry.get_sample_value("sf2loki_pubsub_replay_fallbacks_total", {"topic": TOPIC})
+        is None
+    )
+    errors = [e for e in captured if e["log_level"] == "error"]
+    assert errors, "the not-confirmed INVALID_ARGUMENT must still be logged at ERROR"
+    assert "does not confirm" in errors[0]["event"]
+
+
+# ---------------------------------------------------------------------------
+# Bridge queue byte budget (issue #56)
+# ---------------------------------------------------------------------------
+
+
+def _make_entry(line: str, key: str = TOPIC) -> LogEntry:
+    return LogEntry(
+        timestamp=datetime.now(UTC),
+        labels={},
+        line=line,
+        structured_metadata={},
+        checkpoint=CheckpointToken(key=f"pubsub:{key}", value="v"),
+    )
+
+
+def _make_checkpoint_only_entry(key: str = TOPIC) -> LogEntry:
+    return LogEntry(
+        timestamp=datetime.now(UTC),
+        labels={},
+        line="",
+        structured_metadata={},
+        checkpoint=CheckpointToken(key=f"pubsub:{key}", value="v"),
+        checkpoint_only=True,
+    )
+
+
+def test_pubsub_source_accepts_bridge_max_bytes_kwarg() -> None:
+    """PubSubSource's ctor accepts bridge_max_bytes (default 0 = disabled, #56)."""
+    src = PubSubSource(make_cfg(), FakePubSubClient({}), sm_fields=[], bridge_max_bytes=1024)
+    assert src._bridge_max_bytes == 1024
+    assert PubSubSource(make_cfg(), FakePubSubClient({}), sm_fields=[])._bridge_max_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_charge_blocks_until_release_frees_budget() -> None:
+    """_bridge_charge blocks a producer once queued bytes reach the budget,
+    until _bridge_release frees enough headroom (mirrors app.py's pipeline
+    byte-budget admission rule: admit while under budget, so one oversized
+    entry doesn't deadlock the queue)."""
+    src = PubSubSource(make_cfg(), FakePubSubClient({}), sm_fields=[], bridge_max_bytes=100)
+    big = _make_entry("x" * 200)  # cost > budget alone — still admitted (first charge).
+    await asyncio.wait_for(src._bridge_charge(big), timeout=1.0)
+
+    small = _make_entry("y")
+    blocked = asyncio.create_task(src._bridge_charge(small))
+    await asyncio.sleep(0.05)
+    assert not blocked.done(), "producer should block while over budget"
+
+    await src._bridge_release(big)
+    await asyncio.wait_for(blocked, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_bridge_charge_disabled_when_budget_zero() -> None:
+    """bridge_max_bytes=0 (the default) disables byte accounting entirely."""
+    src = PubSubSource(make_cfg(), FakePubSubClient({}), sm_fields=[])  # default 0
+    big = _make_entry("x" * 10_000)
+    # Never blocks, regardless of size, with no prior release.
+    await asyncio.wait_for(src._bridge_charge(big), timeout=0.1)
+    await asyncio.wait_for(src._bridge_charge(big), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_only_and_sentinel_entries_bypass_byte_budget() -> None:
+    """Keepalive/dropped/sampled-out (checkpoint_only) entries and the queue
+    sentinel are free — they must never block on, or count against, the
+    bridge byte budget (mirrors the pipeline's own _entry_cost exemption)."""
+    src = PubSubSource(make_cfg(), FakePubSubClient({}), sm_fields=[], bridge_max_bytes=1)
+    await asyncio.wait_for(src._bridge_charge(_make_checkpoint_only_entry()), timeout=0.1)
+    await asyncio.wait_for(src._bridge_charge(None), timeout=0.1)
+    assert src._bridge_queued_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_max_bytes_end_to_end_does_not_lose_or_hang() -> None:
+    """A small bridge_max_bytes still delivers every event through events() —
+    it throttles, it never drops or hangs (#56)."""
+    events = [make_event(replay_id=bytes([i])) for i in range(5)]
+    stop = asyncio.Event()
+    client = FakePubSubClient({TOPIC: events}, stop_after_first=stop)
+    src = PubSubSource(
+        make_cfg(topics=[TOPIC]),
+        client,
+        sm_fields=[],
+        reconnect_backoff=0.01,
+        bridge_max_bytes=1,  # smaller than a single entry — forces one-at-a-time
+    )
+    state = FakeCheckpointStore()
+
+    entries = await collect_n(src, state, stop, n=5)
+    assert len(entries) == 5
+
+
+# ---------------------------------------------------------------------------
+# PubSubClient: decode_errors topic label + stuck-topic detection (issue #43)
+# ---------------------------------------------------------------------------
+
+_STALL_SCHEMA: dict[str, object] = {
+    "type": "record",
+    "name": "T",
+    "fields": [{"name": "Id", "type": "string"}],
+}
+_STALL_SCHEMA_ID = "stall-schema"
+_STALL_SCHEMA_JSON = json.dumps(_STALL_SCHEMA)
+
+
+class _FakeTokenProvider:
+    """Minimal stub satisfying TokenProvider's async interface."""
+
+    def __init__(self) -> None:
+        self._token = AccessToken(
+            value="tok-test",
+            instance_url="https://test.salesforce.com",
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def token(self) -> AccessToken:
+        return self._token
+
+    async def org_id(self) -> str:
+        return "00Dtest000org"
+
+    def invalidate(self) -> None:
+        pass
+
+
+def _pubsub_cfg() -> PubSubConfig:
+    return PubSubConfig(
+        enabled=True,
+        endpoint="ignored-in-tests",
+        default_num_requested=10,
+        replay_preset="LATEST",
+        topics=["/event/StallEventStream"],
+    )
+
+
+class _AllBadBatchesServicer(pb_grpc.PubSubServicer):
+    """Yields N FetchResponses, each with one undecodable event, then closes."""
+
+    def __init__(self, n_batches: int) -> None:
+        self._n_batches = n_batches
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        return pb.SchemaInfo(schema_json=_STALL_SCHEMA_JSON, schema_id=request.schema_id)
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        sent = 0
+        async for _req in request_iterator:
+            if sent >= self._n_batches:
+                return
+            sent += 1
+            yield pb.FetchResponse(
+                events=[
+                    pb.ConsumerEvent(
+                        event=pb.ProducerEvent(
+                            id=f"evt-{sent}",
+                            schema_id=_STALL_SCHEMA_ID,
+                            payload=b"\xff\xff\xff not valid avro",
+                        ),
+                        replay_id=bytes([sent]),
+                    )
+                ],
+                latest_replay_id=bytes([sent]),
+                rpc_id=f"rpc-{sent}",
+                pending_num_requested=5,
+            )
+
+
+class _SchemaFetchAlwaysFailsServicer(pb_grpc.PubSubServicer):
+    """GetSchema always aborts; Subscribe delivers one event per call."""
+
+    async def GetSchema(
+        self, request: pb.SchemaRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> pb.SchemaInfo:
+        await context.abort(grpc.StatusCode.UNAVAILABLE, "schema registry down")
+        return pb.SchemaInfo()  # pragma: no cover - abort() never returns
+
+    async def Subscribe(  # type: ignore[override]
+        self,
+        request_iterator: AsyncIterator[pb.FetchRequest],
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> AsyncIterator[pb.FetchResponse]:
+        async for _req in request_iterator:
+            yield pb.FetchResponse(
+                events=[
+                    pb.ConsumerEvent(
+                        event=pb.ProducerEvent(
+                            id="evt-1", schema_id=_STALL_SCHEMA_ID, payload=b"irrelevant"
+                        ),
+                        replay_id=b"\x01",
+                    )
+                ],
+                latest_replay_id=b"\x01",
+                rpc_id="rpc-1",
+                pending_num_requested=5,
+            )
+            return
+
+
+async def _make_pubsub_client(
+    servicer: pb_grpc.PubSubServicer, metrics: Metrics | None = None
+) -> tuple[grpc.aio.Server, PubSubClient]:
+    server: grpc.aio.Server = grpc.aio.server()
+    pb_grpc.add_PubSubServicer_to_server(servicer, server)
+    port: int = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    channel: grpc.aio.Channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+    client = PubSubClient(_pubsub_cfg(), _FakeTokenProvider(), channel=channel, metrics=metrics)
+    return server, client
+
+
+@pytest.mark.asyncio
+async def test_decode_errors_metric_carries_topic_label() -> None:
+    """decode_errors is labeled by topic (#43) — without it you can't tell
+    which topic is losing events."""
+    servicer = _AllBadBatchesServicer(n_batches=1)
+    metrics = Metrics()
+    server, client = await _make_pubsub_client(servicer, metrics)
+    topic = "/event/StallEventStream"
+
+    try:
+        async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+            pass
+        val = metrics.registry.get_sample_value(
+            "sf2loki_decode_errors_total", {"reason": "EOFError", "topic": topic}
+        )
+        assert val == 1.0
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_all_failed_batches_flag_decode_stall() -> None:
+    """N consecutive batches at 100% decode failure on one topic is a distinct
+    stalled state (#43): pubsub_decode_stalls fires + an ERROR log, once the
+    threshold is reached — not before."""
+    servicer = _AllBadBatchesServicer(n_batches=3)
+    metrics = Metrics()
+    server, client = await _make_pubsub_client(servicer, metrics)
+    topic = "/event/StallEventStream"
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+                pass
+        val = metrics.registry.get_sample_value(
+            "sf2loki_pubsub_decode_stalls_total", {"topic": topic}
+        )
+        assert val == 1.0
+        errors = [e for e in captured if e["log_level"] == "error" and "stuck" in e["event"]]
+        assert errors, "a stuck topic must be logged at ERROR"
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fewer_than_threshold_failed_batches_does_not_flag_stall() -> None:
+    """Below the consecutive-failure threshold, no stall is flagged — a single
+    bad batch (or two) must not false-positive."""
+    servicer = _AllBadBatchesServicer(n_batches=2)
+    metrics = Metrics()
+    server, client = await _make_pubsub_client(servicer, metrics)
+    topic = "/event/StallEventStream"
+
+    try:
+        async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+            pass
+        assert (
+            metrics.registry.get_sample_value(
+                "sf2loki_pubsub_decode_stalls_total", {"topic": topic}
+            )
+            is None
+        )
+    finally:
+        await server.stop(None)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_schema_fetch_failures_across_reconnects_flag_stall() -> None:
+    """M consecutive schema-fetch failures on one topic — even across SEPARATE
+    subscribe() calls (reconnects), since a SchemaFetchError ends the current
+    call — is a distinct stuck state (#43), not indistinguishable from healthy
+    reconnect churn (which only increments pubsub_reconnects, owned by the
+    source, not this client)."""
+    servicer = _SchemaFetchAlwaysFailsServicer()
+    metrics = Metrics()
+    server, client = await _make_pubsub_client(servicer, metrics)
+    topic = "/event/StallEventStream"
+
+    try:
+        for _ in range(3):
+            with pytest.raises(SchemaFetchError):
+                async for _ in client.subscribe(topic, replay_preset=pb.LATEST):
+                    pass
+        val = metrics.registry.get_sample_value(
+            "sf2loki_pubsub_decode_stalls_total", {"topic": topic}
+        )
+        assert val == 1.0
+    finally:
+        await server.stop(None)
+        await client.aclose()

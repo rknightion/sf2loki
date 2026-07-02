@@ -17,6 +17,7 @@ import grpc
 import grpc.aio
 
 from sf2loki.config import PubSubConfig
+from sf2loki.obs.logging import get_logger
 from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce._generated import pubsub_api_pb2 as pb
 from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
@@ -25,9 +26,42 @@ from sf2loki.salesforce.avro_codec import AvroCodec, SchemaFetchError
 if TYPE_CHECKING:
     from sf2loki.auth.jwt_auth import AccessToken, TokenProvider
 
+log = get_logger(__name__)
+
 # Low-watermark fraction: send a top-up when outstanding credits drop below
 # this fraction of the originally requested batch size.
 _TOPUP_THRESHOLD_FRACTION = 0.5
+
+# Consecutive-failure thresholds (#43) at which a topic is considered STUCK
+# making zero progress, distinct from healthy reconnect churn:
+#   - N consecutive FetchResponse batches where EVERY event failed decode
+#     (systemic schema/codec incompatibility — every event dropped, checkpoint
+#     still advances past them, so nothing else signals this).
+#   - M consecutive schema-fetch failures on the topic (a permanently
+#     unfetchable schema looks identical to transient reconnect churn
+#     otherwise — only ``pubsub_reconnects`` climbs).
+# Chosen small enough to alert promptly, large enough that a single blip
+# (one bad batch, one slow GetSchema call) doesn't false-positive.
+_DECODE_FAILURE_STALL_BATCHES = 3
+_SCHEMA_FETCH_STALL_FAILURES = 3
+
+
+@dataclass
+class _TopicHealth:
+    """Per-topic consecutive-failure counters, persisted across reconnects (#43).
+
+    Lives on the client instance (keyed by topic) rather than inside the
+    ``subscribe()`` generator body, because a schema-fetch failure ends that
+    generator (propagating to the caller's reconnect loop) — a fresh
+    generator on the next reconnect would otherwise reset the streak to zero,
+    hiding a topic that is permanently stuck.
+    """
+
+    consecutive_decode_failure_batches: int = 0
+    decode_stall_flagged: bool = False
+    consecutive_schema_fetch_failures: int = 0
+    schema_stall_flagged: bool = False
+
 
 # Application-level watchdog: Salesforce guarantees SOME FetchResponse (events
 # or an empty keepalive batch with latest_replay_id) at least every 270s while
@@ -178,6 +212,8 @@ class PubSubClient:
             else None
         )
         self._codec = AvroCodec(self.get_schema)
+        # Per-topic stuck-progress detection (#43); persists across reconnects.
+        self._topic_health: dict[str, _TopicHealth] = {}
 
     def _stub(self) -> Any:
         """Return the gRPC stub, creating the owned channel lazily on first use.
@@ -303,7 +339,10 @@ class PubSubClient:
                         "stream presumed dead"
                     ) from None
 
+                batch_total = 0
+                batch_decode_failures = 0
                 for ce in response.events:
+                    batch_total += 1
                     schema_id: str = ce.event.schema_id
                     try:
                         decoded_payload = await self._codec.decode(schema_id, ce.event.payload)
@@ -312,11 +351,16 @@ class PubSubClient:
                         # NOT a poison payload: skipping would advance the
                         # checkpoint past the event (silent loss). Propagate so
                         # the source reconnects and replays from the checkpoint.
+                        self._note_schema_fetch_failure(topic)
                         raise
                     except Exception as exc:
                         # One malformed event must not kill the whole topic stream.
-                        self._metrics.decode_errors.labels(reason=type(exc).__name__).inc()
+                        batch_decode_failures += 1
+                        self._metrics.decode_errors.labels(
+                            reason=type(exc).__name__, topic=topic
+                        ).inc()
                         continue
+                    self._note_schema_fetch_success(topic)
                     self._metrics.schema_cache_size.set(self._codec.cache_size())
                     yield DecodedEvent(
                         topic=topic,
@@ -324,6 +368,7 @@ class PubSubClient:
                         schema_id=schema_id,
                         payload=decoded_payload,
                     )
+                self._note_decode_batch(topic, batch_total, batch_decode_failures)
 
                 if not response.events and response.latest_replay_id:
                     # Keepalive: empty batch whose latest_replay_id is a valid
@@ -395,6 +440,60 @@ class PubSubClient:
         """
         if exc.code() == grpc.StatusCode.UNAUTHENTICATED:
             self._tokens.invalidate()
+
+    def _health(self, topic: str) -> _TopicHealth:
+        return self._topic_health.setdefault(topic, _TopicHealth())
+
+    def _note_schema_fetch_failure(self, topic: str) -> None:
+        """Track a schema-fetch failure on *topic*; flag+alert if stuck (#43)."""
+        health = self._health(topic)
+        health.consecutive_schema_fetch_failures += 1
+        if (
+            health.consecutive_schema_fetch_failures >= _SCHEMA_FETCH_STALL_FAILURES
+            and not health.schema_stall_flagged
+        ):
+            health.schema_stall_flagged = True
+            log.error(
+                "pubsub topic stuck: repeated schema-fetch failures — the schema looks "
+                "permanently unfetchable; the topic is replaying the same position forever",
+                topic=topic,
+                consecutive_failures=health.consecutive_schema_fetch_failures,
+            )
+            self._metrics.pubsub_decode_stalls.labels(topic=topic).inc()
+
+    def _note_schema_fetch_success(self, topic: str) -> None:
+        """A successful decode proves the schema is fetchable — reset the streak."""
+        health = self._health(topic)
+        health.consecutive_schema_fetch_failures = 0
+        health.schema_stall_flagged = False
+
+    def _note_decode_batch(self, topic: str, total: int, failures: int) -> None:
+        """Track a batch's decode outcome on *topic*; flag+alert if stuck (#43).
+
+        A no-op for empty batches (keepalives) — they signal neither progress
+        nor its absence.
+        """
+        if total == 0:
+            return
+        health = self._health(topic)
+        if failures == total:
+            health.consecutive_decode_failure_batches += 1
+            if (
+                health.consecutive_decode_failure_batches >= _DECODE_FAILURE_STALL_BATCHES
+                and not health.decode_stall_flagged
+            ):
+                health.decode_stall_flagged = True
+                log.error(
+                    "pubsub topic stuck: consecutive batches at 100% decode failure — a "
+                    "systemic schema/codec incompatibility is dropping every event on "
+                    "this topic",
+                    topic=topic,
+                    consecutive_batches=health.consecutive_decode_failure_batches,
+                )
+                self._metrics.pubsub_decode_stalls.labels(topic=topic).inc()
+        else:
+            health.consecutive_decode_failure_batches = 0
+            health.decode_stall_flagged = False
 
     async def _metadata(self) -> list[tuple[str, str]]:
         """Build the gRPC metadata list required for every Salesforce RPC call."""

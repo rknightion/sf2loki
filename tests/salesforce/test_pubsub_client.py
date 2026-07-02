@@ -667,8 +667,10 @@ async def test_subscribe_skips_malformed_event_and_counts_decode_error(
         # The good event still comes through despite the bad one preceding it.
         assert len(events) == 1
         assert events[0].payload == {"Id": "ok", "EventDate": "2024-01-01T00:00:00Z"}
+        # decode_errors now carries a topic label (#43) so a losing topic is
+        # identifiable; the sample is keyed by (reason, topic).
         decode_errors = metrics.registry.get_sample_value(
-            "sf2loki_decode_errors_total", {"reason": "EOFError"}
+            "sf2loki_decode_errors_total", {"reason": "EOFError", "topic": "/event/X"}
         )
         assert decode_errors == 1.0
     finally:

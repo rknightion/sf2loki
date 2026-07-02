@@ -29,7 +29,7 @@ from sf2loki.salesforce.pubsub_client import (
     PubSubClient,
     preset_for,
 )
-from sf2loki.shaping import extract_timestamp, route_fields, should_keep
+from sf2loki.shaping import extract_timestamp_checked, route_fields, should_keep
 from sf2loki.sources.overlap import category_of_pubsub
 from sf2loki.transforms import compile_rules
 
@@ -46,6 +46,26 @@ TOPIC_WILDCARD = "*"
 # topic list (with an ERROR log — a transient discovery failure must not
 # silently shrink the subscription set for the process lifetime).
 _DISCOVERY_ATTEMPTS = 3
+
+# Approximate per-entry overhead (dict/label/checkpoint scaffolding) added to
+# the raw line length when byte-charging the internal bridge queue (#56).
+# Mirrors app.py's pipeline-level _QUEUE_ENTRY_OVERHEAD accounting so the two
+# budgets reason about memory the same way; kept as an independent constant
+# here since the bridge queue is upstream of and separate from the pipeline's
+# own byte budget.
+_BRIDGE_ENTRY_OVERHEAD = 64
+
+
+def _entry_bytes(item: LogEntry | None) -> int:
+    """Approximate bytes *item* holds in the bridge queue.
+
+    ``None`` (the sentinel) and checkpoint_only entries (keepalive/dropped/
+    sampled-out tokens with an empty line) are free — they must never
+    contribute to, or block on, the bridge byte budget.
+    """
+    if item is None or item.checkpoint_only:
+        return 0
+    return len(item.line.encode("utf-8")) + _BRIDGE_ENTRY_OVERHEAD
 
 
 def _jitter(backoff: float) -> float:
@@ -79,6 +99,13 @@ class PubSubSource:
         Bound for the internal queue.  When full, producers block — this is
         deliberate backpressure: the gRPC stream stalls and Salesforce stops
         sending new events.
+    bridge_max_bytes:
+        Byte budget for the internal bridge queue (independent of
+        *queue_maxsize*'s entry-count bound) — see #56. A topic producer
+        blocks once queued bytes reach this budget, until :meth:`events`
+        dequeues enough to free headroom. ``0`` (default) disables byte
+        accounting entirely (entry-count bound via *queue_maxsize* still
+        applies).
     reconnect_backoff:
         Initial reconnect delay in seconds (doubles on each attempt up to
         *max_backoff*).
@@ -102,6 +129,7 @@ class PubSubSource:
         *,
         sm_fields: Sequence[str],
         queue_maxsize: int = 1000,
+        bridge_max_bytes: int = 0,
         reconnect_backoff: float = 1.0,
         max_backoff: float = 30.0,
         metrics: Metrics | None = None,
@@ -113,6 +141,9 @@ class PubSubSource:
         self._client = client
         self._sm_fields = list(sm_fields)
         self._queue_maxsize = queue_maxsize
+        self._bridge_max_bytes = bridge_max_bytes
+        self._bridge_queued_bytes = 0
+        self._bridge_byte_cond = asyncio.Condition()
         self._reconnect_backoff = reconnect_backoff
         self._max_backoff = max_backoff
         self._metrics = metrics if metrics is not None else Metrics()
@@ -122,6 +153,12 @@ class PubSubSource:
         self._transforms = compile_rules(
             cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
         )
+        # Per-topic stable timestamp fallback for fieldless events (#42): the
+        # most recent field-derived timestamp seen on the topic, so a
+        # redelivered fieldless event (e.g. after a reconnect) gets the SAME
+        # fallback both times instead of a fresh now() — required for Loki's
+        # byte-identical dedup to collapse the at-least-once duplicate.
+        self._last_good_ts: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -290,6 +327,9 @@ class PubSubSource:
                 if item is None:
                     sentinels_remaining -= 1
                 else:
+                    # Item is leaving the bridge queue for the pipeline's own
+                    # (separate) byte budget — free its bridge-queue bytes now.
+                    await self._bridge_release(item)
                     yield item
         finally:
             # Cancel any tasks still running and await them to avoid leaks.
@@ -352,6 +392,44 @@ class PubSubSource:
         finally:
             await self._put_sentinel(queue)
 
+    async def _bridge_charge(self, item: LogEntry | None) -> None:
+        """Producer side: wait for bridge byte-budget headroom, then account *item* (#56).
+
+        Mirrors app.py's pipeline-level ``_charge``: admits while the queue is
+        *under* budget (an admitted item may overshoot it), so a single item
+        larger than the whole budget is still admitted once the queue drains
+        rather than deadlocking. A no-op when *bridge_max_bytes* is 0
+        (disabled) or *item* is free (sentinel / checkpoint_only).
+        """
+        if self._bridge_max_bytes <= 0:
+            return
+        cost = _entry_bytes(item)
+        if cost == 0:
+            return
+        async with self._bridge_byte_cond:
+            await self._bridge_byte_cond.wait_for(
+                lambda: self._bridge_queued_bytes < self._bridge_max_bytes
+            )
+            self._bridge_queued_bytes += cost
+
+    async def _bridge_release(self, item: LogEntry | None) -> None:
+        """Consumer side: return *item*'s bridge-queue bytes and wake waiting producers."""
+        if self._bridge_max_bytes <= 0:
+            return
+        cost = _entry_bytes(item)
+        if cost == 0:
+            return
+        async with self._bridge_byte_cond:
+            self._bridge_queued_bytes -= cost
+            self._bridge_byte_cond.notify_all()
+
+    async def _enqueue(self, queue: asyncio.Queue[LogEntry | None], item: LogEntry) -> None:
+        """Put *item* on the bridge queue, respecting both bounds: entry-count
+        (``queue_maxsize``, via the queue's own maxsize) and bytes
+        (``bridge_max_bytes``, via :meth:`_bridge_charge`, #56)."""
+        await self._bridge_charge(item)
+        await queue.put(item)
+
     @staticmethod
     async def _put_sentinel(queue: asyncio.Queue[LogEntry | None]) -> None:
         """Always put a sentinel so the drain loop can terminate.
@@ -382,27 +460,74 @@ class PubSubSource:
         Backoff resets to base once a connection proves healthy — defined as
         having received at least one event or keepalive on it — or on a clean
         stream end.  Resumes from the last seen replay_id (event or keepalive).
-        """
-        # Determine initial replay position.
-        stored = await state.load(f"pubsub:{topic}")
-        if stored:
-            replay_id = base64.b64decode(stored)
-            preset: int = preset_for("CUSTOM")
-        else:
-            if self._cfg.replay_preset == "CUSTOM":
-                # No stored id and CUSTOM requested → fall back to LATEST.
-                preset = preset_for("LATEST")
-            else:
-                preset = preset_for(self._cfg.replay_preset)
-            replay_id = b""
 
+        The initial replay position is loaded from *state* INSIDE the
+        reconnect loop below (not before it), so a transient checkpoint-store
+        error backs off and retries like any other stream error instead of
+        killing this task without its sentinel (#45) — a missing sentinel
+        wedges :meth:`events`'s drain loop forever; force-cancel on shutdown
+        then looks like a clean completion and the process exits 0 under
+        docker ``restart: on-failure``. A CORRUPT stored value (failed base64
+        decode) is never retried — the same bytes always fail the same way —
+        it instead falls back to the configured ``replay_preset`` immediately,
+        with an ERROR log and the ``checkpoint_load_errors`` metric.
+        """
         backoff = self._reconnect_backoff
         attempt = 0
         stream_up = self._metrics.pubsub_stream_up.labels(topic=topic)
+        replay_id = b""
+        preset: int = preset_for("LATEST")
+        position_loaded = False
 
-        log.info("pubsub subscribing", topic=topic, preset=preset, resuming=bool(stored))
         try:
             while not stop.is_set():
+                if not position_loaded:
+                    try:
+                        stored = await state.load(f"pubsub:{topic}")
+                    except Exception as exc:
+                        log.warning(
+                            "pubsub checkpoint load failed; retrying",
+                            topic=topic,
+                            error=repr(exc),
+                            backoff=backoff,
+                        )
+                        if await self._sleep_or_stop(stop, backoff):
+                            return
+                        backoff = min(backoff * 2, self._max_backoff)
+                        continue
+                    if stored:
+                        try:
+                            replay_id = base64.b64decode(stored)
+                            preset = preset_for("CUSTOM")
+                        except Exception as exc:
+                            log.error(
+                                "pubsub stored replay id corrupt; falling back to the "
+                                "configured replay_preset",
+                                topic=topic,
+                                error=repr(exc),
+                            )
+                            self._metrics.checkpoint_load_errors.labels(source=self.name).inc()
+                            replay_id = b""
+                            preset = (
+                                preset_for("LATEST")
+                                if self._cfg.replay_preset == "CUSTOM"
+                                else preset_for(self._cfg.replay_preset)
+                            )
+                    else:
+                        # No stored id: CUSTOM with nothing to resume from
+                        # falls back to LATEST; otherwise use the configured
+                        # preset directly.
+                        preset = (
+                            preset_for("LATEST")
+                            if self._cfg.replay_preset == "CUSTOM"
+                            else preset_for(self._cfg.replay_preset)
+                        )
+                        replay_id = b""
+                    position_loaded = True
+                    log.info(
+                        "pubsub subscribing", topic=topic, preset=preset, resuming=bool(replay_id)
+                    )
+
                 if attempt > 0:
                     self._metrics.pubsub_reconnects.labels(topic=topic).inc()
                     log.info("pubsub reconnecting", topic=topic, attempt=attempt, backoff=backoff)
@@ -430,14 +555,16 @@ class PubSubSource:
                                 continue  # unchanged — avoid checkpoint churn
                             replay_id = ev.latest_replay_id
                             preset = preset_for("CUSTOM")
-                            await queue.put(self._keepalive_entry(topic, ev.latest_replay_id))
+                            await self._enqueue(
+                                queue, self._keepalive_entry(topic, ev.latest_replay_id)
+                            )
                             continue
                         entry = self._shape_event(topic, ev)
                         # Update resume position for reconnect (even for a
                         # dropped/sampled-out event — its checkpoint still commits).
                         replay_id = ev.replay_id
                         preset = preset_for("CUSTOM")
-                        await queue.put(entry)  # blocks when full = backpressure
+                        await self._enqueue(queue, entry)  # blocks when full = backpressure
 
                     # Stream ended normally.
                     stream_up.set(0)
@@ -451,16 +578,38 @@ class PubSubSource:
                     stream_up.set(0)
                     if stop.is_set():
                         return
-                    if self._is_invalid_argument(exc):
-                        if preset == preset_for("CUSTOM"):
-                            # Salesforce rejects an expired (outside the 72h
-                            # retention window) or corrupt replay id with
-                            # INVALID_ARGUMENT — indistinguishably. Retrying
-                            # with the same dead id would loop forever, a
-                            # permanent silent outage. Discard it and restart
-                            # from EARLIEST: bounded (≤72h) duplicates that
-                            # Loki's byte-identical dedup collapses. Never
-                            # LATEST — that guarantees loss.
+                    if self._is_invalid_argument(exc) and preset == preset_for("CUSTOM"):
+                        # narrowed by _is_invalid_argument's isinstance check
+                        assert isinstance(exc, grpc.aio.AioRpcError)
+                        trailer_confirms = self._trailer_confirms_replay_corruption(exc)
+                        if trailer_confirms is False:
+                            # A trailer IS present but does not identify
+                            # replay-id corruption/expiry — some OTHER
+                            # INVALID_ARGUMENT while resuming (e.g. a
+                            # malformed subscribe argument after a client/API
+                            # change). Re-draining from EARLIEST here would be
+                            # a large, silent, misattributed re-ingest.
+                            # Retry normally, keeping the replay position.
+                            log.error(
+                                "pubsub subscribe rejected with INVALID_ARGUMENT while "
+                                "resuming, but the error trailer does not confirm replay-id "
+                                "corruption/expiry; retrying with backoff and keeping the "
+                                "replay position (NOT falling back to EARLIEST)",
+                                topic=topic,
+                                error=repr(exc),
+                                backoff=backoff,
+                            )
+                        else:
+                            # Trailer confirms corruption, OR no trailer was
+                            # present at all (fall back to the legacy
+                            # code-only heuristic). Salesforce rejects an
+                            # expired (outside the 72h retention window) or
+                            # corrupt replay id with INVALID_ARGUMENT.
+                            # Retrying with the same dead id would loop
+                            # forever, a permanent silent outage. Discard it
+                            # and restart from EARLIEST: bounded (≤72h)
+                            # duplicates that Loki's byte-identical dedup
+                            # collapses. Never LATEST — that guarantees loss.
                             log.error(
                                 "pubsub replay id rejected (expired or corrupt); falling back "
                                 "to EARLIEST — possible data gap if the id aged out of "
@@ -472,20 +621,20 @@ class PubSubSource:
                             self._metrics.pubsub_replay_fallbacks.labels(topic=topic).inc()
                             replay_id = b""
                             preset = preset_for("EARLIEST")
-                        else:
-                            # INVALID_ARGUMENT with no replay id in play is a
-                            # genuine config error (e.g. bad num_requested).
-                            # Keep retrying with backoff, but loudly: a
-                            # permanently-red ERROR loop beats a crash and
-                            # beats silent WARN-level retries.
-                            log.error(
-                                "pubsub subscribe rejected with INVALID_ARGUMENT while not "
-                                "resuming from a replay id — likely a configuration error; "
-                                "retrying with backoff",
-                                topic=topic,
-                                error=repr(exc),
-                                backoff=backoff,
-                            )
+                    elif self._is_invalid_argument(exc):
+                        # INVALID_ARGUMENT with no replay id in play is a
+                        # genuine config error (e.g. bad num_requested).
+                        # Keep retrying with backoff, but loudly: a
+                        # permanently-red ERROR loop beats a crash and
+                        # beats silent WARN-level retries.
+                        log.error(
+                            "pubsub subscribe rejected with INVALID_ARGUMENT while not "
+                            "resuming from a replay id — likely a configuration error; "
+                            "retrying with backoff",
+                            topic=topic,
+                            error=repr(exc),
+                            backoff=backoff,
+                        )
                     else:
                         log.warning(
                             "pubsub stream error", topic=topic, error=repr(exc), backoff=backoff
@@ -510,13 +659,38 @@ class PubSubSource:
     def _is_invalid_argument(exc: BaseException) -> bool:
         """True when *exc* is a gRPC INVALID_ARGUMENT rejection.
 
-        Salesforce uses this status (error code trailer
-        ``...fetch.replayid.corrupted``) for both expired and corrupt replay
-        ids — the two are not distinguishable and are handled identically.
+        Bare status-code heuristic only — does NOT confirm replay-id
+        corruption/expiry specifically (see :meth:`_trailer_confirms_replay_corruption`
+        for that); used as a fallback when no error-info trailer is present (#65).
         """
         return (
             isinstance(exc, grpc.aio.AioRpcError) and exc.code() == grpc.StatusCode.INVALID_ARGUMENT
         )
+
+    # Salesforce's error-info trailer identifies a genuinely corrupt/expired
+    # replay id with an error code in the ``...replayid.corrupted`` family.
+    _REPLAY_CORRUPTION_MARKER = "replayid.corrupted"
+
+    @classmethod
+    def _trailer_confirms_replay_corruption(cls, exc: grpc.aio.AioRpcError) -> bool | None:
+        """Inspect *exc*'s gRPC trailer for Salesforce's replay-id
+        corruption/expiry error-info (#65).
+
+        Returns ``True`` when a trailer entry confirms it, ``False`` when a
+        trailer is present but does NOT mention it (a different, unrelated
+        INVALID_ARGUMENT — e.g. a malformed subscribe argument after a
+        client-library or Salesforce API change), and ``None`` when no
+        trailer metadata is available at all — callers fall back to the
+        bare-status-code heuristic (:meth:`_is_invalid_argument`) in that case.
+        """
+        trailer = exc.trailing_metadata()
+        if not trailer:
+            return None
+        for _key, value in trailer:
+            text = value if isinstance(value, str) else value.decode("utf-8", "replace")
+            if cls._REPLAY_CORRUPTION_MARKER in text.lower():
+                return True
+        return False
 
     @staticmethod
     def _event_type(topic: str) -> str:
@@ -568,15 +742,20 @@ class PubSubSource:
             checkpoint_only=True,
         )
 
-    @staticmethod
-    def _event_timestamp(payload: Mapping[str, object]) -> datetime:
+    def _event_timestamp(self, topic: str, payload: Mapping[str, object]) -> datetime:
         """Best event time for a Pub/Sub payload, preferring stable event-time fields.
 
         Order: ``EventDate`` (RTEM streams) → ``CreatedDate`` (platform events) →
         ``ChangeEventHeader.commitTimestamp`` (CDC change events, epoch millis) →
-        ingest time. Using the CDC commit timestamp (rather than falling back to
-        ``now()``) keeps a replayed change event byte-identical, so Loki's native
-        dedup collapses at-least-once duplicates instead of storing them twice.
+        a stable per-topic fallback (#42). A fieldless event (custom platform
+        event or CDC channel with none of the above) previously got
+        ``now()`` fresh on every delivery — a replayed duplicate then got a
+        DIFFERENT timestamp each time, defeating Loki's byte-identical dedup
+        and firing no metric. Instead, fall back to the most recent
+        field-derived timestamp seen on this topic (``_last_good_ts``,
+        clamped near now if stale by :func:`extract_timestamp_checked`) so a
+        redelivered fieldless event gets the SAME timestamp every time, and
+        count the fallback.
         """
         header = payload.get("ChangeEventHeader")
         commit_ts = header.get("commitTimestamp") if isinstance(header, Mapping) else None
@@ -585,16 +764,23 @@ class PubSubSource:
             "CreatedDate": payload.get("CreatedDate"),
             "commitTimestamp": commit_ts,
         }
-        return extract_timestamp(
-            ts_source, field_names=("EventDate", "CreatedDate", "commitTimestamp")
+        ts, used_fallback = extract_timestamp_checked(
+            ts_source,
+            field_names=("EventDate", "CreatedDate", "commitTimestamp"),
+            fallback=self._last_good_ts.get(topic),
         )
+        if used_fallback:
+            self._metrics.timestamp_fallbacks.labels(source=self.name).inc()
+        else:
+            self._last_good_ts[topic] = ts
+        return ts
 
     def _to_log_entry(self, topic: str, ev: DecodedEvent) -> LogEntry:
         """Convert a DecodedEvent to a LogEntry ready for the pipeline."""
         event_type = self._event_type(topic)
         labels: dict[str, str] = {"source": "pubsub", "event_type": event_type}
         line, sm = route_fields(ev.payload, self._sm_fields)
-        timestamp = self._event_timestamp(ev.payload)
+        timestamp = self._event_timestamp(topic, ev.payload)
         checkpoint = CheckpointToken(
             key=f"pubsub:{topic}",
             value=base64.b64encode(ev.replay_id).decode("ascii"),
