@@ -24,9 +24,13 @@ which would render ``WHERE EventDate > `` -> MALFORMED_QUERY -> crash-loop),
 and a loaded watermark is validated before being interpolated into SOQL —
 garbage falls back to the lookback default with a WARNING.
 
-BigObject caveat (from DESIGN §7): objects in the EventStore family (e.g.
-ApiEventStream) have restrictive SOQL support — FIELDS(ALL) and ORDER BY may
-not work. Standard EventLog objects (LoginEvent, etc.) are fine.
+Big Objects (the stored RTEM event family — LoginEvent, ApiEvent,
+FileEventStore, *EventStore, ...) reject ORDER BY ASC and have no
+nextRecordsUrl pagination. Set ``big_object: true`` per object to poll them:
+the source then drains newest-first (ORDER BY <ts> DESC) with a ratcheting
+upper bound and re-sorts each cycle's window ascending before emitting, so the
+watermark/dedup/checkpoint semantics match the ASC path. FIELDS(ALL) itself
+works on Big Objects; only the ASC order was the problem.
 """
 
 from __future__ import annotations
@@ -248,6 +252,47 @@ class EventLogObjectsSource:
             # Format as SOQL datetime literal: ISO-8601 with Z suffix.
             watermark = default_wm.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        if obj.big_object:
+            try:
+                records = await self._drain_big_object(obj, watermark)
+            except SoqlThrottledError as exc:
+                self._cycle_throttled = True
+                self._metrics.soql_poll_errors.labels(
+                    source="eventlog_objects", object=obj.name
+                ).inc()
+                _log.error(
+                    "eventlog_objects[%s]: Salesforce API request limit exceeded; "
+                    "backing off until the next poll interval: %s",
+                    obj.name,
+                    exc,
+                )
+                return
+            except SoqlError as exc:
+                count = self._consecutive_failures.get(obj.name, 0) + 1
+                self._consecutive_failures[obj.name] = count
+                self._metrics.soql_poll_errors.labels(
+                    source="eventlog_objects", object=obj.name
+                ).inc()
+                level = logging.ERROR if count >= _ERROR_LOG_THRESHOLD else logging.WARNING
+                _log.log(
+                    level,
+                    "eventlog_objects[%s]: big-object SOQL poll failed (%d consecutive "
+                    "failure(s); will retry next cycle): %s",
+                    obj.name,
+                    count,
+                    exc,
+                )
+                return
+
+            for record in records:
+                if stop.is_set():
+                    return
+                entry, watermark, window = self._emit_record(obj, key, record, watermark, window)
+                if entry is not None:
+                    yield entry
+            self._consecutive_failures.pop(obj.name, None)
+            return
+
         # --- 2/3. Drain pages until a short page (or no progress) ---
         while True:
             # A stored watermark is the raw value Salesforce returned (e.g.
@@ -257,8 +302,6 @@ class EventLogObjectsSource:
             # it requires LIMIT <=200 (platform constraint). ``>=`` (with the id
             # window) instead of ``>`` so a timestamp tie at the page boundary
             # is never skipped.
-            # Note: EventStore BigObjects (e.g. ApiEventStream) may not support
-            # FIELDS(ALL) or ORDER BY — use standard EventLog objects with this source.
             soql = (
                 f"SELECT FIELDS(ALL) FROM {obj.name} "
                 f"WHERE {obj.timestamp_field} >= {to_soql_datetime_literal(watermark)} "
@@ -387,3 +430,77 @@ class EventLogObjectsSource:
             checkpoint=checkpoint,
         )
         return entry, watermark, window
+
+    async def _drain_big_object(
+        self, obj: EventLogObjectConfig, watermark: str
+    ) -> list[dict[str, object]]:
+        """Fetch this cycle's window for a Big Object, returned sorted ASC.
+
+        Big Objects reject ORDER BY ASC and expose no nextRecordsUrl pagination
+        (verified against the dev org), so we page newest-first with ORDER BY
+        <ts> DESC and a ratcheting upper bound: each full page lowers the bound to
+        its oldest timestamp (``<=`` so a tie straddling the 200-row boundary is
+        re-fetched and deduped, never skipped — the mirror of the ASC path's
+        ``>=`` + id-window). Drains until a short page or a full page that adds no
+        new id (all-ties guard). The collected window is sorted ASCENDING before
+        return so :meth:`_emit_record` advances the watermark forward monotonically
+        exactly as in the ASC mode — keeping crash-safety identical.
+
+        Memory note: this buffers one cycle's window (bounded by poll_interval of
+        data in steady state; a first-run lookback or post-outage catch-up buffers
+        the whole window). Large historical backfills are a separate command, not
+        this poll path.
+        """
+        collected: dict[str, dict[str, object]] = {}
+        upper: str | None = None
+        while True:
+            clauses = [f"{obj.timestamp_field} >= {to_soql_datetime_literal(watermark)}"]
+            if upper is not None:
+                clauses.append(f"{obj.timestamp_field} <= {to_soql_datetime_literal(upper)}")
+            soql = (
+                f"SELECT FIELDS(ALL) FROM {obj.name} "
+                f"WHERE {' AND '.join(clauses)} "
+                f"ORDER BY {obj.timestamp_field} DESC "
+                f"LIMIT {_PAGE_LIMIT}"
+            )
+            page = [record async for record in self._soql.query(soql)]
+            if not page:
+                break
+
+            new_in_page = 0
+            for record in page:
+                rid = str(record.get("Id") or "")
+                if rid and rid not in collected:
+                    collected[rid] = record
+                    new_in_page += 1
+
+            if len(page) < _PAGE_LIMIT:
+                break  # short page: window fully drained
+            if new_in_page == 0:
+                _log.warning(
+                    "eventlog_objects[%s]: a full DESC page at bound %s added no new "
+                    "records (>%d rows share one timestamp?); stopping drain to avoid "
+                    "a hot loop",
+                    obj.name,
+                    upper,
+                    _PAGE_LIMIT,
+                )
+                break
+
+            # Lower the bound to this page's oldest timestamp for the next sub-query.
+            oldest_rec = min(
+                page,
+                key=lambda r: (
+                    _watermark_datetime(str(r.get(obj.timestamp_field) or ""))
+                    or datetime.max.replace(tzinfo=UTC)
+                ),
+            )
+            upper = str(oldest_rec.get(obj.timestamp_field) or "")
+
+        return sorted(
+            collected.values(),
+            key=lambda r: (
+                _watermark_datetime(str(r.get(obj.timestamp_field) or ""))
+                or datetime.min.replace(tzinfo=UTC)
+            ),
+        )

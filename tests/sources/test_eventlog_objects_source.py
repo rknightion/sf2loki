@@ -14,6 +14,7 @@ import respx
 from sf2loki.auth.jwt_auth import AccessToken
 from sf2loki.config import EventLogObjectConfig, EventLogObjectsConfig, SalesforceConfig
 from sf2loki.obs.metrics import Metrics
+from sf2loki.salesforce.soql_client import to_soql_datetime_literal
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.state.file_store import FileCheckpointStore
 
@@ -922,3 +923,167 @@ async def test_watermark_uses_original_timestamp_despite_redaction(
     assert "EventDate" not in entries[0].line
     # ...but the checkpoint watermark keeps the real value (query cursor intact).
     assert json.loads(entries[0].checkpoint.value)["last_ts"] == "2026-06-30T10:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# Big-object DESC descending-drain mode (issue #34): Big Objects reject
+# ORDER BY ASC and expose no nextRecordsUrl pagination — drain newest-first
+# with a ratcheting <= upper bound, dedup, and re-sort ascending before emit.
+
+
+def make_big_object_cfg(
+    name: str = "LoginEvent",
+    lookback: timedelta = timedelta(hours=1),
+    poll_interval: timedelta = timedelta(seconds=0),
+) -> EventLogObjectsConfig:
+    return EventLogObjectsConfig(
+        enabled=True,
+        objects=[
+            EventLogObjectConfig(
+                name=name,
+                timestamp_field="EventDate",
+                poll_interval=poll_interval,
+                lookback=lookback,
+                big_object=True,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_query_uses_desc_and_emits_ascending(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A big_object drains DESC in one short page, then emits oldest-first."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    captured: list[str] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(parse_qs(urlparse(str(request.url)).query)["q"][0])
+        return httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"Id": "b", "EventDate": "2026-06-30T10:02:00.000+0000"},
+                    {"Id": "a", "EventDate": "2026-06-30T10:01:00.000+0000"},
+                ],
+                "done": True,
+            },
+        )
+
+    respx.get(_query_url()).mock(side_effect=_capture)
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # DESC order in the query, no ASC anywhere
+    assert "ORDER BY EventDate DESC" in captured[0]
+    assert "ASC" not in captured[0]
+    # Emitted oldest-first (a before b) despite the DESC fetch
+    assert [json.loads(e.checkpoint.value)["last_ts"] for e in entries] == [
+        "2026-06-30T10:01:00.000+0000",
+        "2026-06-30T10:02:00.000+0000",
+    ]
+    # Final committed watermark is the NEWEST row's timestamp
+    assert json.loads(entries[-1].checkpoint.value)["last_ts"] == "2026-06-30T10:02:00.000+0000"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_ratchets_upper_bound_across_pages(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A full page triggers a second query bounded by the oldest seen (<=), deduped."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    captured: list[str] = []
+
+    # page 1: 200 rows newest->oldest (minute 200 down to 1), oldest = 10:01:00 (Id "p1-199").
+    # Built from a real datetime so every timestamp is valid and strictly descending.
+    base = datetime(2026, 6, 30, 10, 0, 0, tzinfo=UTC)
+    page1 = [
+        {
+            "Id": f"p1-{i}",
+            "EventDate": (base + timedelta(minutes=200 - i)).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+        }
+        for i in range(200)
+    ]
+    oldest1 = page1[-1]["EventDate"]  # 2026-06-30T10:01:00.000+0000
+    # page 2: short page, older, PLUS a re-fetched boundary tie at oldest1 (deduped)
+    page2 = [
+        {"Id": "p1-199", "EventDate": oldest1},  # boundary tie, already seen
+        {"Id": "p2-a", "EventDate": "2026-06-30T09:59:00.000+0000"},
+    ]
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        q = parse_qs(urlparse(str(request.url)).query)["q"][0]
+        captured.append(q)
+        body = page1 if len(captured) == 1 else page2
+        return httpx.Response(200, json={"records": body, "done": True})
+
+    respx.get(_query_url()).mock(side_effect=_capture)
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(captured) == 2  # ratcheted to a second page
+    # 2nd query re-bounds with <= the oldest of page 1 (tie-safe, not strict <)
+    assert f"EventDate <= {to_soql_datetime_literal(oldest1)}" in captured[1]
+    # 201 distinct ids emitted (200 from page1 + 1 new from page2; the tie deduped)
+    ids = [json.loads(e.checkpoint.value)["ids"][-1] for e in entries]
+    assert ids.count("p1-199") == 1
+    assert "p2-a" in ids
+    assert len(entries) == 201
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_full_page_all_seen_terminates(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A full page that adds no new ids stops the drain (no hot loop)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    page = [{"Id": f"x{i}", "EventDate": "2026-06-30T10:00:00.000+0000"} for i in range(200)]
+
+    calls = {"n": 0}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        # Always return the SAME full page of ties -> second query adds nothing new
+        return httpx.Response(200, json={"records": page, "done": True})
+
+    respx.get(_query_url()).mock(side_effect=_capture)
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 200  # the 200 distinct ties, emitted once
+    assert calls["n"] == 2  # one ratchet, then the all-seen guard stops it
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_throttle_aborts_without_crashing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(return_value=httpx.Response(403, text="REQUEST_LIMIT_EXCEEDED"))
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+    assert entries == []  # throttle contained, no exception escapes
