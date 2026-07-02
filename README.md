@@ -433,6 +433,22 @@ with one exception: an active-passive HA pair (below), where commit fencing guar
 leader writes. Write rate is one full-object GET+conditional-PUT per checkpoint flush (~= flush
 rate, not event rate).
 
+**Google Cloud Storage** works the same way (Cloud Run with no volume) — set `state.store: gcs` and
+the `gcs` extra (`pip install 'sf2loki[gcs]'`):
+
+```yaml
+state:
+  store: gcs
+  gcs:
+    bucket: my-sf2loki-checkpoints
+    object_name: sf2loki/state.json    # default; one object per sf2loki instance
+    # service_file: /etc/sf2loki/secrets/gcs-sa.json   # omit to use Application Default Credentials
+```
+
+Auth is Application Default Credentials by default (workload identity / metadata server / `GOOGLE_APPLICATION_CREDENTIALS`);
+set `service_file` only for an explicit key. The compare-and-swap uses GCS **generation preconditions**
+(`ifGenerationMatch`) instead of an ETag, so the same fail-fast split-brain protection applies.
+
 ## Backfilling history
 
 `sf2loki backfill` is a one-shot CLI for pushing historical EventLogFile data into Loki — useful
@@ -528,9 +544,9 @@ definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || e
 
 **Run exactly one ACTIVE replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API
 delivers events independently per subscriber connection, so a second active instance
-double-delivers. For automatic failover, run an active-passive pair with the file-lease
-coordinator (next section); see [DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha) for the
-full HA/replica model.
+double-delivers. For automatic failover, run an active-passive pair with the file-lease or
+Kubernetes-Lease coordinator (next section); see [DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha)
+for the full HA/replica model.
 
 > **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:
 > true`** (default on Grafana Cloud; must be enabled self-hosted / in Alloy's Loki).
@@ -581,6 +597,47 @@ Observability: `sf2loki_leader` is `1` on the active leader (and on any standalo
 on the standby — `sum(sf2loki_leader)` should always be exactly `1`, and the shipped alert pack
 fires on anything else (leaderless gap or split-brain). The standby reports `503 standby` on
 `/readyz` (a load balancer routes only to the leader) while staying `200` on `/healthz`.
+
+### Kubernetes-native (Lease coordinator)
+
+On Kubernetes, use a `coordination.k8s.io/v1` **Lease** instead of a shared file — no shared volume
+needed. Set `coordinate.type: k8s_lease` and the `k8s` extra (`pip install 'sf2loki[k8s]'`):
+
+```yaml
+coordinate:
+  type: k8s_lease
+  k8s_lease:
+    namespace: sf2loki        # namespace holding the Lease (default: default)
+    name: sf2loki-leader      # Lease object name, shared by all replicas
+    identity: ""              # blank -> pod name ($HOSTNAME); set if pod names aren't unique
+    lease_duration: 30s       # failover time: standby takes over this long after renewals stop
+    renew_interval: 10s       # must be < lease_duration/2
+    # kubeconfig: ~/.kube/config   # omit for in-cluster config; set for out-of-cluster dev
+```
+
+The leader renews the Lease's `holderIdentity` + `renewTime`; a standby takes over once it is stale.
+Optimistic concurrency uses the Lease `resourceVersion` (a lost update returns HTTP 409, so — unlike
+the file lease — no pause-then-verify is needed), and the same fencing gates checkpoint commits on
+still holding the lease. In-cluster config is used by default (works with a workload-identity
+`ServiceAccount`); no NTP concern beyond the API server's own clock. The state store must still be
+shared (the S3/GCS store above) so the standby resumes from the leader's checkpoints.
+
+The pod's ServiceAccount needs `get`/`create`/`update` on `leases` in the coordinator's namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sf2loki-lease
+  namespace: sf2loki
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+```
+
+Bind it to the pod's ServiceAccount with a `RoleBinding`, and set `identity` (or rely on the default
+`$HOSTNAME` = pod name) so each replica writes a distinct `holderIdentity`.
 
 ## Development
 

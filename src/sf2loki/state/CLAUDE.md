@@ -1,8 +1,9 @@
 # CLAUDE.md — src/sf2loki/state
 
 The `CheckpointStore` seam (`base.py`: `load`/`commit`, keyed per source
-stream) with two backends — `file_store.py` (local JSON, the default) and
-`s3_store.py` (S3-compatible object storage, needs the `sf2loki[s3]` extra) —
+stream) with three backends — `file_store.py` (local JSON, the default),
+`s3_store.py` (S3-compatible object storage, needs the `sf2loki[s3]` extra),
+and `gcs_store.py` (Google Cloud Storage, needs the `sf2loki[gcs]` extra) —
 plus `org_view.py` for multi-org key namespacing. See `../CLAUDE.md` and
 `../coordinate/CLAUDE.md` for how leadership fencing plugs into this seam.
 
@@ -20,7 +21,17 @@ plus `org_view.py` for multi-org key namespacing. See `../CLAUDE.md` and
   `aiobotocore` is imported lazily inside the default client factory, so this
   module stays importable (and unit-testable with an injected fake client)
   without the `s3` extra installed.
-- Both expose an optional `set_fence(...)` duck-typed hook consumed by
+- `GcsCheckpointStore`: the GCS analogue of the S3 store — same whole-document
+  + conditional-write shape, but the CAS uses GCS **generation preconditions**
+  (`ifGenerationMatch: "0"` for the first write, the current generation for an
+  update) instead of an ETag, and the fail-fast conflict raises the same
+  `StateStoreConflictError` (imported from `s3_store`, not redefined). Load is
+  `download_metadata` (for the generation) + `download` (for the body).
+  `gcloud-aio-storage` is lazily imported in the default client factory (needs
+  the `gcs` extra); the `upload` kwarg is `parameters=`, not `params=`.
+  `build_store` guards it with `find_spec("gcloud")` — the bare top-level name,
+  since `find_spec("gcloud.aio.storage")` would *raise* when the extra is absent.
+- All three stores expose an optional `set_fence(...)` duck-typed hook consumed by
   `coordinate/file_lease.py` — not part of the `CheckpointStore` Protocol
   itself, since only the file-lease coordinator needs it (`NoopCoordinator`
   never calls it).
