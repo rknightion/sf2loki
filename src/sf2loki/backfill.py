@@ -6,7 +6,9 @@ resumable and safe to run while the service is up. Solves Loki's out-of-order
 window explicitly — either distinct ``backfill="true"`` streams (default) or
 ingest-time timestamps with the true event time in structured metadata.
 
-Checkpoint format (JSON, per ``backfill:{interval}:{event_type}`` key):
+Checkpoint format (JSON, per ``backfill:{interval}:{event_type}`` key —
+``backfill:org={name}:{interval}:{event_type}`` when backfilling a named org
+in a multi-org config, see ``_backfill_checkpoint_key``):
 ``{"last_created": "<iso CreatedDate>", "done_ids": ["<file id>", ...]}``.
 Unlike the daemon's carried-ids window (which must survive an unbounded
 polling loop), a backfill run processes a bounded window once, so ``done_ids``
@@ -460,6 +462,24 @@ _STOP_TYPE = "stop_type"  # non-fatal: give up on this type, move to the next
 _ABORT_RUN = "abort_run"  # fatal: push retries exhausted, exit the whole run
 
 
+def _backfill_checkpoint_key(interval: str, event_type: str, org_name: str = "") -> str:
+    """Checkpoint key for one (interval, event_type), namespaced per org.
+
+    An empty ``org_name`` (single-org / legacy mode, see ``config.resolved_orgs``)
+    keeps the pre-multi-org unprefixed key ``backfill:{interval}:{event_type}``
+    bit-identical. A non-empty org name yields
+    ``backfill:org={name}:{interval}:{event_type}`` so two orgs backfilling the
+    same interval/event-type against the same state file never share a
+    watermark (issue #40) — mirroring ``state/org_view.org_prefix``, but with
+    the org component nested inside the ``backfill:`` namespace rather than
+    wrapping the whole key, since a backfill run's state file only ever holds
+    ``backfill:`` keys.
+    """
+    if not org_name:
+        return f"backfill:{interval}:{event_type}"
+    return f"backfill:org={org_name}:{interval}:{event_type}"
+
+
 async def _process_files(
     files: list[EventLogFileMeta],
     *,
@@ -542,6 +562,8 @@ async def _process_event_type(
     ingest_clock: _IngestClock,
     stats: _RunStats,
     row_filter: RowFilter = _apply_row_filters,
+    org_name: str = "",
+    legacy_fallback: bool = False,
 ) -> bool:
     """Backfill one EventType end-to-end (paging through listings until exhausted).
 
@@ -549,8 +571,14 @@ async def _process_event_type(
     True otherwise, including the non-fatal "gave up on this type" path (a
     listing or download failure just stops this type — see module docstring).
     """
-    key = f"backfill:{interval}:{event_type}"
+    key = _backfill_checkpoint_key(interval, event_type, org_name)
     raw = await store.load(key)
+    if raw is None and org_name and legacy_fallback:
+        # Transparent migration, mirroring state/org_view.py's OrgCheckpointView:
+        # the first configured org falls back to the pre-existing unprefixed
+        # legacy key on a load miss. `key` (already the prefixed form) is what
+        # gets committed below, so the next commit completes the migration.
+        raw = await store.load(f"backfill:{interval}:{event_type}")
     if raw is not None:
         parsed: dict[str, object] = json.loads(raw)
         raw_ids = parsed.get("done_ids", [])
@@ -685,11 +713,21 @@ async def run_backfill(
     interval: str,
     ingest_timestamps: bool,
     concurrency: int,
+    org_name: str = "",
+    legacy_fallback: bool = False,
 ) -> int:
     """Backfill ELF history for [since, until) into Loki; return an exit code.
 
     ``cfg`` must be a single-org view (see ``config.as_single_org_view``): the CLI
     resolves ``--org`` to one org before calling, so ``cfg.salesforce`` is set.
+
+    ``org_name`` namespaces the checkpoint key per org (issue #40) — the CLI
+    should pass the resolved org's ``name`` (``config.select_org``/
+    ``resolved_orgs()``; empty for single-org configs, which keeps the legacy
+    unprefixed key). ``legacy_fallback`` should be set only for the FIRST
+    configured org (mirroring ``app.py``'s ``legacy_fallback=(index == 0)`` for
+    the live daemon's ``OrgCheckpointView``), so an upgraded single-org
+    deployment resumes from its pre-existing unprefixed state.
     """
     assert cfg.salesforce is not None, "run_backfill needs a single-org config view"
     _warn_retention(since, ingest_timestamps)
@@ -736,6 +774,8 @@ async def run_backfill(
                 ingest_clock=ingest_clock,
                 stats=stats,
                 row_filter=row_filter,
+                org_name=org_name,
+                legacy_fallback=legacy_fallback,
             )
             if not ok:
                 exit_code = 1

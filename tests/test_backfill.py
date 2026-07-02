@@ -917,3 +917,117 @@ async def test_backfill_applies_configured_transforms(tmp_path, private_key_pem:
     assert len(rows) == 1  # secret-row dropped by drop_row
     hashed = hashlib.sha256(b"pepperkeep-me").hexdigest()[:16]
     assert rows == [hashed]
+
+
+# ---------------------------------------------------------------------------
+# Multi-org checkpoint namespacing (issue #40): the org must be part of the
+# backfill checkpoint key, with a legacy-key fallback for the first org only.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_multi_org_checkpoint_keys_are_isolated(tmp_path, private_key_pem: str) -> None:
+    """Two orgs backfilling the same interval/event_type over the same window,
+    against the same backfill state file, must not share a watermark: org B
+    must list from its OWN (empty) state, not inherit org A's already-advanced
+    watermark and silently skip older files."""
+    cfg_a = _make_cfg(tmp_path, private_key_pem)
+    cfg_b = _make_cfg(tmp_path, private_key_pem)
+    _mock_token()
+    older = _file("older", "Login", _created(2))
+    newer = _file("newer", "Login", _created(1))
+    _mock_list_files({"Login": [older, newer]})
+    download_calls = _mock_downloads(
+        {
+            "older": _csv([(_ts(2), "old-row")]),
+            "newer": _csv([(_ts(1), "new-row")]),
+        }
+    )
+    respx.post(LOKI_URL).mock(return_value=httpx.Response(204))
+    since = datetime(2026, 6, 1, tzinfo=UTC)
+
+    code_a = await run_backfill(
+        cfg_a,
+        since=since,
+        until=None,
+        event_types=None,
+        interval="Daily",
+        ingest_timestamps=False,
+        concurrency=2,
+        org_name="orgA",
+        legacy_fallback=True,
+    )
+    assert code_a == 0
+    assert download_calls == {"older": 1, "newer": 1}
+
+    # Org B backfills the SAME window against the SAME state file. Before the
+    # fix both orgs shared the unprefixed `backfill:Daily:Login` key, so org B
+    # would inherit org A's watermark and silently skip both files.
+    code_b = await run_backfill(
+        cfg_b,
+        since=since,
+        until=None,
+        event_types=None,
+        interval="Daily",
+        ingest_timestamps=False,
+        concurrency=2,
+        org_name="orgB",
+        legacy_fallback=False,
+    )
+    assert code_b == 0
+    assert download_calls == {"older": 2, "newer": 2}
+
+    backfill_state_path = tmp_path / "state-backfill.json"
+    saved = json.loads(backfill_state_path.read_text())
+    assert "backfill:org=orgA:Daily:Login" in saved
+    assert "backfill:org=orgB:Daily:Login" in saved
+
+
+@respx.mock
+async def test_first_org_resumes_from_legacy_unprefixed_key(tmp_path, private_key_pem: str) -> None:
+    """The first configured org falls back to a pre-existing UNPREFIXED legacy
+    checkpoint key on a load miss for its prefixed key (mirrors the transparent
+    migration in state/org_view.py), so a deployment upgraded from single-org to
+    multi-org resumes without re-downloading already-processed files. The next
+    commit migrates forward by writing the prefixed key."""
+    backfill_state_path = tmp_path / "state-backfill.json"
+    older = _file("older", "Login", _created(2))
+    newer = _file("newer", "Login", _created(1))
+    legacy_watermark = json.dumps({"last_created": older.created_date, "done_ids": ["older"]})
+    backfill_state_path.write_text(json.dumps({"backfill:Daily:Login": legacy_watermark}))
+
+    cfg = _make_cfg(tmp_path, private_key_pem)
+    _mock_token()
+    _mock_list_files({"Login": [older, newer]})
+    download_calls = _mock_downloads(
+        {
+            "older": _csv([(_ts(2), "old-row")]),
+            "newer": _csv([(_ts(1), "new-row")]),
+        }
+    )
+    respx.post(LOKI_URL).mock(return_value=httpx.Response(204))
+    since = datetime(2026, 6, 1, tzinfo=UTC)
+
+    code = await run_backfill(
+        cfg,
+        since=since,
+        until=None,
+        event_types=None,
+        interval="Daily",
+        ingest_timestamps=False,
+        concurrency=2,
+        org_name="orgA",
+        legacy_fallback=True,
+    )
+    assert code == 0
+    # `older` already in the legacy watermark's done_ids -> not re-downloaded;
+    # `newer` is genuinely new -> downloaded.
+    assert download_calls == {"older": 0, "newer": 1}
+
+    saved = json.loads(backfill_state_path.read_text())
+    # The legacy key is left untouched...
+    assert saved["backfill:Daily:Login"] == legacy_watermark
+    # ...and the next commit writes the prefixed key, completing the migration.
+    migrated = json.loads(saved["backfill:org=orgA:Daily:Login"])
+    assert migrated["last_created"] == newer.created_date
+    assert migrated["done_ids"] == ["newer"]
