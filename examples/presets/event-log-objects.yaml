@@ -1,10 +1,12 @@
-# Preset: poll Salesforce Big Objects (stored RTEM event family) via SOQL.
+# Preset: poll Salesforce Big Objects (the stored RTEM event family) via SOQL.
 #
 # Big Objects (LoginEvent, ApiEvent, FileEventStore, *EventStore, ...) store
 # Event Monitoring data as queryable objects. They reject ORDER BY ASC, so each
 # must be marked `big_object: true` — the source then drains them newest-first
 # (ORDER BY <timestamp_field> DESC) with a ratcheting bound and re-sorts each
-# cycle ascending before shipping. Standard/custom objects do NOT set this flag.
+# cycle ascending before shipping. Standard/custom objects do NOT set this flag
+# (see examples/presets/custom-object-polling.yaml). FIELDS(ALL) works on Big
+# Objects; only the ASC order was the problem.
 #
 # OVERLAP: these objects are the persisted form of the same records streamed on
 # /event/<name>Stream and (for some) landed in EventLogFile. Do NOT also stream
@@ -12,11 +14,15 @@
 # overlap guard maps LoginEvent/ApiEvent to their canonical category.
 #
 # Requires the Shield Event Monitoring add-on for most of these objects.
+#
+# This is a fragment, not a runnable standalone file — merge into config.yaml
+# (see config.example.yaml for the full schema, auth, sink, state, service).
 
 salesforce:
-  login_url: ${SF_LOGIN_URL}
+  environment: production
+  auth_mode: jwt_bearer
   client_id: ${SF_CLIENT_ID}
-  username: ${SF_USERNAME}
+  username: svc@example.com
   private_key_file: /etc/sf2loki/secrets/server.key
   api_version: "60.0"
 
@@ -24,19 +30,26 @@ sources:
   eventlog_objects:
     enabled: true
     objects:
+      # big_object: true is REQUIRED for these — they reject ORDER BY ASC.
       # EventDate is the indexed (DESC) watermark field on these Big Objects.
-      - {name: LoginEvent, timestamp_field: EventDate, big_object: true, poll_interval: 5m, lookback: 1h}
-      - {name: ApiEvent,   timestamp_field: EventDate, big_object: true, poll_interval: 5m, lookback: 1h}
+      - name: LoginEvent
+        timestamp_field: EventDate
+        big_object: true
+        poll_interval: 5m
+        lookback: 1h
+      - name: ApiEvent
+        timestamp_field: EventDate
+        big_object: true
+        poll_interval: 5m
+        lookback: 1h
 
 sink:
   type: loki
   loki:
-    url: ${GC_LOKI}
-    tenant_id: ${GC_LOKI_USER}
+    url: https://logs-prod-xx.grafana.net/loki/api/v1/push
+    tenant_id: "123456"
     auth_token_file: /etc/sf2loki/secrets/loki-token
-    labels: {environment: dev}
-
-state:
-  store: file
-  file:
-    path: /var/lib/sf2loki/state.json
+    structured_metadata_fields:
+      - user_id
+      - username
+      - source_ip
