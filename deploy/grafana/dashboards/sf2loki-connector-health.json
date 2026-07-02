@@ -302,7 +302,7 @@
                       "kind": "DataQuery",
                       "version": "v0",
                       "spec": {
-                        "expr": "sum(rate(sf2loki_loki_push_total{job=\"$job\", outcome=\"success\"}[$__rate_interval])) / clamp_min(sum(rate(sf2loki_loki_push_total{job=\"$job\"}[$__rate_interval])), 0.0001)",
+                        "expr": "sum(rate(sf2loki_loki_push_total{job=\"$job\", outcome=\"success\"}[$__rate_interval])) / sum(rate(sf2loki_loki_push_total{job=\"$job\"}[$__rate_interval]))",
                         "legendFormat": "",
                         "range": true,
                         "instant": false,
