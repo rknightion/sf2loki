@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import os
 import signal
@@ -27,6 +28,7 @@ from sf2loki.auth.jwt_auth import AuthError, TokenProvider
 from sf2loki.config import (
     EVENT_TYPE_WILDCARD,
     Config,
+    ConfigError,
     LokiBatchConfig,
     OrgConfig,
     telemetry_headers,
@@ -793,6 +795,18 @@ class App:
             file_lease = FileLeaseCoordinator(fl_cfg, holder=holder)
             coordinator = file_lease
             fence = file_lease.check_fence
+        elif cfg.coordinate.type == "k8s_lease":
+            if importlib.util.find_spec("kubernetes_asyncio") is None:
+                raise ConfigError(
+                    "coordinate.type is 'k8s_lease' but the Kubernetes dependencies are "
+                    "not installed; install the extra: pip install 'sf2loki[k8s]'"
+                )
+            from sf2loki.coordinate.k8s_lease import K8sLeaseCoordinator
+
+            # Holder defaults to the pod name ($HOSTNAME) inside the coordinator.
+            k8s_lease = K8sLeaseCoordinator(cfg.coordinate.k8s_lease)
+            coordinator = k8s_lease
+            fence = k8s_lease.check_fence
         else:
             coordinator = NoopCoordinator()
         set_fence = getattr(state, "set_fence", None)

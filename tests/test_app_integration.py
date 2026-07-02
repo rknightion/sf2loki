@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import time
 from typing import Any, ClassVar
 
@@ -372,6 +373,17 @@ def test_build_file_lease_holder_defaults_to_hostname_pid(tmp_path: Any) -> None
     appn = App.build(cfg)
     assert isinstance(appn._coordinator, FileLeaseCoordinator)
     assert "-" in appn._coordinator.holder  # hostname-pid
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("kubernetes_asyncio") is not None, reason="k8s extra installed"
+)
+def test_build_k8s_lease_without_extra_raises_actionable_error() -> None:
+    from sf2loki.config import ConfigError
+
+    cfg = _cfg(coordinate={"type": "k8s_lease", "k8s_lease": {"name": "l", "namespace": "ns"}})
+    with pytest.raises(ConfigError, match=r"sf2loki\[k8s\]"):
+        App.build(cfg)
 
 
 class _FakeTokens:

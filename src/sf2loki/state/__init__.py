@@ -27,4 +27,17 @@ def build_store(cfg: StateConfig) -> CheckpointStore:
         from sf2loki.state.s3_store import S3CheckpointStore
 
         return S3CheckpointStore(cfg.s3)
+    if cfg.store == "gcs":
+        # Check the TOP-LEVEL package "gcloud": find_spec on the dotted
+        # "gcloud.aio.storage" would RAISE ModuleNotFoundError (it imports the
+        # parent to look inside) when the extra is absent, bypassing this
+        # friendly error. "gcloud" is a bare name → find_spec returns None cleanly.
+        if importlib.util.find_spec("gcloud") is None:
+            raise ConfigError(
+                "state.store is 'gcs' but the GCS dependencies are not installed; "
+                "install the extra: pip install 'sf2loki[gcs]'"
+            )
+        from sf2loki.state.gcs_store import GcsCheckpointStore
+
+        return GcsCheckpointStore(cfg.gcs)
     return FileCheckpointStore(cfg.file.path)
