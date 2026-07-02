@@ -480,8 +480,7 @@ class Metrics:
             meter.create_counter(
                 "sf2loki_apexlog_bodies_skipped",
                 description=(
-                    "ApexLog bodies not shipped (over max_body_bytes or download error), "
-                    "per reason"
+                    "ApexLog bodies not shipped (over max_body_bytes or download error), per reason"
                 ),
             )
         )

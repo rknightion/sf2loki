@@ -86,9 +86,7 @@ async def test_list_logs_adds_username_filter() -> None:
     )
     async with httpx.AsyncClient() as client:
         c = ApexLogClient(make_cfg(), FakeTokenProvider(), client)
-        await c.list_logs(
-            since="2026-07-02T00:00:00Z", users=["a@x.com", "b@x.com"], page_size=200
-        )
+        await c.list_logs(since="2026-07-02T00:00:00Z", users=["a@x.com", "b@x.com"], page_size=200)
 
     q = route.calls[0].request.url.params["q"]
     assert "LogUser.Username IN ('a@x.com','b@x.com')" in q

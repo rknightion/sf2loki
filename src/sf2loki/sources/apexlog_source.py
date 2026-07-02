@@ -111,9 +111,7 @@ class ApexLogSource:
             cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
         )
 
-    async def events(
-        self, state: CheckpointStore, stop: asyncio.Event
-    ) -> AsyncIterator[LogEntry]:
+    async def events(self, state: CheckpointStore, stop: asyncio.Event) -> AsyncIterator[LogEntry]:
         if not self._cfg.enabled:
             return
 
@@ -132,9 +130,9 @@ class ApexLogSource:
 
     async def _poll(self, state: CheckpointStore, stop: asyncio.Event) -> AsyncIterator[LogEntry]:
         raw = await state.load(_CHECKPOINT_KEY)
-        if raw is None:
-            watermark, window = "", []
-        else:
+        watermark: str = ""
+        window: list[str] = []
+        if raw is not None:
             watermark, window = _parse_checkpoint(raw)
 
         if not _is_valid_watermark(watermark):
