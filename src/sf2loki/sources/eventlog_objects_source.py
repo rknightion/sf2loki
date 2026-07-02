@@ -315,75 +315,75 @@ class EventLogObjectsSource:
             for record in new_records:
                 if stop.is_set():
                     return
-
-                # Advance the watermark + id window from the ORIGINAL record,
-                # BEFORE transforms — the watermark is the SOQL query cursor and
-                # the id is the dedup key, so both must use the real Salesforce
-                # values even when a transform redacts them. This runs for
-                # dropped/sampled-out records too, so their Id enters the dedup
-                # window and a later emitted entry commits it (else every poll
-                # re-fetches and re-drops them). Advance the watermark only on a
-                # VALID timestamp value; a null/garbage one keeps the previous
-                # good watermark so the committed checkpoint can't poison the
-                # next query.
-                ts_field_val = str(record.get(obj.timestamp_field) or "")
-                if _is_valid_watermark(ts_field_val):
-                    watermark = ts_field_val
-                record_id = str(record.get("Id") or "")
-                if record_id:
-                    window = [*window, record_id][-_MAX_CARRIED_IDS:]
-
-                # Redaction/filter transforms run BEFORE shaping/timestamp
-                # extraction. A drop_row match, or a deterministic sampling drop,
-                # emits no entry — but the watermark/window advanced above still
-                # land via the next emitted record's checkpoint.
-                if self._transforms.apply(record) is None:
-                    continue
-                if obj.sample < 1.0 and not should_keep(
-                    record_id or json.dumps(record, sort_keys=True, default=str), obj.sample
-                ):
-                    self._metrics.entries_sampled_out.labels(
-                        source="eventlog_objects", event_type=obj.name
-                    ).inc()
-                    continue
-
-                # Prefer the configured timestamp field (e.g. LoginTime) so the
-                # entry time is the event time, not ingest time; fall back to the
-                # generic EventDate/CreatedDate names for objects without it.
-                # When nothing parses (incl. a redacted ts column), the PREVIOUS
-                # watermark is the stable fallback: replayed rows keep
-                # byte-identical timestamps and dedup in Loki, instead of getting
-                # a fresh now() every replay.
-                ts, used_fallback = extract_timestamp_checked(
-                    record,
-                    field_names=(obj.timestamp_field, "EventDate", "CreatedDate"),
-                    fallback=_watermark_datetime(watermark),
-                )
-                if used_fallback:
-                    self._metrics.timestamp_fallbacks.labels(source="eventlog_objects").inc()
-                line, sm = route_fields(record, self._sm_fields)
-
-                # labels: source and event_type only — job/sf_org_id/environment
-                # are injected downstream by the pipeline.
-                labels: dict[str, str] = {
-                    "source": "eventlog_objects",
-                    "event_type": obj.name,
-                }
-
-                checkpoint = CheckpointToken(
-                    key=key,
-                    value=json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True),
-                )
-
-                yield LogEntry(
-                    timestamp=ts,
-                    labels=labels,
-                    line=line,
-                    structured_metadata=sm,
-                    checkpoint=checkpoint,
-                )
+                entry, watermark, window = self._emit_record(obj, key, record, watermark, window)
+                if entry is not None:
+                    yield entry
 
             self._consecutive_failures.pop(obj.name, None)
 
             if len(page) < _PAGE_LIMIT:
                 break  # short page: caught up for this cycle
+
+    def _emit_record(
+        self,
+        obj: EventLogObjectConfig,
+        key: str,
+        record: dict[str, object],
+        watermark: str,
+        window: list[str],
+    ) -> tuple[LogEntry | None, str, list[str]]:
+        """Advance the cursor from *record* and build its LogEntry (or None if dropped).
+
+        Shared by the ASC and big-object fetch paths — the ONLY difference between
+        the two modes is how records are fetched/ordered; per-record shaping,
+        watermark/id-window advance, transforms, sampling, and checkpointing are
+        identical. Returns the advanced (watermark, window) so the caller threads
+        them into the next record (and into the committed CheckpointToken).
+
+        The watermark/window advance from the ORIGINAL record BEFORE transforms —
+        the watermark is the query cursor and the id is the dedup key, so both must
+        use the real Salesforce values even when a transform redacts them. This runs
+        for dropped/sampled-out records too, so their Id enters the dedup window.
+        The watermark advances only on a VALID timestamp; a null/garbage one keeps
+        the previous good watermark (never ""/"None", which would poison the next
+        WHERE clause).
+        """
+        ts_field_val = str(record.get(obj.timestamp_field) or "")
+        if _is_valid_watermark(ts_field_val):
+            watermark = ts_field_val
+        record_id = str(record.get("Id") or "")
+        if record_id:
+            window = [*window, record_id][-_MAX_CARRIED_IDS:]
+
+        if self._transforms.apply(record) is None:
+            return None, watermark, window
+        if obj.sample < 1.0 and not should_keep(
+            record_id or json.dumps(record, sort_keys=True, default=str), obj.sample
+        ):
+            self._metrics.entries_sampled_out.labels(
+                source="eventlog_objects", event_type=obj.name
+            ).inc()
+            return None, watermark, window
+
+        ts, used_fallback = extract_timestamp_checked(
+            record,
+            field_names=(obj.timestamp_field, "EventDate", "CreatedDate"),
+            fallback=_watermark_datetime(watermark),
+        )
+        if used_fallback:
+            self._metrics.timestamp_fallbacks.labels(source="eventlog_objects").inc()
+        line, sm = route_fields(record, self._sm_fields)
+
+        labels: dict[str, str] = {"source": "eventlog_objects", "event_type": obj.name}
+        checkpoint = CheckpointToken(
+            key=key,
+            value=json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True),
+        )
+        entry = LogEntry(
+            timestamp=ts,
+            labels=labels,
+            line=line,
+            structured_metadata=sm,
+            checkpoint=checkpoint,
+        )
+        return entry, watermark, window
