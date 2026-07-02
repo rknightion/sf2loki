@@ -30,13 +30,15 @@ sources:
     include: ["/event/*"]                           # (still filtered by these include/exclude globs)
     exclude: []
   eventlog_objects:
-    # Left off: the stored RTEM *Event objects (ApiEvent, ReportEvent, ...) are
-    # Salesforce big objects — they reject ORDER BY ASC / FIELDS(ALL), which is
-    # what this source builds, so polling them does not work. Near-real-time for
-    # those categories is Pub/Sub streaming, not this.
+    # Left off here (this org already covers logins via Pub/Sub + ELF), but the
+    # example below is a POLLABLE object so flipping enabled: true just works.
+    # NOTE: the stored RTEM *Event objects (LoginEvent, ApiEvent, ReportEvent, ...)
+    # are Salesforce big objects — they reject the ORDER BY ASC / FIELDS(ALL)
+    # query this source builds, so they CANNOT be polled here; stream those via
+    # Pub/Sub instead. LoginHistory is a standard object and polls fine.
     enabled: false
     objects:
-      - {name: LoginEvent, timestamp_field: EventDate, poll_interval: 5m, lookback: 1h}
+      - {name: LoginHistory, timestamp_field: LoginTime, poll_interval: 5m, lookback: 1h}
   eventlogfile:
     enabled: true
     interval: Hourly                                # this org generates Hourly files (Event Monitoring
