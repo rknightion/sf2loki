@@ -186,9 +186,10 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `store` | `Literal['file', 's3']` | file | no | State backend: file (local JSON, needs a persistent volume) \| s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra). |
+| `store` | `Literal['file', 's3', 'gcs']` | file | no | State backend: file (local JSON, needs a persistent volume) \| s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra) \| gcs (Google Cloud Storage, for stateless deployments; needs the sf2loki[gcs] extra). |
 | `file` | `FileStateConfig` |  | no | File-backed state store settings. |
 | `s3` | `S3StateConfig` |  | no | S3-backed state store settings. |
+| `gcs` | `GcsStateConfig` |  | no | GCS-backed state store settings. |
 
 ## FileStateConfig
 
@@ -205,12 +206,21 @@
 | `region` | `str` | null | no | AWS region; omit to use the default-chain region. |
 | `endpoint_url` | `str` | http://minio:9000 | no | Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3. |
 
+## GcsStateConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `bucket` | `str` | "" | no | Bucket name (required when state.store is gcs). |
+| `object_name` | `str` | sf2loki/state.json | no | Object name holding the checkpoint document. |
+| `service_file` | `Path` | null | no | Path to a service-account JSON key; omit to use Application Default Credentials. |
+
 ## CoordinateConfig
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `type` | `Literal['noop', 'file_lease']` | noop | no | noop (single instance) \| file_lease (active-passive via a shared lease file). |
+| `type` | `Literal['noop', 'file_lease', 'k8s_lease']` | noop | no | noop (single instance) \| file_lease (active-passive via a shared lease file) \| k8s_lease (active-passive via a Kubernetes Lease; needs the sf2loki[k8s] extra). |
 | `file_lease` | `FileLeaseConfig` |  | no | File-lease coordinator settings. |
+| `k8s_lease` | `K8sLeaseConfig` |  | no | Kubernetes-Lease coordinator settings. |
 
 ## FileLeaseConfig
 
@@ -220,6 +230,17 @@
 | `ttl` | `Duration` | 30s | no | Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by ttl; must exceed inter-host clock skew. |
 | `renew_interval` | `Duration` | 10s | no | How often the leader re-writes the lease (must be < ttl/2). |
 | `holder_id` | `str` | "" | no | Stable identity written into the lease; defaults to hostname-pid at startup. Set explicitly when hostnames aren't unique. |
+
+## K8sLeaseConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `namespace` | `str` | default | no | Namespace holding the Lease object. |
+| `name` | `str` | sf2loki-leader | no | Lease object name (shared by all replicas). |
+| `identity` | `str` | "" | no | holderIdentity written into the Lease; defaults to the pod name ($HOSTNAME) at startup. |
+| `lease_duration` | `Duration` | 30s | no | Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by this. |
+| `renew_interval` | `Duration` | 10s | no | How often the leader renews the Lease (must be < lease_duration/2). |
+| `kubeconfig` | `Path` | null | no | Path to a kubeconfig for out-of-cluster dev; omit to use in-cluster config. |
 
 ## ServiceConfig
 

@@ -983,13 +983,40 @@ class S3StateConfig(StrictModel):
     )
 
 
+class GcsStateConfig(StrictModel):
+    """Google Cloud Storage checkpoint store (stateless deployments).
+
+    The whole checkpoint document lives at one object; commits use GCS
+    generation preconditions (ifGenerationMatch) so two instances against the
+    same object fail fast instead of clobbering each other. Requires the ``gcs``
+    extra (``pip install sf2loki[gcs]``). Auth via Application Default
+    Credentials (ADC); set ``service_file`` only for an explicit key file.
+    """
+
+    bucket: str = Field(
+        default="",
+        description="Bucket name (required when state.store is gcs).",
+    )
+    object_name: str = Field(
+        default="sf2loki/state.json",
+        description="Object name holding the checkpoint document.",
+    )
+    service_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a service-account JSON key; omit to use Application Default Credentials."
+        ),
+    )
+
+
 class StateConfig(StrictModel):
-    store: Literal["file", "s3"] = Field(
+    store: Literal["file", "s3", "gcs"] = Field(
         default="file",
         description=(
             "State backend: file (local JSON, needs a persistent volume) | s3 "
             "(S3-compatible object storage, for stateless deployments; needs the "
-            "sf2loki[s3] extra)."
+            "sf2loki[s3] extra) | gcs (Google Cloud Storage, for stateless "
+            "deployments; needs the sf2loki[gcs] extra)."
         ),
     )
     file: FileStateConfig = Field(
@@ -998,11 +1025,16 @@ class StateConfig(StrictModel):
     s3: S3StateConfig = Field(
         default_factory=S3StateConfig, description="S3-backed state store settings."
     )
+    gcs: GcsStateConfig = Field(
+        default_factory=GcsStateConfig, description="GCS-backed state store settings."
+    )
 
     @model_validator(mode="after")
-    def _require_bucket_for_s3(self) -> StateConfig:
+    def _require_bucket_for_remote(self) -> StateConfig:
         if self.store == "s3" and not self.s3.bucket:
             raise ValueError("state.store is 's3' but state.s3.bucket is empty")
+        if self.store == "gcs" and not self.gcs.bucket:
+            raise ValueError("state.store is 'gcs' but state.gcs.bucket is empty")
         return self
 
 
@@ -1051,22 +1083,80 @@ class FileLeaseConfig(StrictModel):
         return self
 
 
+class K8sLeaseConfig(StrictModel):
+    """Kubernetes Lease for active-passive failover (coordination.k8s.io/v1).
+
+    The leader renews a Lease object (holderIdentity + renewTime); a standby
+    watches and takes over once the lease is stale (renewTime + duration in the
+    past). Optimistic concurrency uses the Lease's resourceVersion. Requires the
+    ``k8s`` extra (``pip install sf2loki[k8s]``). In-cluster config by default;
+    set ``kubeconfig`` for out-of-cluster dev.
+    """
+
+    namespace: str = Field(default="default", description="Namespace holding the Lease object.")
+    name: str = Field(
+        default="sf2loki-leader",
+        description="Lease object name (shared by all replicas).",
+    )
+    identity: str = Field(
+        default="",
+        description=(
+            "holderIdentity written into the Lease; defaults to the pod name "
+            "($HOSTNAME) at startup."
+        ),
+    )
+    lease_duration: Duration = Field(
+        default=timedelta(seconds=30),
+        description=(
+            "Lease lifetime: a standby takes over once the lease is this stale. "
+            "Failover time is bounded by this."
+        ),
+    )
+    renew_interval: Duration = Field(
+        default=timedelta(seconds=10),
+        description="How often the leader renews the Lease (must be < lease_duration/2).",
+    )
+    kubeconfig: Path | None = Field(
+        default=None,
+        description=("Path to a kubeconfig for out-of-cluster dev; omit to use in-cluster config."),
+    )
+
+    @model_validator(mode="after")
+    def _renew_must_beat_duration(self) -> K8sLeaseConfig:
+        if self.renew_interval.total_seconds() * 2 >= self.lease_duration.total_seconds():
+            raise ValueError(
+                "coordinate.k8s_lease.renew_interval must be less than half the "
+                f"lease_duration (renew {self.renew_interval.total_seconds():g}s vs "
+                f"lease_duration {self.lease_duration.total_seconds():g}s) so a single "
+                "missed renewal cannot cost leadership"
+            )
+        return self
+
+
 class CoordinateConfig(StrictModel):
     """Leadership coordination for active-passive HA.
 
     ``noop`` (default) = single instance, always leader. ``file_lease`` lets
-    two replicas share a lease file on common storage: the standby takes over
-    within one ttl when the leader dies, resuming from committed checkpoints
-    (at-least-once — brief double-ingest during a takeover window is possible,
-    loss is not).
+    two replicas share a lease file on common storage; ``k8s_lease`` uses a
+    Kubernetes Lease object instead. Either way the standby takes over within
+    one ttl/lease_duration when the leader dies, resuming from committed
+    checkpoints (at-least-once — brief double-ingest during a takeover window is
+    possible, loss is not).
     """
 
-    type: Literal["noop", "file_lease"] = Field(
+    type: Literal["noop", "file_lease", "k8s_lease"] = Field(
         default="noop",
-        description="noop (single instance) | file_lease (active-passive via a shared lease file).",
+        description=(
+            "noop (single instance) | file_lease (active-passive via a shared "
+            "lease file) | k8s_lease (active-passive via a Kubernetes Lease; needs "
+            "the sf2loki[k8s] extra)."
+        ),
     )
     file_lease: FileLeaseConfig = Field(
         default_factory=FileLeaseConfig, description="File-lease coordinator settings."
+    )
+    k8s_lease: K8sLeaseConfig = Field(
+        default_factory=K8sLeaseConfig, description="Kubernetes-Lease coordinator settings."
     )
 
 

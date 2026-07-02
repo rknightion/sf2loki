@@ -714,3 +714,55 @@ def test_eventlog_object_big_object_flag_defaults_false() -> None:
 
     assert EventLogObjectConfig(name="MyAudit__c").big_object is False
     assert EventLogObjectConfig(name="LoginEvent", big_object=True).big_object is True
+
+
+# --- GCS state store + k8s_lease coordinator config seams (#37, #36) ----------
+
+
+def test_state_store_gcs_requires_bucket() -> None:
+    from sf2loki.config import StateConfig
+
+    with pytest.raises(ValueError, match="bucket"):
+        StateConfig(store="gcs")  # gcs.bucket empty
+    StateConfig(store="gcs", gcs={"bucket": "b"})  # ok
+
+
+def test_gcs_state_config_defaults() -> None:
+    from sf2loki.config import GcsStateConfig
+
+    c = GcsStateConfig(bucket="b")
+    assert c.object_name == "sf2loki/state.json"
+    assert c.service_file is None
+
+
+def test_state_store_s3_still_requires_bucket() -> None:
+    # The validator rename must not regress the existing s3 rule.
+    from sf2loki.config import StateConfig
+
+    with pytest.raises(ValueError, match="bucket"):
+        StateConfig(store="s3")
+
+
+def test_k8s_lease_renew_must_beat_duration() -> None:
+    from sf2loki.config import K8sLeaseConfig
+
+    with pytest.raises(ValueError, match="less than half"):
+        K8sLeaseConfig(lease_duration=timedelta(seconds=10), renew_interval=timedelta(seconds=8))
+    K8sLeaseConfig(lease_duration=timedelta(seconds=30), renew_interval=timedelta(seconds=10))  # ok
+
+
+def test_k8s_lease_config_defaults() -> None:
+    from sf2loki.config import K8sLeaseConfig
+
+    c = K8sLeaseConfig()
+    assert c.namespace == "default"
+    assert c.name == "sf2loki-leader"
+    assert c.identity == ""
+    assert c.kubeconfig is None
+
+
+def test_coordinate_type_accepts_k8s_lease() -> None:
+    from sf2loki.config import CoordinateConfig
+
+    c = CoordinateConfig(type="k8s_lease", k8s_lease={"namespace": "ns", "name": "l"})
+    assert c.type == "k8s_lease" and c.k8s_lease.namespace == "ns"

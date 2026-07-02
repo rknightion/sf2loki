@@ -357,7 +357,7 @@ sink:  # Log sink settings.
     labels: {environment: prod}  # Static stream labels merged onto every push (job + sf_org_id are added automatically).
     structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]  # Event fields promoted to Loki structured metadata (not stream labels).
 state:  # Checkpoint/state store settings.
-  store: file  # State backend: file (local JSON, needs a persistent volume) | s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra).
+  store: file  # State backend: file (local JSON, needs a persistent volume) | s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra) | gcs (Google Cloud Storage, for stateless deployments; needs the sf2loki[gcs] extra).
   file:  # File-backed state store settings.
     path: /var/lib/sf2loki/state.json  # Checkpoint file path; persist on a mounted volume for durable resume.
   # The whole checkpoint document lives at one key; commits use conditional
@@ -370,13 +370,23 @@ state:  # Checkpoint/state store settings.
     key: sf2loki/state.json  # Object key holding the checkpoint document.
     region: null  # AWS region; omit to use the default-chain region.
     endpoint_url: http://minio:9000  # Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3.
+  # The whole checkpoint document lives at one object; commits use GCS
+  # generation preconditions (ifGenerationMatch) so two instances against the
+  # same object fail fast instead of clobbering each other. Requires the
+  # ``gcs`` extra (``pip install sf2loki[gcs]``). Auth via Application Default
+  # Credentials (ADC); set ``service_file`` only for an explicit key file.
+  gcs:  # GCS-backed state store settings.
+    bucket: ""  # Bucket name (required when state.store is gcs).
+    object_name: sf2loki/state.json  # Object name holding the checkpoint document.
+    service_file: null  # Path to a service-account JSON key; omit to use Application Default Credentials.
 # ``noop`` (default) = single instance, always leader. ``file_lease`` lets two
-# replicas share a lease file on common storage: the standby takes over within
-# one ttl when the leader dies, resuming from committed checkpoints (at-least-
-# once — brief double-ingest during a takeover window is possible, loss is
-# not).
+# replicas share a lease file on common storage; ``k8s_lease`` uses a
+# Kubernetes Lease object instead. Either way the standby takes over within one
+# ttl/lease_duration when the leader dies, resuming from committed checkpoints
+# (at-least-once — brief double-ingest during a takeover window is possible,
+# loss is not).
 coordinate:  # Leadership coordination for active-passive HA.
-  type: noop  # noop (single instance) | file_lease (active-passive via a shared lease file).
+  type: noop  # noop (single instance) | file_lease (active-passive via a shared lease file) | k8s_lease (active-passive via a Kubernetes Lease; needs the sf2loki[k8s] extra).
   # Lease-expiry semantics rather than flock (advisory locks are unreliable
   # over NFS): the leader renews a holder+expiry document via atomic
   # tmp+rename; a standby takes over once the lease has expired. Expiry uses
@@ -387,6 +397,18 @@ coordinate:  # Leadership coordination for active-passive HA.
     ttl: 30s  # Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by ttl; must exceed inter-host clock skew.
     renew_interval: 10s  # How often the leader re-writes the lease (must be < ttl/2).
     holder_id: ""  # Stable identity written into the lease; defaults to hostname-pid at startup. Set explicitly when hostnames aren't unique.
+  # The leader renews a Lease object (holderIdentity + renewTime); a standby
+  # watches and takes over once the lease is stale (renewTime + duration in the
+  # past). Optimistic concurrency uses the Lease's resourceVersion. Requires
+  # the ``k8s`` extra (``pip install sf2loki[k8s]``). In-cluster config by
+  # default; set ``kubeconfig`` for out-of-cluster dev.
+  k8s_lease:  # Kubernetes-Lease coordinator settings.
+    namespace: default  # Namespace holding the Lease object.
+    name: sf2loki-leader  # Lease object name (shared by all replicas).
+    identity: ""  # holderIdentity written into the Lease; defaults to the pod name ($HOSTNAME) at startup.
+    lease_duration: 30s  # Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by this.
+    renew_interval: 10s  # How often the leader renews the Lease (must be < lease_duration/2).
+    kubeconfig: null  # Path to a kubeconfig for out-of-cluster dev; omit to use in-cluster config.
 service:  # Application-level service settings.
   log_level: info  # Application log level: debug | info | warning | error | critical (case-insensitive).
   log_format: json  # Application log output format.

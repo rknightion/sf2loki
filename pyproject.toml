@@ -27,6 +27,8 @@ dependencies = [
 
 [project.optional-dependencies]
 s3 = ["aiobotocore>=2.21"]
+gcs = ["gcloud-aio-storage>=9.0"]
+k8s = ["kubernetes-asyncio>=31.1.0"]
 
 [project.scripts]
 sf2loki = "sf2loki.cli:main"
