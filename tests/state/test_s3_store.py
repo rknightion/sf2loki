@@ -532,7 +532,17 @@ def test_module_imports_without_aiobotocore_installed() -> None:
 
     import sf2loki.state.s3_store as s3_store_module
 
-    importlib.reload(s3_store_module)
+    # reload() rebinds every class in the module (incl. StateStoreConflictError),
+    # so anything that imported those classes earlier would then mismatch on a
+    # later `pytest.raises(StateStoreConflictError)` (cross-file pollution, e.g.
+    # tests/test_statecmd.py). Snapshot + restore the module namespace so this
+    # reload proves re-importability without leaking new class identities.
+    saved = dict(vars(s3_store_module))
+    try:
+        importlib.reload(s3_store_module)
+    finally:
+        vars(s3_store_module).clear()
+        vars(s3_store_module).update(saved)
 
 
 @pytest.mark.asyncio

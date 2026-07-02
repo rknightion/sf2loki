@@ -130,6 +130,155 @@ sink:
     assert "Traceback" not in err
 
 
+def test_state_show_subcommand_dispatches_and_prints_checkpoints(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sf2loki.config import load
+    from sf2loki.state.file_store import FileCheckpointStore
+
+    state_path = tmp_path / "state.json"
+    p = _valid_config(tmp_path)
+    p.write_text(
+        p.read_text()
+        + f"""
+state:
+  store: file
+  file:
+    path: {state_path}
+"""
+    )
+    cfg = load(p)
+    store = FileCheckpointStore(cfg.state.file.path)
+    import asyncio
+
+    asyncio.run(store.commit("pubsub:/event/A", "42"))
+    store.close()
+
+    rc = main(["--config", str(p), "state", "show"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pubsub:/event/A" in out
+    assert "42" in out
+
+
+def test_state_show_subcommand_key_glob_arg_is_parsed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_path = tmp_path / "state.json"
+    p = _valid_config(tmp_path)
+    p.write_text(
+        p.read_text()
+        + f"""
+state:
+  store: file
+  file:
+    path: {state_path}
+"""
+    )
+    rc = main(["--config", str(p), "state", "show", "--key", "no-match-*"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no checkpoints match" in out
+
+
+def test_state_set_subcommand_dispatches_and_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sf2loki.config import load
+    from sf2loki.state.file_store import FileCheckpointStore
+
+    state_path = tmp_path / "state.json"
+    p = _valid_config(tmp_path)
+    p.write_text(
+        p.read_text()
+        + f"""
+state:
+  store: file
+  file:
+    path: {state_path}
+"""
+    )
+    rc = main(["--config", str(p), "state", "set", "pubsub:/event/A", "99"])
+    assert rc == 0
+    assert "set pubsub:/event/A = 99" in capsys.readouterr().out
+
+    cfg = load(p)
+    store = FileCheckpointStore(cfg.state.file.path, exclusive_lock=False)
+    import asyncio
+
+    assert asyncio.run(store.load("pubsub:/event/A")) == "99"
+
+
+def test_state_delete_subcommand_dispatches_and_removes(tmp_path: Path) -> None:
+    import asyncio
+
+    from sf2loki.config import load
+    from sf2loki.state.file_store import FileCheckpointStore
+
+    state_path = tmp_path / "state.json"
+    p = _valid_config(tmp_path)
+    p.write_text(
+        p.read_text()
+        + f"""
+state:
+  store: file
+  file:
+    path: {state_path}
+"""
+    )
+    cfg = load(p)
+    store = FileCheckpointStore(cfg.state.file.path)
+    asyncio.run(store.commit("pubsub:/event/A", "42"))
+    store.close()
+
+    rc = main(["--config", str(p), "state", "delete", "pubsub:/event/A"])
+    assert rc == 0
+
+    store2 = FileCheckpointStore(cfg.state.file.path, exclusive_lock=False)
+    assert asyncio.run(store2.load("pubsub:/event/A")) is None
+
+
+def test_state_subcommand_refuses_locked_file_store_unless_force(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import asyncio
+
+    from sf2loki.config import load
+    from sf2loki.state.file_store import FileCheckpointStore
+
+    state_path = tmp_path / "state.json"
+    p = _valid_config(tmp_path)
+    p.write_text(
+        p.read_text()
+        + f"""
+state:
+  store: file
+  file:
+    path: {state_path}
+"""
+    )
+    cfg = load(p)
+    daemon_store = FileCheckpointStore(cfg.state.file.path)
+    asyncio.run(daemon_store.commit("k1", "v1"))
+    try:
+        rc = main(["--config", str(p), "state", "show"])
+        err = capsys.readouterr().err
+        assert rc != 0
+        assert "--force" in err
+
+        rc_forced = main(["--config", str(p), "state", "show", "--force"])
+        assert rc_forced == 0
+    finally:
+        daemon_store.close()
+
+
+def test_state_subcommand_requires_a_sub_subcommand(tmp_path: Path) -> None:
+    """`sf2loki state` with no show/set/delete must be an argparse error, not a crash."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["state"])
+    assert exc_info.value.code != 0
+
+
 def test_check_and_run_and_backfill_share_one_config_error_exit_code(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -307,6 +307,57 @@ class S3CheckpointStore:
             self._cache = new_cache
             self._etag = resp.get("ETag")
 
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the state document (issue #63: checkpoint repair).
+
+        A missing key is a no-op, not an error (no PUT is issued). Otherwise
+        this is a conditional PUT of the document minus *key* — the same
+        fence-check + CAS discipline as :meth:`commit_many`, so a racing
+        writer against the same object still fails fast with
+        :class:`StateStoreConflictError` instead of the delete silently
+        clobbering it (or vice versa).
+        """
+        async with self._lock:
+            if self._fence is not None:
+                self._fence()
+            await self._ensure_loaded()
+            assert self._cache is not None
+            if key not in self._cache:
+                return
+            new_cache = {k: v for k, v in self._cache.items() if k != key}
+            client = await self._get_client()
+            body = json.dumps(new_cache).encode("utf-8")
+            put_kwargs: dict[str, Any] = {
+                "Bucket": self._cfg.bucket,
+                "Key": self._cfg.key,
+                "Body": body,
+            }
+            if self._etag is None:
+                put_kwargs["IfNoneMatch"] = "*"
+            else:
+                put_kwargs["IfMatch"] = self._etag
+
+            async def _do_put() -> dict[str, Any]:
+                try:
+                    result: dict[str, Any] = await client.put_object(**put_kwargs)
+                    return result
+                except Exception as exc:
+                    code = _error_code(exc)
+                    status = _status_code(exc)
+                    if code in _PRECONDITION_FAILED_CODES or status == 412:
+                        raise StateStoreConflictError(
+                            f"delete on s3://{self._cfg.bucket}/{self._cfg.key} lost a "
+                            "compare-and-swap race — another sf2loki instance is writing "
+                            "the same state object. Two instances sharing S3 checkpoint "
+                            "state would double-ingest and clobber each other's "
+                            "checkpoints; point each instance at its own key."
+                        ) from exc
+                    raise
+
+            resp = await _retry_transient(_do_put)
+            self._cache = new_cache
+            self._etag = resp.get("ETag")
+
     async def close(self) -> None:
         if self._client_cm is not None:
             cm, self._client_cm = self._client_cm, None

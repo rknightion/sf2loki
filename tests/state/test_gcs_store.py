@@ -543,7 +543,16 @@ def test_module_imports_without_gcloud_installed() -> None:
 
     import sf2loki.state.gcs_store as gcs_store_module
 
-    importlib.reload(gcs_store_module)
+    # Snapshot + restore so the reload doesn't leak new class identities into the
+    # rest of the session (see the same guard in test_s3_store.py) — gcs_store
+    # re-imports StateStoreConflictError from s3_store on reload, which would
+    # otherwise mismatch a later pytest.raises in tests/test_statecmd.py.
+    saved = dict(vars(gcs_store_module))
+    try:
+        importlib.reload(gcs_store_module)
+    finally:
+        vars(gcs_store_module).clear()
+        vars(gcs_store_module).update(saved)
 
 
 class _CallableFactory:

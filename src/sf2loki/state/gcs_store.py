@@ -263,6 +263,56 @@ class GcsCheckpointStore:
             self._cache = new_cache
             self._generation = str(resp["generation"])
 
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the state document (issue #63: checkpoint repair).
+
+        A missing key is a no-op (no upload is issued). Otherwise this is a
+        conditional upload of the document minus *key* — the same
+        fence-check + CAS discipline as :meth:`commit_many`, so a racing
+        writer against the same object still fails fast with
+        :class:`StateStoreConflictError` instead of the delete silently
+        clobbering it (or vice versa).
+        """
+        async with self._lock:
+            if self._fence is not None:
+                self._fence()
+            await self._ensure_loaded()
+            assert self._cache is not None
+            if key not in self._cache:
+                return
+            new_cache = {k: v for k, v in self._cache.items() if k != key}
+            client = await self._get_client()
+            body = json.dumps(new_cache).encode("utf-8")
+            precondition = (
+                {"ifGenerationMatch": "0"}
+                if self._generation is None
+                else {"ifGenerationMatch": self._generation}
+            )
+
+            async def _do_upload() -> dict[str, Any]:
+                try:
+                    result: dict[str, Any] = await client.upload(
+                        self._cfg.bucket,
+                        self._cfg.object_name,
+                        body,
+                        parameters=precondition,
+                    )
+                    return result
+                except Exception as exc:
+                    if _status_code(exc) == _PRECONDITION_FAILED:
+                        raise StateStoreConflictError(
+                            f"delete on gs://{self._cfg.bucket}/{self._cfg.object_name} lost "
+                            "a compare-and-swap race — another sf2loki instance is writing "
+                            "the same state object. Two instances sharing GCS checkpoint "
+                            "state would double-ingest and clobber each other's "
+                            "checkpoints; point each instance at its own object."
+                        ) from exc
+                    raise
+
+            resp = await _retry_transient(_do_upload)
+            self._cache = new_cache
+            self._generation = str(resp["generation"])
+
     async def close(self) -> None:
         if self._client_cm is not None:
             cm, self._client_cm = self._client_cm, None

@@ -225,6 +225,52 @@ class FileCheckpointStore:
                 self._cache.update(items)
                 self._flush()
 
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the state document (issue #63: checkpoint repair).
+
+        A missing key is a no-op, not an error. Mirrors :meth:`commit_many`'s
+        fence-check + epoch-CAS discipline so a stale leader (or a
+        lock-bypassing ``--force`` operator racing the real daemon) cannot
+        silently corrupt state — deleting the wrong instance's view of it.
+        """
+        async with self._lock:
+            # Fence first: a non-leader must raise before touching any state.
+            if self._fence is not None:
+                self._fence()
+            if self._epoch_fn is not None:
+                self._delete_epoch_fenced(key)
+            else:
+                self._ensure_loaded()
+                assert self._cache is not None
+                if key not in self._cache:
+                    return
+                del self._cache[key]
+                self._flush()
+
+    def _delete_epoch_fenced(self, key: str) -> None:
+        """Delete path used when set_epoch() is installed (mirrors
+        :meth:`_commit_many_epoch_fenced`'s fresh-read + epoch-CAS discipline).
+        """
+        self._acquire_instance_lock()
+        doc = self._read_file_fresh()
+        stored_raw = doc.get(_EPOCH_KEY)
+        stored = int(stored_raw) if stored_raw is not None else None
+        assert self._epoch_fn is not None
+        mine = self._epoch_fn()
+        if stored is not None and mine is not None and stored > mine:
+            raise StateFenceError(
+                f"stale leader (epoch {mine}) rejected: state file {self._path} "
+                f"was already advanced to epoch {stored} by a newer leader"
+            )
+        if key not in doc:
+            self._cache = doc
+            return
+        del doc[key]
+        if mine is not None:
+            doc[_EPOCH_KEY] = str(mine)
+        self._cache = doc
+        self._flush()
+
     def _commit_many_epoch_fenced(self, items: Mapping[str, str]) -> None:
         """Commit path used when set_epoch() is installed (issue #47).
 

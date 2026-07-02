@@ -140,6 +140,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         "configured org). Ignored for single-org configs.",
     )
 
+    state_parser = subparsers.add_parser(
+        "state",
+        help="Inspect/repair checkpoints in the configured state store (see "
+        "docs/state-runbook.md for stuck-watermark recovery).",
+    )
+    state_subparsers = state_parser.add_subparsers(dest="state_command", required=True)
+
+    state_show_parser = state_subparsers.add_parser(
+        "show", help="Pretty-print checkpoints from the configured store (nothing is redacted)."
+    )
+    state_show_parser.add_argument(
+        "--key",
+        dest="key_glob",
+        default="*",
+        help="fnmatch glob to filter checkpoint keys (default: show all).",
+    )
+    state_show_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the file store's exclusive lock (unsafe if the daemon is "
+        "actually still running against the same state file).",
+    )
+
+    state_set_parser = state_subparsers.add_parser(
+        "set", help="CAS-safe write of a single checkpoint key."
+    )
+    state_set_parser.add_argument("key")
+    state_set_parser.add_argument("value")
+    state_set_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the file store's exclusive lock (unsafe if the daemon is "
+        "actually still running against the same state file).",
+    )
+
+    state_delete_parser = state_subparsers.add_parser(
+        "delete",
+        help="Remove a checkpoint key so its source restarts from its preset/lookback.",
+    )
+    state_delete_parser.add_argument("key")
+    state_delete_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the file store's exclusive lock (unsafe if the daemon is "
+        "actually still running against the same state file).",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "config":
@@ -191,6 +238,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 legacy_fallback=legacy_fallback,
             )
         )
+
+    if args.command == "state":
+        from sf2loki.statecmd import run_state_delete, run_state_set, run_state_show
+
+        if args.state_command == "show":
+            return uvloop.run(run_state_show(args.config, key_glob=args.key_glob, force=args.force))
+        if args.state_command == "set":
+            return uvloop.run(run_state_set(args.config, args.key, args.value, force=args.force))
+        return uvloop.run(run_state_delete(args.config, args.key, force=args.force))
 
     if args.check:
         try:
