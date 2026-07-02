@@ -142,3 +142,26 @@ async def test_drop_mode_budget_does_not_degrade_readiness() -> None:
         assert r.status_code == 200
     finally:
         await health.stop()
+
+
+def test_apexlog_source_built_when_enabled() -> None:
+    from sf2loki.sources.apexlog_source import ApexLogSource
+
+    appn = App.build(
+        _cfg(
+            sources={
+                "pubsub": {"enabled": False},
+                "eventlog_objects": {"enabled": False},
+                "eventlogfile": {"enabled": False},
+                "apexlog": {"enabled": True},
+            }
+        )
+    )
+    assert any(isinstance(s, ApexLogSource) for s in appn._pipeline._sources)
+
+
+def test_apexlog_source_absent_when_disabled() -> None:
+    from sf2loki.sources.apexlog_source import ApexLogSource
+
+    appn = App.build(_cfg())
+    assert not any(isinstance(s, ApexLogSource) for s in appn._pipeline._sources)

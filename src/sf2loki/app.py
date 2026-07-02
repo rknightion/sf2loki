@@ -40,6 +40,7 @@ from sf2loki.obs.logging import configure_logging, get_logger
 from sf2loki.obs.metrics import Metrics
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
 from sf2loki.sinks.loki.sink import LokiSink
+from sf2loki.sources.apexlog_source import ApexLogSource
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.sources.org_adapter import OrgSource
@@ -420,6 +421,10 @@ class Pipeline:
             self._metrics.watermark_ts.labels(source="eventlogfile", object=event_type).set(
                 _parse_eventlogfile_watermark(value)
             )
+        elif key == "apexlog":
+            self._metrics.watermark_ts.labels(source="apexlog", object="apexlog").set(
+                _parse_apexlog_watermark(value)
+            )
 
 
 def _parse_watermark_seconds(value: str) -> float:
@@ -442,6 +447,17 @@ def _parse_eventlogfile_watermark(value: str) -> float:
     try:
         last_created = json.loads(value).get("last_created", "")
         return _parse_watermark_seconds(str(last_created))
+    except ValueError, AttributeError, TypeError:
+        return datetime.now(UTC).timestamp()
+
+
+def _parse_apexlog_watermark(value: str) -> float:
+    """Parse an apexlog checkpoint (JSON {"last_ts", "ids"}) → Unix ts.
+
+    Falls back to "now" on any parse error — observability only, never raises.
+    """
+    try:
+        return _parse_watermark_seconds(str(json.loads(value).get("last_ts", "")))
     except ValueError, AttributeError, TypeError:
         return datetime.now(UTC).timestamp()
 
@@ -648,8 +664,24 @@ def _build_org_sources(
             )
         )
 
+    if org.sources.apexlog.enabled:
+        from sf2loki.salesforce.apexlog_client import ApexLogClient
+
+        apex_client = ApexLogClient(sf_cfg, tokens, sf_http, metrics=metrics)
+        sources.append(
+            ApexLogSource(
+                org.sources.apexlog,
+                apex_client,
+                sm_fields=sm_fields,
+                metrics=metrics,
+                transform_salt=transform_salt,
+            )
+        )
+
     # Fail fast if one event category is fed by more than one source WITHIN this
-    # org (cross-org overlap is fine — different orgs, different events).
+    # org (cross-org overlap is fine — different orgs, different events). ApexLog
+    # is a distinct developer-log category with no cross-source collision, so it
+    # is intentionally not part of the overlap check.
     check_overlap(
         pubsub_topics=pubsub_topics,
         stored_objects=stored_objects,
