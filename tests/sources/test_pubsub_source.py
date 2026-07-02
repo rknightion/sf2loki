@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,6 +23,12 @@ from sf2loki.salesforce._generated import pubsub_api_pb2_grpc as pb_grpc
 from sf2loki.salesforce.avro_codec import SchemaFetchError
 from sf2loki.salesforce.pubsub_client import DecodedEvent, KeepaliveEvent, PubSubClient, preset_for
 from sf2loki.sources.pubsub_source import PubSubSource, _jitter
+
+# The `wait_until` fixture (tests/conftest.py): bounded poll-for-condition,
+# used below in place of a fixed `asyncio.sleep(N)` wherever the sleep was
+# really "wait for the other task to reach some state" rather than an
+# assertion about a real elapsed duration.
+WaitUntil = Callable[..., Awaitable[None]]
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -606,7 +612,7 @@ def test_source_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconnect_increments_metric() -> None:
+async def test_reconnect_increments_metric(wait_until: WaitUntil) -> None:
     """Each reconnect (not the initial connection) increments pubsub_reconnects."""
     stop = asyncio.Event()
     # No stop_after_first: the fake client keeps returning empty streams after the
@@ -623,7 +629,12 @@ async def test_reconnect_increments_metric() -> None:
             entries.append(entry)
 
     task = asyncio.create_task(consume())
-    await asyncio.sleep(0.2)  # let several reconnect cycles elapse (backoff stays ~0.01s)
+
+    def _reconnected() -> bool:
+        val = metrics.registry.get_sample_value("sf2loki_pubsub_reconnects_total", {"topic": TOPIC})
+        return val is not None and val >= 1.0
+
+    await wait_until(_reconnected)  # at least one reconnect cycle elapsed
     stop.set()
     await asyncio.wait_for(task, timeout=5.0)
 
@@ -632,7 +643,7 @@ async def test_reconnect_increments_metric() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_error_is_logged() -> None:
+async def test_stream_error_is_logged(wait_until: WaitUntil) -> None:
     """A subscribe error is logged (previously swallowed silently, hiding failures)."""
 
     class RaisingClient:
@@ -664,7 +675,7 @@ async def test_stream_error_is_logged() -> None:
                 pass
 
         task = asyncio.create_task(consume())
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: any(e["event"] == "pubsub stream error" for e in captured))
         stop.set()
         await asyncio.wait_for(task, timeout=5.0)
 
@@ -966,6 +977,7 @@ async def test_cancelled_topic_task_with_full_queue_does_not_hang() -> None:
     """
     stop = asyncio.Event()
     hang = asyncio.Event()
+    subscribed = asyncio.Event()  # signals the fake has reached the (hanging) subscribe call
 
     class HangingClient:
         async def subscribe(
@@ -978,6 +990,7 @@ async def test_cancelled_topic_task_with_full_queue_does_not_hang() -> None:
         ) -> AsyncIterator[DecodedEvent]:
             if False:  # make this an async generator
                 yield  # pragma: no cover
+            subscribed.set()
             await hang.wait()
 
         async def aclose(self) -> None:
@@ -994,7 +1007,7 @@ async def test_cancelled_topic_task_with_full_queue_does_not_hang() -> None:
     queue.put_nowait(None)  # fill the queue so a sentinel put would block
 
     task = asyncio.create_task(src._run_topic(TOPIC, state, stop, queue))
-    await asyncio.sleep(0.05)  # let the task reach the subscribe await
+    await asyncio.wait_for(subscribed.wait(), timeout=2.0)  # task reached the subscribe await
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1.0)
@@ -1174,7 +1187,7 @@ async def test_rediscovery_interval_zero_discovers_exactly_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rediscovery_failure_only_logs_and_source_survives() -> None:
+async def test_rediscovery_failure_only_logs_and_source_survives(wait_until: WaitUntil) -> None:
     """A discovery failure mid-run logs (ERROR after retries) but never kills the source."""
     disc = SequenceDiscoverer([[TOPIC], RuntimeError("discovery down")])
     client = FakePubSubClient({TOPIC: [make_event()]})
@@ -1196,10 +1209,9 @@ async def test_rediscovery_failure_only_logs_and_source_survives() -> None:
     with structlog.testing.capture_logs() as captured:
         task = asyncio.create_task(consume())
         # initial call + one full failed rediscovery pass (3 retry attempts)
-        deadline = asyncio.get_running_loop().time() + 5.0
-        while disc.calls < 4:
-            assert asyncio.get_running_loop().time() < deadline, "rediscovery retries never ran"
-            await asyncio.sleep(0.01)
+        await wait_until(
+            lambda: disc.calls >= 4, timeout_s=5.0, interval=0.01
+        )  # "rediscovery retries never ran" if this times out
         assert not task.done(), "a rediscovery failure must not kill the source"
         stop.set()
         await asyncio.wait_for(task, timeout=5.0)
@@ -1628,7 +1640,7 @@ async def test_corrupt_stored_replay_id_falls_back_with_metric_and_error_log() -
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_load_never_retried_after_first_success() -> None:
+async def test_checkpoint_load_never_retried_after_first_success(wait_until: WaitUntil) -> None:
     """Once the position is loaded, later reconnects must NOT reload from state
     (they resume from the in-memory replay_id, not the original checkpoint)."""
     stop = asyncio.Event()
@@ -1643,7 +1655,7 @@ async def test_checkpoint_load_never_retried_after_first_success() -> None:
             pass
 
     task = asyncio.create_task(consume())
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: len(client.calls) >= 3)  # several reconnects have happened
     stop.set()
     await asyncio.wait_for(task, timeout=5.0)
 
@@ -1787,7 +1799,14 @@ async def test_bridge_charge_blocks_until_release_frees_budget() -> None:
 
     small = _make_entry("y")
     blocked = asyncio.create_task(src._bridge_charge(small))
-    await asyncio.sleep(0.05)
+    # No external signal marks "the task reached the blocking wait_for" (it's the
+    # thing under test), so give it a bounded number of scheduler turns instead of
+    # a real-time sleep — deterministic regardless of CPU speed/load, since it
+    # depends on event-loop turns rather than wall-clock time.
+    for _ in range(50):
+        if blocked.done():
+            break
+        await asyncio.sleep(0)
     assert not blocked.done(), "producer should block while over budget"
 
     await src._bridge_release(big)

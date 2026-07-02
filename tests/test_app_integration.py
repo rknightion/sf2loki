@@ -298,14 +298,19 @@ async def test_drain_with_grace_returns_once_coro_finishes_on_its_own() -> None:
 
 async def test_drain_with_grace_lets_a_stop_aware_coro_finish_within_grace() -> None:
     """A coroutine that notices stop and exits quickly returns well before grace expires."""
+    stop = asyncio.Event()
+    # Signals that the drained coroutine has actually started (and is pending on
+    # stop.wait()) before we set stop — guarantees this test exercises the
+    # "task not yet done, wait for it within grace" branch of _drain_with_grace,
+    # not the "already finished" branch covered by the sibling test above.
+    started = asyncio.Event()
 
     async def stop_aware() -> None:
+        started.set()
         await stop.wait()
 
-    stop = asyncio.Event()
-
     async def trigger_stop() -> None:
-        await asyncio.sleep(0.05)
+        await started.wait()
         stop.set()
 
     trigger_task = asyncio.create_task(trigger_stop())

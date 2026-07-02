@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -15,6 +15,12 @@ from sf2loki.config import LokiBatchConfig
 from sf2loki.model import Batch, CheckpointToken, LogEntry
 from sf2loki.obs.metrics import Metrics
 from sf2loki.sinks.base import PermanentSinkError, RetryableSinkError
+
+# The `wait_until` fixture (tests/conftest.py): bounded poll-for-condition,
+# used throughout this file in place of a fixed `asyncio.sleep(N)` wherever
+# the sleep was really "wait for the other task to reach some state" rather
+# than an assertion about a real elapsed duration.
+WaitUntil = Callable[..., Awaitable[None]]
 
 
 def _entry(key: str, value: str, line: str = "{}") -> LogEntry:
@@ -197,7 +203,7 @@ async def test_retryable_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert state.committed == {"k": "v"}
 
 
-async def test_flush_by_interval_before_source_finishes() -> None:
+async def test_flush_by_interval_before_source_finishes(wait_until: WaitUntil) -> None:
     block = asyncio.Event()
     src = FakeSource([_entry("k", "v")], block=block)
     sink = FakeSink()
@@ -205,8 +211,8 @@ async def test_flush_by_interval_before_source_finishes() -> None:
     pipe = _pipeline(src, sink, state, max_entries=1000)  # never hit size threshold
 
     task = asyncio.create_task(pipe.run(asyncio.Event()))
-    # Give the consumer time to hit the flush_interval (0.05s) while the source is blocked.
-    await asyncio.sleep(0.2)
+    # Wait for the consumer to hit the flush_interval (0.05s) while the source is blocked.
+    await wait_until(lambda: len(sink.pushed) == 1)
     assert len(sink.pushed) == 1  # flushed by interval, not by source completion
 
     block.set()
@@ -270,7 +276,9 @@ async def test_commit_updates_watermark_ts_for_eventlog_objects_key() -> None:
     assert val is not None and abs(val - expected) < 1.0
 
 
-async def test_flush_retry_loop_is_stop_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_flush_retry_loop_is_stop_aware(
+    monkeypatch: pytest.MonkeyPatch, wait_until: WaitUntil
+) -> None:
     """Stop fired mid-backoff aborts the retry loop promptly (no full backoff wait)."""
     monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 5.0)
     src = FakeSource([_entry("k", "v")])
@@ -280,7 +288,7 @@ async def test_flush_retry_loop_is_stop_aware(monkeypatch: pytest.MonkeyPatch) -
 
     stop = asyncio.Event()
     task = asyncio.create_task(pipe.run(stop))
-    await asyncio.sleep(0.05)  # let the first push attempt fail and enter backoff
+    await wait_until(lambda: sink.attempts >= 1)  # first push attempt failed, now in backoff
     stop.set()
     await asyncio.wait_for(task, timeout=0.5)  # would be ~5s without the fix
 
@@ -383,7 +391,7 @@ async def test_only_keepalives_flush_skips_sink_and_commits_directly() -> None:
 
 
 async def test_keepalive_token_not_committed_when_push_abandoned(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, wait_until: WaitUntil
 ) -> None:
     """Commit-after-push invariant: a keepalive queued behind a real entry must
     not commit if that entry's push never succeeded."""
@@ -395,7 +403,7 @@ async def test_keepalive_token_not_committed_when_push_abandoned(
 
     stop = asyncio.Event()
     task = asyncio.create_task(pipe.run(stop))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: sink.attempts >= 1)  # first push attempt failed, now in backoff
     stop.set()
     await asyncio.wait_for(task, timeout=0.5)
 
@@ -480,7 +488,9 @@ def test_explicit_queue_maxsize_overrides_batch_config() -> None:
     assert pipe._queue_maxsize == 7
 
 
-async def test_producer_blocks_on_byte_budget_and_resumes_as_consumer_drains() -> None:
+async def test_producer_blocks_on_byte_budget_and_resumes_as_consumer_drains(
+    wait_until: WaitUntil,
+) -> None:
     # cost per entry = 100-byte line + 64 overhead = 164; budget 150 admits one
     # entry at a time (admitted while under budget, blocked once at/over it).
     line = "x" * 100
@@ -495,15 +505,13 @@ async def test_producer_blocks_on_byte_budget_and_resumes_as_consumer_drains() -
     queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
     task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
 
-    await asyncio.sleep(0.05)
-    assert queue.qsize() == 1  # entry 0 admitted, entry 1 blocked on bytes
+    await wait_until(lambda: queue.qsize() == 1)  # entry 0 admitted, entry 1 blocked on bytes
     assert not task.done()
 
     # Drain one item the way the consumer does; the producer resumes.
     item = await queue.get()
     await pipe._release(item)
-    await asyncio.sleep(0.05)
-    assert queue.qsize() == 1  # entry 1 admitted, entry 2 blocked
+    await wait_until(lambda: queue.qsize() == 1)  # entry 1 admitted, entry 2 blocked
 
     item = await queue.get()
     await pipe._release(item)
@@ -534,7 +542,9 @@ async def test_single_oversized_entry_still_admitted() -> None:
     assert state.committed == {"k": "v"}
 
 
-async def test_count_bound_still_enforced_when_byte_accounting_disabled() -> None:
+async def test_count_bound_still_enforced_when_byte_accounting_disabled(
+    wait_until: WaitUntil,
+) -> None:
     entries = [_entry("k", str(i)) for i in range(105)]
     pipe = Pipeline(
         sources=[],
@@ -546,8 +556,7 @@ async def test_count_bound_still_enforced_when_byte_accounting_disabled() -> Non
     queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=pipe._queue_maxsize)
     task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
 
-    await asyncio.sleep(0.05)
-    assert queue.qsize() == 100  # count bound reached
+    await wait_until(lambda: queue.qsize() == 100)  # count bound reached
     assert not task.done()
 
     while not task.done():
@@ -573,7 +582,9 @@ async def test_checkpoint_only_entries_cost_no_bytes() -> None:
     assert queue.qsize() == 6  # 5 keepalives + sentinel, none blocked
 
 
-async def test_clean_shutdown_with_byte_blocked_producer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_clean_shutdown_with_byte_blocked_producer(
+    monkeypatch: pytest.MonkeyPatch, wait_until: WaitUntil
+) -> None:
     """stop must unblock a producer stuck on the byte budget (via consumer drain)."""
     monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 0.01)
     line = "x" * 200
@@ -589,7 +600,7 @@ async def test_clean_shutdown_with_byte_blocked_producer(monkeypatch: pytest.Mon
 
     stop = asyncio.Event()
     task = asyncio.create_task(pipe.run(stop))
-    await asyncio.sleep(0.1)  # producer now blocked on bytes, consumer in retry
+    await wait_until(lambda: sink.attempts >= 1)  # producer now blocked on bytes, consumer in retry
     assert not task.done()
     stop.set()
     await asyncio.wait_for(task, timeout=2)
@@ -613,7 +624,9 @@ async def test_flush_success_sets_last_push_metric_and_clears_failing_since(
     assert val is not None and val > 0.0
 
 
-async def test_failing_since_set_while_sink_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_failing_since_set_while_sink_retries(
+    monkeypatch: pytest.MonkeyPatch, wait_until: WaitUntil
+) -> None:
     monkeypatch.setattr(app_module, "_RETRY_BACKOFF_BASE", 5.0)
     src = FakeSource([_entry("k", "v")])
     sink = FakeSink(fail_times=10**6)
@@ -622,7 +635,7 @@ async def test_failing_since_set_while_sink_retries(monkeypatch: pytest.MonkeyPa
 
     stop = asyncio.Event()
     task = asyncio.create_task(pipe.run(stop))
-    await asyncio.sleep(0.1)  # flush_interval 0.05s -> first push attempt failed
+    await wait_until(lambda: pipe.sink_failing_since is not None)
     assert pipe.sink_failing_since is not None
     stop.set()
     await asyncio.wait_for(task, timeout=1)

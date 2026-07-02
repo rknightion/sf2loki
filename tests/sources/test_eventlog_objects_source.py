@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,12 @@ from sf2loki.obs.metrics import Metrics
 from sf2loki.salesforce.soql_client import to_soql_datetime_literal
 from sf2loki.sources.eventlog_objects_source import EventLogObjectsSource
 from sf2loki.state.file_store import FileCheckpointStore
+
+# The `wait_until` fixture (tests/conftest.py): bounded poll-for-condition,
+# used below in place of a fixed `asyncio.sleep(N)` wherever the sleep was
+# really "wait for the other task to reach some state" rather than an
+# assertion about a real elapsed duration.
+WaitUntil = Callable[..., Awaitable[None]]
 
 # ---------------------------------------------------------------------------
 # Shared fakes
@@ -262,11 +269,11 @@ async def test_stop_event_prevents_yield(tmp_path: pytest.TempPathFactory) -> No
 @pytest.mark.asyncio
 @respx.mock
 async def test_stop_during_inter_cycle_sleep_returns_promptly(
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: pytest.TempPathFactory, wait_until: WaitUntil
 ) -> None:
     """Setting stop during the between-cycles sleep returns promptly, not after poll_interval."""
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
-    respx.get(_query_url()).mock(
+    route = respx.get(_query_url()).mock(
         return_value=httpx.Response(200, json={"records": [], "done": True})
     )
 
@@ -288,7 +295,9 @@ async def test_stop_during_inter_cycle_sleep_returns_promptly(
                 pass
 
         task = asyncio.create_task(consume())
-        await asyncio.sleep(0.05)  # let the first (empty) cycle complete and enter the sleep
+        # The query firing means the first empty cycle has finished and the
+        # source is now in the 60s inter-cycle wait.
+        await wait_until(lambda: route.call_count >= 1)
         stop.set()
         await asyncio.wait_for(task, timeout=1.0)  # << would be 60s without the fix
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -26,6 +26,12 @@ from sf2loki.salesforce.eventlogfile_client import (
 )
 from sf2loki.sources.eventlogfile_source import EventLogFileSource
 from sf2loki.state.file_store import FileCheckpointStore
+
+# The `wait_until` fixture (tests/conftest.py): bounded poll-for-condition,
+# used below in place of a fixed `asyncio.sleep(N)` wherever the sleep was
+# really "wait for the other task to reach some state" rather than an
+# assertion about a real elapsed duration.
+WaitUntil = Callable[..., Awaitable[None]]
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -426,7 +432,7 @@ async def test_stop_set_before_iteration_yields_nothing(
 
 @pytest.mark.asyncio
 async def test_stop_during_inter_cycle_sleep_returns_promptly(
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: pytest.TempPathFactory, wait_until: WaitUntil
 ) -> None:
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     client = FakeEventLogFileClient(files=[], rows_by_id={})
@@ -439,7 +445,9 @@ async def test_stop_during_inter_cycle_sleep_returns_promptly(
             pass
 
     task = asyncio.create_task(consume())
-    await asyncio.sleep(0.05)  # let the first (empty) cycle complete and enter the sleep
+    # The (only) list_files call happening means the first empty cycle has
+    # finished and the source is now in the 60s inter-cycle wait.
+    await wait_until(lambda: len(client.list_calls) >= 1)
     stop.set()
     await asyncio.wait_for(task, timeout=1.0)  # << would be 60s without the fix
 
