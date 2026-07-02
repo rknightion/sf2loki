@@ -5,13 +5,25 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import uvloop
 
-from sf2loki import configdoc
+from sf2loki import __version__, configdoc
 from sf2loki.app import App
 from sf2loki.config import ConfigError, load
+
+
+def _version() -> str:
+    """The installed distribution version, falling back to the package constant
+    when running from an uninstalled source tree."""
+    try:
+        return _pkg_version("sf2loki")
+    except PackageNotFoundError:
+        return __version__
+
 
 _CONFIGDOC_RENDERERS = {
     "example": configdoc.example_yaml,
@@ -23,6 +35,12 @@ _CONFIGDOC_RENDERERS = {
 def main(argv: Sequence[str] | None = None) -> int:
     """Load config, build the app, and run it on the uvloop event loop."""
     parser = argparse.ArgumentParser(prog="sf2loki")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_version()}",
+        help="Print the sf2loki version and exit.",
+    )
     parser.add_argument(
         "--config",
         type=Path,

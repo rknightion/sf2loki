@@ -58,6 +58,28 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
   exercising a dev org's Event Monitoring pipeline.
 
+## Install
+
+**Requires Python 3.14+** (the package uses 3.14 language features). `pipx`/`uvx` provision a matching
+interpreter automatically; for a container you don't need Python on the host at all.
+
+| Use case | Install | Notes |
+| --- | --- | --- |
+| **Run the daemon** (recommended) | `docker pull ghcr.io/rknightion/sf2loki:latest` | The long-running service. Multi-arch image, non-root, slim — see [Run with Docker](#run-with-docker--docker-compose). |
+| **CLI / setup tooling** | `uvx sf2loki --help` | Zero-install run of `--check`, `doctor`, `backfill`, `config` — handy during Salesforce app setup before any infra exists. |
+| **CLI, persistent** | `pipx install sf2loki` | Same CLI on a VM / air-gapped host where a container isn't wanted. |
+| **As a library / from source** | `uv sync` (repo) or `pip install sf2loki` | Optional `sf2loki[s3]` extra for the S3 checkpoint store. |
+
+```bash
+uvx sf2loki --version
+uvx sf2loki --check --config config.yaml     # validate config + wiring, no network calls
+uvx sf2loki doctor --config config.yaml       # live preflight (auth, entitlements, Loki write)
+```
+
+The container is the right target for the always-on ingestion daemon; `pipx`/`uvx` shine for the
+one-shot CLI surfaces (`doctor`, `--check`, `backfill`) that you run by hand around setup and
+troubleshooting.
+
 ## Salesforce setup (OAuth)
 
 The service authenticates server-to-server, no interactive login. Pick one flow via

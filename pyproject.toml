@@ -47,6 +47,24 @@ dev = [
 requires = ["hatchling>=1.26"]  # >=1.26 for PEP 639 SPDX license expressions
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+# Internal working-notes docs live next to the code; never ship them in the
+# published sdist/wheel (they're for contributors, not installers).
+exclude = ["**/CLAUDE.md", "**/AGENTS.md"]
+
+[tool.hatch.build.targets.sdist]
+# Hatchling includes the whole tree by default (it does not read .gitignore),
+# which would ship CI config, dev scratch (.superpowers/, .claude/), tests, and
+# deploy/docs. Pin the sdist to what's needed to build the wheel plus source
+# provenance. The committed proto stubs live under src/ and ship in the wheel;
+# proto/ is included here for source completeness (regenerating them).
+include = [
+    "/src/sf2loki",
+    "/proto",
+    "/README.md",
+    "/LICENSE",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sf2loki"]
 

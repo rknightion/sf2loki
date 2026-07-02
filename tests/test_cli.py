@@ -94,6 +94,19 @@ def test_config_schema_subcommand_prints_json(capsys):
     assert rc == 0 and '"title": "Config"' in out
 
 
+def test_version_flag_prints_version_and_exits_zero(capsys):
+    # argparse's action="version" prints to stdout and raises SystemExit(0).
+    from sf2loki import __version__
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("sf2loki ")
+    # Installed metadata should agree with the in-tree constant.
+    assert __version__ in out
+
+
 def test_run_path_config_error_prints_message_and_exits_2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

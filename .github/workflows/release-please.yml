@@ -47,3 +47,47 @@ jobs:
     uses: ./.github/workflows/docker.yml
     with:
       release-tag: ${{ needs.release-please.outputs.tag_name }}
+
+  pypi-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    # PyPI Trusted Publishing (OIDC): no stored token. The publisher must be
+    # registered on PyPI for repo rknightion/sf2loki, workflow release-please.yml,
+    # environment "pypi". The GitHub environment can add required reviewers.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sf2loki
+    permissions:
+      contents: read
+      id-token: write  # mint the OIDC token PyPI verifies
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.14"
+          activate-environment: true
+          # No build cache in the publishing job: a poisoned cache must not be
+          # able to taint the artifact we upload to PyPI (zizmor cache-poisoning).
+          enable-cache: false
+
+      - name: Build sdist + wheel
+        run: uv build --out-dir dist
+
+      - name: Verify dist contents before publish
+        run: uv run --no-project python scripts/check_dist.py dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist
