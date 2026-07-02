@@ -157,3 +157,47 @@ def test_configure_logging_is_idempotent_no_duplicate_handlers() -> None:
     configure_logging("info", "json")
     configure_logging("info", "json")
     assert len(logging.getLogger().handlers) == 1
+
+
+# ---------------------------------------------------------------------------
+# Third-party logger flooring (prod-readiness audit #71 item 3): chatty
+# libraries (httpx, grpc, botocore, google/gcloud) must never emit below
+# WARNING, even when the app log level is DEBUG.
+
+
+def test_chatty_loggers_floored_to_warning_at_debug_app_level() -> None:
+    import logging
+
+    configure_logging("debug", "json")
+    names = ("httpx", "httpcore", "grpc", "grpc.aio", "botocore", "aiobotocore", "google", "gcloud")
+    for name in names:
+        assert logging.getLogger(name).getEffectiveLevel() == logging.WARNING, name
+
+
+def test_chatty_loggers_floored_to_warning_at_info_app_level() -> None:
+    import logging
+
+    configure_logging("info", "json")
+    for name in ("httpx", "grpc", "botocore", "google"):
+        assert logging.getLogger(name).getEffectiveLevel() == logging.WARNING, name
+
+
+def test_chatty_loggers_not_lowered_below_stricter_app_level() -> None:
+    """The floor is a minimum, not an override: a stricter app level (ERROR)
+    still wins over the WARNING floor."""
+    import logging
+
+    configure_logging("critical", "json")
+    for name in ("httpx", "grpc", "botocore", "google"):
+        assert logging.getLogger(name).getEffectiveLevel() == logging.CRITICAL, name
+
+
+def test_app_loggers_unaffected_by_third_party_floor() -> None:
+    """Only the known-chatty libraries are floored; sf2loki's own loggers
+    still follow the configured app level."""
+    import logging
+
+    configure_logging("debug", "json")
+    buf = _capture_root_handler_output()
+    logging.getLogger("sf2loki.test").debug("still visible at debug")
+    assert "still visible at debug" in buf.getvalue()

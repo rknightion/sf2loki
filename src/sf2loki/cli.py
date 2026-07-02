@@ -31,6 +31,16 @@ _CONFIGDOC_RENDERERS = {
     "schema": configdoc.json_schema,
 }
 
+# Unified exit code for "the config is invalid" across every subcommand that
+# validates config before doing anything else: --check, run, and backfill all
+# return this on a config/wiring error (bad secrets, source overlap, org
+# selection, etc.), so scripts can check for one code regardless of which
+# entrypoint they invoke. `doctor` also returns this code when the config
+# itself can't be loaded/selected (same "bad config" case), but keeps its own
+# exit 1 for a check FAIL on an otherwise-valid config — a live-preflight
+# health verdict, distinct from a config error (see doctor._CONFIG_ERROR_EXIT_CODE).
+_CONFIG_ERROR_EXIT_CODE = 2
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Load config, build the app, and run it on the uvloop event loop."""
@@ -51,7 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="Validate the config and wiring (secrets, labels, source overlap) without "
-        "making any network calls, then exit 0 (ok) or 1 (invalid).",
+        "making any network calls, then exit 0 (ok) or 2 (invalid config; same code "
+        "as `run`/`backfill` on a config error).",
     )
 
     subparsers = parser.add_subparsers(dest="command")
@@ -149,10 +160,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             until = parse_backfill_date(args.until) if args.until else None
             cfg = load(args.config)
             org, note = select_org(cfg, args.org)
+            # Capture the org identity BEFORE as_single_org_view drops org.name,
+            # so the backfill checkpoint key can be namespaced per org (#40).
+            # The first configured org additionally falls back to the legacy
+            # unprefixed key, mirroring the live daemon's OrgCheckpointView.
+            resolved = cfg.resolved_orgs()
+            org_name = org.name
+            legacy_fallback = bool(resolved) and org.name == resolved[0].name
             cfg = as_single_org_view(cfg, org)
         except (ConfigError, ValueError) as exc:
             print(f"sf2loki: {exc}", file=sys.stderr)
-            return 2
+            return _CONFIG_ERROR_EXIT_CODE
         if note:
             print(f"sf2loki: {note}", file=sys.stderr)
         event_types = (
@@ -169,6 +187,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interval=args.interval,
                 ingest_timestamps=args.ingest_timestamps,
                 concurrency=args.concurrency,
+                org_name=org_name,
+                legacy_fallback=legacy_fallback,
             )
         )
 
@@ -177,7 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             App.build(load(args.config))
         except Exception as exc:
             print(f"config check FAILED: {exc}", file=sys.stderr)
-            return 1
+            return _CONFIG_ERROR_EXIT_CODE
         print("config check OK")
         return 0
 
@@ -186,8 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         app = App.build(cfg)
     except ConfigError as exc:
         # Operator-facing config problems get a clean message, not a traceback
-        # (same failure surface --check reports; exit 2 = bad configuration).
+        # (same failure surface --check reports; unified config-error exit code).
         print(f"sf2loki: {exc}", file=sys.stderr)
-        return 2
+        return _CONFIG_ERROR_EXIT_CODE
     uvloop.run(app.run())
     return 0

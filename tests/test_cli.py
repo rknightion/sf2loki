@@ -50,7 +50,7 @@ sink:
 """.lstrip()
     )
     rc = main(["--config", str(p), "--check"])
-    assert rc == 1
+    assert rc == 2
     assert "FAILED" in capsys.readouterr().err
 
 
@@ -79,7 +79,7 @@ sink:
 """.lstrip()
     )
     rc = main(["--config", str(p), "--check"])
-    assert rc == 1
+    assert rc == 2
 
 
 def test_config_example_subcommand_prints_yaml(capsys):
@@ -128,3 +128,31 @@ sink:
     err = capsys.readouterr().err
     assert "cannot read" in err
     assert "Traceback" not in err
+
+
+def test_check_and_run_and_backfill_share_one_config_error_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Prod-readiness audit #71 item 4: --check, run, and backfill must all
+    report the same exit code for the same bad config (previously 1 vs 2)."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(
+        """
+salesforce:
+  client_id: cid
+  username: svc@example.com
+  private_key_file: /does/not/exist.pem
+sink:
+  loki:
+    url: http://loki:3100/loki/api/v1/push
+""".lstrip()
+    )
+
+    rc_check = main(["--config", str(p), "--check"])
+    capsys.readouterr()
+    rc_run = main(["--config", str(p)])
+    capsys.readouterr()
+    rc_backfill = main(["--config", str(p), "backfill", "--since", "2026-01-01"])
+    capsys.readouterr()
+
+    assert rc_check == rc_run == rc_backfill == 2

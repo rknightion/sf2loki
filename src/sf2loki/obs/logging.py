@@ -26,6 +26,24 @@ _LEVEL_MAP: dict[str, int] = {
     "critical": logging.CRITICAL,
 }
 
+# Known-chatty third-party libraries: httpx logs INFO per request (steady
+# noise even at the default app level); grpc/botocore/google are worse at
+# DEBUG. These are floored to WARNING independent of the app log level so
+# raising the app to DEBUG for sf2loki's own code doesn't drown in library
+# request/retry chatter. This is a floor, not an override: a stricter app
+# level (e.g. ERROR) still wins — see the `max()` below.
+_THIRD_PARTY_LOG_FLOOR = logging.WARNING
+_CHATTY_LOGGERS: tuple[str, ...] = (
+    "httpx",
+    "httpcore",
+    "grpc",
+    "grpc.aio",
+    "botocore",
+    "aiobotocore",
+    "google",
+    "gcloud",
+)
+
 
 def configure_logging(
     level: str = "info",
@@ -81,6 +99,12 @@ def configure_logging(
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level_int)
+
+    # Floor the known-chatty libraries regardless of the app level (see
+    # _CHATTY_LOGGERS docstring above).
+    floor = max(level_int, _THIRD_PARTY_LOG_FLOOR)
+    for name in _CHATTY_LOGGERS:
+        logging.getLogger(name).setLevel(floor)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
