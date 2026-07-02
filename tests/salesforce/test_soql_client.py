@@ -258,3 +258,22 @@ def test_to_soql_datetime_literal_unparseable_returned_unchanged() -> None:
     from sf2loki.salesforce.soql_client import to_soql_datetime_literal
 
     assert to_soql_datetime_literal("not-a-date") == "not-a-date"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_query_uses_tooling_path_when_tooling_true() -> None:
+    """tooling=True routes the query to /tooling/query, not /query."""
+    instance_url = "https://x.my.salesforce.com"
+    tooling_url = f"{instance_url}/services/data/v60.0/tooling/query"
+    route = respx.get(tooling_url).mock(
+        return_value=httpx.Response(200, json={"records": [{"Id": "t1"}], "done": True})
+    )
+
+    tokens = FakeTokenProvider()
+    async with httpx.AsyncClient() as client:
+        soql = SoqlClient(make_cfg(), tokens, client, tooling=True)
+        got = [r async for r in soql.query("SELECT Id FROM ApexLog")]
+
+    assert route.called
+    assert got == [{"Id": "t1"}]

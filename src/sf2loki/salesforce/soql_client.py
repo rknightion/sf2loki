@@ -73,11 +73,15 @@ class SoqlClient:
         client: httpx.AsyncClient,
         *,
         metrics: Metrics | None = None,
+        tooling: bool = False,
     ) -> None:
         self._cfg = cfg
         self._tokens = tokens
         self._client = client
         self._metrics = metrics if metrics is not None else Metrics()
+        # tooling=True targets the Tooling API query endpoint (/tooling/query),
+        # used by sources that read Tooling-only sObjects such as ApexLog/TraceFlag.
+        self._tooling = tooling
 
     async def query(self, soql: str) -> AsyncIterator[dict[str, object]]:
         """Execute *soql* and yield each record, following pagination.
@@ -88,7 +92,8 @@ class SoqlClient:
         """
         tok = await self._tokens.token()
         base_url = tok.instance_url
-        url: str | None = f"{base_url}/services/data/v{self._cfg.api_version}/query"
+        query_path = "tooling/query" if self._tooling else "query"
+        url: str | None = f"{base_url}/services/data/v{self._cfg.api_version}/{query_path}"
         params: dict[str, str] | None = {"q": soql}
 
         while url is not None:
