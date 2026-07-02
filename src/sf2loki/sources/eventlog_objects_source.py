@@ -284,6 +284,9 @@ class EventLogObjectsSource:
                 )
                 return
 
+            seen = set(window)
+            records = [r for r in records if str(r.get("Id") or "") not in seen]
+
             for record in records:
                 if stop.is_set():
                     return

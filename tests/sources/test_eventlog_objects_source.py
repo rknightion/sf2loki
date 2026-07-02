@@ -1087,3 +1087,52 @@ async def test_big_object_throttle_aborts_without_crashing(
         source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
         entries = [e async for e in source.events(store, asyncio.Event())]
     assert entries == []  # throttle contained, no exception escapes
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_boundary_record_deduped_across_cycles(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A big_object's >= watermark query is inclusive (tie-safe), so a poll cycle
+    that resumes from a stored checkpoint re-fetches the boundary record whose
+    timestamp equals the committed watermark. ``_drain_big_object`` only dedups
+    WITHIN one drain (its own ``collected`` dict) — it has no memory of the
+    PREVIOUS cycle's committed id window — so without a cross-cycle filter that
+    boundary record would be re-emitted as a duplicate LogEntry every cycle.
+    Mirrors ``test_boundary_tie_records_deduped_by_id`` for the ASC path."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    boundary_ts = "2026-06-30T10:00:00.000+0000"
+    boundary_id = "a"
+    await store.commit(
+        "eventlog_objects:LoginEvent",
+        json.dumps({"last_ts": boundary_ts, "ids": [boundary_id]}),
+    )
+
+    # DESC drain: newest first. "b" is strictly newer than the committed
+    # watermark; "a" is the already-committed boundary record re-fetched by
+    # the inclusive >= cursor.
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"Id": "b", "EventDate": "2026-06-30T10:01:00.000+0000"},
+                    {"Id": boundary_id, "EventDate": boundary_ts},
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    assert '"Id": "b"' in entries[0].line
+    final = json.loads(entries[0].checkpoint.value)
+    assert boundary_id in final["ids"] and "b" in final["ids"]
