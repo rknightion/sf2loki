@@ -1,0 +1,21 @@
+title: sf2loki Documentation
+description: Streams Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable.
+
+# Global meta tags for all pages
+tags:
+  - salesforce
+  - grafana-loki
+  - event-monitoring
+  - observability
+  - log-shipping
+
+# Social media defaults
+image: assets/social-card.png
+twitter:
+  creator: "@rknightion"
+  site: "@rknightion"
+
+# SEO defaults
+robots: index,follow
+language: en
+canonical_base: https://m7kni.io/sf2loki/
