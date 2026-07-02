@@ -8,6 +8,7 @@ fine, so they must never be treated as poison.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import gzip
 from typing import Any
@@ -45,6 +46,18 @@ _AUTH_CONFIG_STATUSES: frozenset[int] = frozenset({401, 403, 404})
 # Log the auth/config ERROR on the 1st consecutive failure and every Nth after
 # (with the pipeline's 30s backoff cap that is roughly one ERROR per 5 minutes).
 _AUTH_LOG_EVERY: int = 10
+
+# Below this (approximate, pre-encode) batch size, encode inline on the event
+# loop; at/above it, hop to a worker thread. protobuf SerializeToString +
+# cramjam snappy and JSON dumps + gzip are ~10-15 ms of blocking CPU per 1 MiB
+# (both cramjam and the protobuf C extension release the GIL, so
+# asyncio.to_thread reclaims that cleanly) — but the thread handoff itself
+# has a small fixed cost, so a threshold keeps tiny batches (the common case
+# for low-volume orgs) on the cheap inline path. 64 KiB is comfortably above
+# "a handful of log lines" and comfortably below where encode time becomes
+# noticeable to producers/the gRPC receive loop/the health server sharing
+# this event loop.
+_ENCODE_OFFLOAD_THRESHOLD_BYTES: int = 65_536
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -144,6 +157,30 @@ class LokiSink:
 
         return body, content_headers
 
+    @staticmethod
+    def _encode_size_estimate(batch: Batch) -> int:
+        """Cheap pre-encode size signal (sum of UTF-8 line bytes).
+
+        Not the final wire size (labels, structured metadata, and protobuf/gzip
+        framing all add overhead) — just enough to decide, before paying the
+        encode cost, whether this batch is worth offloading to a thread.
+        """
+        return sum(len(entry.line.encode("utf-8")) for entry in batch.entries)
+
+    async def _encode_async(self, batch: Batch) -> tuple[bytes, dict[str, str]]:
+        """Encode *batch*, offloading to a worker thread above a size threshold.
+
+        Small batches (the common case) encode inline — the thread hop itself
+        would cost more than it saves. Large batches offload via
+        ``asyncio.to_thread`` so the CPU-bound protobuf/snappy or JSON/gzip
+        work doesn't block the event loop (producers, the gRPC receive loop,
+        the health server). Output is byte-identical either way — only where
+        the work runs changes.
+        """
+        if self._encode_size_estimate(batch) >= _ENCODE_OFFLOAD_THRESHOLD_BYTES:
+            return await asyncio.to_thread(self._encode, batch)
+        return self._encode(batch)
+
     # ------------------------------------------------------------------
     # Internal POST with tenacity retry (retryable status codes only)
     # ------------------------------------------------------------------
@@ -202,7 +239,7 @@ class LokiSink:
 
         self._cap_lines(batch)
 
-        body, content_headers = self._encode(batch)
+        body, content_headers = await self._encode_async(batch)
         status = await self._post(body, content_headers)
 
         if 200 <= status < 300:

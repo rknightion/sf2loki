@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import gzip
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -717,3 +719,171 @@ class TestLineCap:
         assert entry.line == big  # untouched
         body = route.calls.last.request.content.decode("utf-8")
         assert "y" * 5000 in body
+
+
+# ---------------------------------------------------------------------------
+# Encode offload (#55): large-batch encoding must not block the event loop
+# ---------------------------------------------------------------------------
+
+
+def _big_entry(size: int) -> LogEntry:
+    return LogEntry(
+        timestamp=TS,
+        labels={"source": "pubsub", "event_type": "LoginEventStream"},
+        line="x" * size,
+        structured_metadata={},
+        checkpoint=CheckpointToken(key="pubsub:/event/Login", value="1"),
+    )
+
+
+def _big_batch() -> Batch:
+    # One entry comfortably over the offload threshold, well under the default
+    # per-line truncation cap (262144) so _cap_lines leaves it untouched.
+    return Batch(entries=[_big_entry(sink_module._ENCODE_OFFLOAD_THRESHOLD_BYTES + 1000)])
+
+
+class TestEncodeOffload:
+    @respx.mock
+    async def test_small_batch_does_not_use_to_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg()
+        real_to_thread = asyncio.to_thread
+        called = {"n": 0}
+
+        async def spy(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+            called["n"] += 1
+            return await real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(sink_module.asyncio, "to_thread", spy)
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            await s.push(_batch(1))  # tiny batch, well under threshold
+
+        assert called["n"] == 0
+
+    @respx.mock
+    async def test_large_batch_uses_to_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg(encoding="json", compression="none")
+        real_to_thread = asyncio.to_thread
+        called = {"n": 0}
+
+        async def spy(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+            called["n"] += 1
+            return await real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(sink_module.asyncio, "to_thread", spy)
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            await s.push(_big_batch())
+
+        assert called["n"] == 1
+
+    @respx.mock
+    async def test_large_batch_encode_offload_keeps_loop_responsive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CPU-bound encode of a large batch must not stall other coroutines.
+
+        Simulates the blocking cost called out in #55 by making the JSON encode
+        synchronously sleep; a concurrently-running ticker task must keep
+        advancing while that "CPU work" happens in the offloaded thread.
+        """
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg(encoding="json", compression="none")
+
+        original_encode_json = sink_module.encode_json
+
+        def slow_encode_json(batch: Batch) -> bytes:
+            time.sleep(0.2)
+            return original_encode_json(batch)
+
+        monkeypatch.setattr(sink_module, "encode_json", slow_encode_json)
+
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            for _ in range(30):
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            ticker_task = asyncio.create_task(ticker())
+            await s.push(_big_batch())
+            # Measured *before* draining the ticker task: the encode ran on a
+            # worker thread for ~0.2s while this coroutine awaited it, so the
+            # event loop had ample opportunity to advance the ticker in the
+            # meantime.
+            ticks_during_push = ticks
+            await ticker_task
+
+        assert ticks_during_push >= 10
+
+    @respx.mock
+    async def test_small_batch_still_blocks_the_loop_inline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control for the above: a small batch stays inline (no thread hop), so
+        a concurrent ticker makes ~no progress while the (simulated slow) encode
+        runs on the event loop thread."""
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg(encoding="json", compression="none")
+
+        original_encode_json = sink_module.encode_json
+
+        def slow_encode_json(batch: Batch) -> bytes:
+            time.sleep(0.2)
+            return original_encode_json(batch)
+
+        monkeypatch.setattr(sink_module, "encode_json", slow_encode_json)
+
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            for _ in range(30):
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            ticker_task = asyncio.create_task(ticker())
+            await s.push(_batch(1))  # tiny batch, inline path
+            # Measured *before* draining the ticker task: the encode ran
+            # synchronously on this coroutine with no await point, so no real
+            # wall-clock time was available for the ticker's 10ms sleeps to
+            # elapse before push() returned.
+            ticks_during_push = ticks
+            await ticker_task
+
+        assert ticks_during_push == 0  # the loop was blocked for the encode's duration
+
+    @respx.mock
+    async def test_large_batch_protobuf_output_matches_direct_encode(self) -> None:
+        from sf2loki.sinks.loki.push import encode_protobuf
+
+        route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg(encoding="protobuf")
+        batch = _big_batch()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            await s.push(batch)
+
+        assert route.calls.last.request.content == encode_protobuf(batch)
+
+    @respx.mock
+    async def test_large_batch_json_gzip_output_matches_direct_encode(self) -> None:
+        from sf2loki.sinks.loki.push import encode_json
+
+        route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg(encoding="json", compression="gzip")
+        batch = _big_batch()
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client)
+            await s.push(batch)
+
+        assert gzip.decompress(route.calls.last.request.content) == encode_json(batch)
