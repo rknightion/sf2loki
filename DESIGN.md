@@ -295,6 +295,34 @@ one entry **per row** (not per file) is also what keeps lines under Loki's per-l
 Like the other sources it plugs into the same pipeline/sink/state with no core changes; it is subject
 to the same either/or overlap guard (§10) as Phase 2.
 
+### 8b. ApexLog (Tooling API debug logs)
+
+`salesforce/apexlog_client.py`, `sources/apexlog_source.py`. An **opt-in, developer-persona** source
+(`sources.apexlog`, off by default) that ships Apex debug logs (`ApexLog`) into Loki. It reuses the
+Phase 2 watermark/dedup shape and shares auth/sink/state/shaping — the only new plumbing is a
+tooling-query mode on `SoqlClient` (path `/services/data/v{ver}/tooling/query`) because `ApexLog` and
+`TraceFlag` are Tooling-API sObjects.
+
+- **Listing + cursor.** `SELECT Id,LogUserId,LogLength,Operation,Request,Status,StartTime,… FROM
+  ApexLog WHERE StartTime >= :watermark [AND LogUser.Username IN (…)] ORDER BY StartTime ASC` — the
+  same `>=` + rolling-`Id`-window design as `eventlog_objects` (checkpoint key `apexlog`,
+  `{"last_ts","ids"}`), draining full pages within a cycle. Optional `users` list maps to a
+  `LogUser.Username IN (…)` filter (usernames are config-validated to a safe charset — the values are
+  interpolated into SOQL).
+- **Body download.** One REST call per log (`GET …/tooling/sobjects/ApexLog/{id}/Body`, `text/plain`).
+  The raw body becomes the `LogEntry` **line**; metadata goes to structured metadata. `event_type` is
+  the fixed literal `apexlog` (never `Operation`, which is a request URL path — high-cardinality).
+  `max_body_bytes` skips the download (and its API call) for oversize logs, still emitting the metadata
+  line flagged `body_skipped`; the sink's `max_line_bytes` truncates whatever is shipped.
+- **Not managed: TraceFlags.** `ApexLog` rows exist only while a `TraceFlag` is active (24h retention);
+  sf2loki does not create/renew them (a compliance decision). `doctor` adds a `traceflags` WARN when
+  the source is enabled but `SELECT Id FROM TraceFlag WHERE ExpirationDate > now` is empty.
+- **Distinct category.** ApexLog does not collide with Pub/Sub / stored-object / ELF data, so it is
+  intentionally excluded from the §10 overlap guard.
+- **Cost.** Rides the standard daily API pool: one listing query per poll plus one body download per
+  new log. Metrics: `apexlog_logs_ingested`, `apexlog_download_bytes`, `apexlog_bodies_skipped`,
+  `apexlog_download_errors`.
+
 ---
 
 ## 9. Loki sink

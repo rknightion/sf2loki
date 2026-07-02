@@ -54,6 +54,10 @@ sources:
 - Use `eventlogfile` for the ~70 EventType CSVs that aren't exposed as either a stream or a stored
   object (most Event Monitoring data).
 
+A fourth source, `sources.apexlog` (§7), is opt-in and **outside** this either/or-per-category
+model: Apex debug logs are their own category with no overlap against the three above, so the
+overlap guard doesn't apply to it.
+
 ## 2. Custom object polling
 
 `eventlog_objects` is not limited to Salesforce's built-in EventLog objects — it polls **any
@@ -407,3 +411,53 @@ A common setup: sample the noisy types down to a sensible baseline, then put a
 than overspends. Rate caps sit underneath both, pacing the push so you never
 burst past a per-second ceiling. Metrics to watch: `egress_budget_used_bytes`,
 `egress_paused`, `entries_sampled_out`, `loki_entries_dropped{reason="budget"}`.
+
+## 7. Apex debug logs (ApexLog)
+
+`sources.apexlog` is an **opt-in, developer-focused** source that streams Apex
+debug logs (`ApexLog`) into Loki via the Tooling API. It sits outside the
+one-channel-per-category model above — debug logs are their own category
+(`source="apexlog"`), don't overlap Pub/Sub / stored-object / EventLogFile data,
+and are **disabled by default** (not part of the free-tier quickstart).
+
+```yaml
+sources:
+  apexlog:
+    enabled: true
+    poll_interval: 1m
+    lookback: 1h
+    users: ["integration@example.com"]   # LogUser.Username filter; [] = all visible
+    max_body_bytes: 5242880              # skip the body download above this (5 MiB)
+    sample: 1.0
+```
+
+**Prerequisite — an active TraceFlag (sf2loki does NOT manage these).** `ApexLog`
+rows only exist while a `TraceFlag` is active for a user, and Salesforce keeps
+them for ~24h. TraceFlags expire by design, and auto-renewing them is a
+compliance decision, so sf2loki deliberately leaves them to you: enable debug
+logging out-of-band with e.g. `sf apex tail log` / `sf debug` or **Setup → Debug
+Logs**, for the same user(s) you list under `users`. `sf2loki doctor` prints a
+`traceflags` WARN row when the source is enabled but no active TraceFlag exists —
+i.e. nothing is generating logs.
+
+**What lands in Loki.** One entry per log: the **raw debug-log body is the log
+line** (truncated by `sink.loki.batch.max_line_bytes` like any other line), and
+the metadata — `LogUserId`, `Operation`, `Status`, `Request`, `Application`,
+`DurationMilliseconds`, `Location`, `LogLength`, `Id` — is attached as structured
+metadata (queryable, never a stream label; `Operation` is a URL path and would
+explode label cardinality). Correlate an ApexLog to RTEM/ELF events by searching
+the body — the `REQUEST_ID` that appears in EventLogFile rows also appears inside
+the debug-log text.
+
+**API cost (document + budget for it).** Each poll is one Tooling `SELECT` plus
+**one body download per new log** (`GET /tooling/sobjects/ApexLog/<id>/Body`).
+`max_body_bytes` is the guard: a log whose `LogLength` exceeds it skips the body
+download entirely (saving that API call) and still ships the metadata line,
+flagged `body_skipped="true"` (`body_skip_reason="size"`). On a busy org with
+verbose trace levels this can be a meaningful chunk of the daily API budget —
+keep `poll_interval` sane, scope `users` tightly, and watch
+`apexlog_logs_ingested`, `apexlog_download_bytes`, and `apexlog_bodies_skipped`.
+
+Watermark/resume works exactly like the stored-object source: a `StartTime >=`
+cursor plus a rolling `Id` dedup window (checkpoint key `apexlog`), so restarts
+resume without gaps or (beyond at-least-once) duplicates.

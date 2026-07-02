@@ -15,6 +15,9 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   stored objects (Phase 2), EventLogFile CSV ingestion (Phase 3). These are **alternative per-category
   channels** — ingest each event category (Login, API, Report, …) from exactly one source; a fail-fast
   overlap guard refuses to start if a category is enabled on more than one (bypass: `allow_overlap`).
+  A separate opt-in **ApexLog** source (`sources.apexlog`) streams Apex debug logs via the Tooling
+  API for developer debugging — off by default, one API call per log body (see
+  [configuring-sources §7](docs/configuring-sources.md#7-apex-debug-logs-apexlog)).
 - **Loki sink**: protobuf + snappy by default (canonical push wire format), JSON + gzip as a debug
   encoding. Both carry structured metadata.
 - **Cardinality discipline**: a fixed label allowlist (`job`, `source`, `event_type`, `sf_org_id`,
