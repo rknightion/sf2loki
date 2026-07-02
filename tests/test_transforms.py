@@ -6,7 +6,7 @@ import hashlib
 
 from sf2loki.config import TransformRule
 from sf2loki.obs.metrics import Metrics
-from sf2loki.transforms import compile_rules
+from sf2loki.transforms import compile_rules, unsalted_hash_warnings
 
 
 def _pipeline(rules: list[TransformRule], *, salt: str = "", metrics: Metrics | None = None):
@@ -247,3 +247,56 @@ def test_drop_row_without_metrics_does_not_crash() -> None:
         metrics=None,
     )
     assert pipe.apply({"K": "v"}) is None
+
+
+# ---------------------------------------------------------------------------
+# unsalted_hash_warnings (issue #67)
+
+
+def test_unsalted_hash_rule_warns_when_salt_empty() -> None:
+    rules = [TransformRule(action="hash", fields=["USER_ID"])]
+    warnings = unsalted_hash_warnings(rules, "")
+    assert len(warnings) == 1
+    assert "USER_ID" in warnings[0]
+    assert "rainbow-table" in warnings[0] or "reversible" in warnings[0]
+
+
+def test_hash_rule_with_salt_produces_no_warning() -> None:
+    rules = [TransformRule(action="hash", fields=["USER_ID"])]
+    assert unsalted_hash_warnings(rules, "s3cret") == []
+
+
+def test_non_hash_rules_never_warn_regardless_of_salt() -> None:
+    rules = [
+        TransformRule(action="mask", fields=["EMAIL"]),
+        TransformRule(action="drop_field", fields=["SECRET"]),
+    ]
+    assert unsalted_hash_warnings(rules, "") == []
+
+
+def test_no_rules_produces_no_warnings() -> None:
+    assert unsalted_hash_warnings([], "") == []
+
+
+def test_multiple_unsalted_hash_rules_each_get_a_warning() -> None:
+    rules = [
+        TransformRule(action="hash", fields=["A"]),
+        TransformRule(action="mask", fields=["B"]),
+        TransformRule(action="hash", fields=["C"], name="hash-c"),
+    ]
+    warnings = unsalted_hash_warnings(rules, "")
+    assert len(warnings) == 2
+    assert any("hash-0" in w or "['A']" in w for w in warnings)
+    assert any("hash-c" in w for w in warnings)
+
+
+def test_unsalted_hash_warning_names_default_rule_like_compile_rules() -> None:
+    # Mirrors compile_rules' "<action>-<index>" default naming so the warning
+    # names the same rule an operator would see in other diagnostics.
+    rules = [
+        TransformRule(action="mask", fields=["B"]),
+        TransformRule(action="hash", fields=["A"]),
+    ]
+    warnings = unsalted_hash_warnings(rules, "")
+    assert len(warnings) == 1
+    assert "hash-1" in warnings[0]

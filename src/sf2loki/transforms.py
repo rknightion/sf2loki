@@ -158,6 +158,38 @@ class TransformPipeline:
         return payload
 
 
+def unsalted_hash_warnings(rules: Sequence[TransformRule], salt: str) -> list[str]:
+    """One warning per ``hash`` rule in *rules* that would compile with an empty *salt*.
+
+    ``sha256(salt + value)[:16]`` with an empty salt is reversible for
+    low-entropy PII (source IPs, usernames, user ids) by rainbow-table lookup —
+    silently defeating the redaction an operator configured a ``hash`` rule to
+    provide. Returns ``[]`` when *salt* is non-empty, or when no rule uses
+    ``action: hash``. Pure and side-effect-free (no metrics, no I/O) so both
+    ``doctor``'s ``transforms`` check and ``app.py``'s startup/``--check`` path
+    can call it directly on the same ``(rules, salt)`` compile_rules() is given.
+
+    Rule names mirror :func:`compile_rules`'s default naming
+    (``rule.name`` or ``"<action>-<index>"``, indexed over the full *rules*
+    sequence) so a warning names the same rule an operator would see in other
+    diagnostics (e.g. the ``rows_filtered`` metric's ``rule`` label).
+    """
+    if salt:
+        return []
+    warnings: list[str] = []
+    for index, rule in enumerate(rules):
+        if rule.action != "hash":
+            continue
+        name = rule.name or f"{rule.action}-{index}"
+        warnings.append(
+            f"transform rule {name!r} (fields={rule.fields}) hashes without "
+            "sources.transform_salt set — unsalted SHA-256 of low-entropy values "
+            "(IPs, usernames, ids) is reversible by rainbow-table lookup, silently "
+            "defeating the redaction; set sources.transform_salt to a secret value"
+        )
+    return warnings
+
+
 def compile_rules(
     rules: Sequence[TransformRule],
     *,
