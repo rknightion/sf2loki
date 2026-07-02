@@ -55,6 +55,8 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - [docs/alerts.md](docs/alerts.md) — the shipped Grafana alert-rule pack: what each alert means and
   the first response step.
 - [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard.
+- [deploy/k8s/README.md](deploy/k8s/README.md) — example Kubernetes manifests for the
+  active-passive HA pair (Deployment, ServiceAccount/RBAC, probes).
 - [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
   exercising a dev org's Event Monitoring pipeline.
 
@@ -499,17 +501,26 @@ The container is the primary run target (alongside ECS). The image is slim, runs
 and exposes `:8080` (`/healthz`, `/readyz`). Metrics are pushed via OTLP, so there is no scrape port.
 
 Every push to `main` publishes a multi-arch image to GHCR (`ghcr.io/rknightion/sf2loki:main`, plus
-`:main-<sha>`); releases add semver + `:latest`. The compose file pulls that image by default, so a
-deploy is just pull + up:
+`:main-<sha>`); releases add semver + `:latest`. The compose file pulls **`:latest`** by default, so
+an out-of-the-box deploy tracks releases, not the edge build:
 
 ```bash
-# run the published :main edge image — non-secret values from .env.dev, secrets from ./secrets
+# run the published :latest release image — non-secret values from .env.dev, secrets from ./secrets
 docker compose --env-file .env.dev pull
 docker compose --env-file .env.dev up -d
 
 # …or build from local source instead (dev iteration):
 docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 ```
+
+Set `SF2LOKI_TAG=main` (documented dev/staging override, e.g. in `.env.dev`) to track the rolling
+edge image instead — it can carry unreleased and breaking changes, so it's opt-in, never the
+default. `SF2LOKI_TAG=main-<sha>` pins a specific edge build.
+
+**Upgrades.** Releases are semver'd by [release-please](https://github.com/googleapis/release-please)
+from conventional commits — check the [CHANGELOG](CHANGELOG.md) for a `feat!:`/`BREAKING CHANGE:`
+entry between your current and target version before bumping `:latest`, the same way you'd check
+any other dependency's major-version notes.
 
 [`docker-compose.yml`](docker-compose.yml) mounts [`config.docker.yaml`](config.docker.yaml) (no
 secrets — env-driven via `${VAR}` + `*_file`) at `/etc/sf2loki/config.yaml` and `./secrets` (the
@@ -519,7 +530,8 @@ the values the config interpolates (Salesforce login URL / consumer key / userna
 tenant); `.env*`, `*.key`, `*.crt`, and `secrets/` are gitignored **and** `.dockerignore`d so they
 can never be baked into a locally built image. Checkpoint state persists to `./state` (bind-mounted
 at `/var/lib/sf2loki`) so resume survives container recreation — the container runs as uid 10001,
-so make it writable first: `mkdir -p state && chmod 777 state`.
+so make it writable first: `mkdir -p state && chmod 770 state && chown 10001 state` (770 + chown,
+not a permissive 777 — `sf2loki doctor`'s own FAIL hint recommends the same).
 
 **Secret file permissions — same uid-10001 rule.** The files in `./secrets` must be *readable* by
 uid 10001 or the service crash-loops at startup with an actionable "permission denied" error. A
@@ -536,11 +548,22 @@ resolved and the pipeline is running). `/readyz` also degrades to 503 (with a re
 when Loki pushes have been failing continuously for longer than
 `service.unready_after_sink_failing` (default 15m; 0 disables) — data is checkpointed and retried,
 so this signals "degraded, surface me", not "restart me"; `/healthz` deliberately stays 200 through
-a Loki outage. Docker/ECS collapse container health into a single signal, so
-they should probe `/readyz` — the Dockerfile `HEALTHCHECK` already does. For **ECS**, set the task
-definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || exit 1` with a
-`startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a fast-fail
-(e.g. bad Salesforce credentials → process exits) restarts the task.
+a Loki outage. Docker/ECS collapse container health into a single signal for a **standalone**
+instance, so they should probe `/readyz` — the Dockerfile `HEALTHCHECK` already does. For **ECS**,
+set the task definition `healthCheck` to `CMD-SHELL curl -f http://localhost:8080/readyz || exit 1`
+with a `startPeriod` (~20s) covering normal startup, and mark the container `essential: true` so a
+fast-fail (e.g. bad Salesforce credentials → process exits) restarts the task. Also set `stopTimeout`
+to cover the shutdown drain — ECS's default (30s) is borderline against `service.shutdown_grace`
+(25s) plus the app's own ~5s closer budget; raise `stopTimeout` to at least 35s (mirroring the
+compose `stop_grace_period`) if you raise `shutdown_grace`.
+
+> **Sharp edge — `/readyz` on an HA standby is 503 forever, by design.** In the active-passive
+> topology below, the standby never becomes ready, so an ECS task-definition `healthCheck` (which
+> triggers ECS to kill and replace the "unhealthy" task) pointed at `/readyz` restart-loops the
+> standby forever and defeats failover. `/readyz` is only ever safe as a **target-group** health
+> check (controls traffic routing, not task lifecycle) — for the ECS task-level `healthCheck` (and
+> the Docker `HEALTHCHECK` on an HA replica) use `/healthz` instead, exactly the same trap the
+> Kubernetes readinessProbe-vs-livenessProbe warning below describes.
 
 **Run exactly one ACTIVE replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API
 delivers events independently per subscriber connection, so a second active instance
@@ -558,12 +581,17 @@ continuously. For hands-off failover, run **two replicas** in an active-passive 
 a **file lease** on shared storage. Exactly one replica (the leader) ingests at a time; the other
 stands by and takes over within one lease `ttl` if the leader dies.
 
-The leader owns a small JSON lease file on storage shared by both replicas (NFS/EFS/a shared
-volume), renewing it every `renew_interval`; the standby polls the lease and takes over once it has
-gone stale. Takeover is resolved by atomic tmp+rename with a verification re-read, so two standbys
-contending for an expired lease never both win. Failover is protected by **fencing**: checkpoint
-commits are gated on still holding the lease, so a stale leader (one that lost the lease during a
-GC or scheduling pause) is refused at commit time and cannot race the new leader's checkpoints.
+The leader owns a small JSON lease file — `{holder, expires_at, epoch}` — on storage shared by both
+replicas (NFS/EFS/a shared volume), renewing it every `renew_interval`; the standby polls the lease
+and takes over once it has gone stale. Takeover is resolved by atomic tmp+rename with a verification
+re-read, so two standbys contending for an expired lease never both win. Failover is protected by
+**fencing**: `epoch` is a fence token that increments on every winning acquire/takeover, and the
+**shared-file checkpoint store re-reads the lease fresh at commit time** (bypassing its own cache) to
+reject a commit whose writer's epoch is behind the lease's current epoch — this catches a stale
+leader even before its own local "am I still the leader?" flag has caught up (which only refreshes
+once per `renew_interval`), so a leader that lost the lease during a GC or scheduling pause cannot
+race the new leader's checkpoints. The S3/GCS state stores don't need the epoch mechanism: their own
+ETag/generation-preconditioned compare-and-swap already rejects a losing writer independently.
 Semantics are **at-least-once**: a mid-batch takeover may re-ingest up to one `ttl` of events, but
 acknowledged data is never lost.
 
@@ -598,6 +626,12 @@ on the standby — `sum(sf2loki_leader)` should always be exactly `1`, and the s
 fires on anything else (leaderless gap or split-brain). The standby reports `503 standby` on
 `/readyz` (a load balancer routes only to the leader) while staying `200` on `/healthz`.
 
+> **Sharp edge — `/readyz` on the standby is 503 forever, by design.** That's correct for a load
+> balancer / target-group health check (routes traffic only to the leader), but it is **never**
+> safe as a liveness/instance-restart check on an HA replica — a restart-on-`/readyz`-failure
+> policy restart-loops the standby forever and defeats failover. See the ECS paragraph above and
+> the Kubernetes probes below for the concrete readiness-vs-liveness split.
+
 ### Kubernetes-native (Lease coordinator)
 
 On Kubernetes, use a `coordination.k8s.io/v1` **Lease** instead of a shared file — no shared volume
@@ -619,8 +653,13 @@ The leader renews the Lease's `holderIdentity` + `renewTime`; a standby takes ov
 Optimistic concurrency uses the Lease `resourceVersion` (a lost update returns HTTP 409, so — unlike
 the file lease — no pause-then-verify is needed), and the same fencing gates checkpoint commits on
 still holding the lease. In-cluster config is used by default (works with a workload-identity
-`ServiceAccount`); no NTP concern beyond the API server's own clock. The state store must still be
-shared (the S3/GCS store above) so the standby resumes from the leader's checkpoints.
+`ServiceAccount`); **no NTP concern** — staleness is judged by each replica's own **observedTime**
+(client-go's leaderelection pattern): a replica tracks, on its own monotonic clock, how long it's
+been since it last saw the Lease's `resourceVersion` change, and only takes over once `lease_duration`
+has elapsed on *that* clock. The leader's `renewTime` (a wall-clock value) is written for
+observability/`kubectl describe` but never read back for staleness math, so cross-host wall-clock
+skew cannot cause a premature (or delayed) takeover. The state store must still be shared (the
+S3/GCS store above) so the standby resumes from the leader's checkpoints.
 
 The pod's ServiceAccount needs `get`/`create`/`update` on `leases` in the coordinator's namespace:
 
@@ -638,6 +677,19 @@ rules:
 
 Bind it to the pod's ServiceAccount with a `RoleBinding`, and set `identity` (or rely on the default
 `$HOSTNAME` = pod name) so each replica writes a distinct `holderIdentity`.
+
+A complete, runnable example (Deployment with 2 replicas, ServiceAccount, the Role/RoleBinding
+above, probes, resource requests/limits) lives in [`deploy/k8s/`](deploy/k8s/) — see
+[`deploy/k8s/README.md`](deploy/k8s/README.md).
+
+> **Sharp edge — `readinessProbe` vs `livenessProbe`, same trap as ECS above.** Point
+> `readinessProbe` at `/readyz` (correct: the Service should only route traffic to the leader) and
+> `livenessProbe` at `/healthz` (the process is alive and its event loop is responsive even while
+> standing by). **Never** point `livenessProbe` at `/readyz` — the standby returns `503 standby`
+> forever by design, so kubelet restart-loops it continuously and defeats failover entirely. Set
+> `terminationGracePeriodSeconds` to at least `service.shutdown_grace` (default 25s) plus the app's
+> own ~5s closer budget, with margin — the [`deploy/k8s/`](deploy/k8s/) example uses 40s; raise it
+> if you raise `shutdown_grace`.
 
 ## Development
 

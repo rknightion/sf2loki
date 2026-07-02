@@ -24,15 +24,18 @@ single container image, run via Docker / Docker Compose.
 
 **Non-goals (now)**
 - Multi-replica horizontal scale-out of a single topic (Pub/Sub has no consumer-group semantics —
-  see §13). Single replica + a coordinator seam for future active-passive failover.
-- EventLogFile ingestion is **stubbed** (§7), designed to drop in as another source.
+  see §13). Single replica + a coordinator seam for active-passive failover (§13 — now built:
+  file-lease and Kubernetes-Lease coordinators, see README).
 - Exactly-once delivery. We are **at-least-once**; Loki absorbs duplicate identical entries.
+
+(EventLogFile ingestion was a non-goal/stub when this section was first written; it shipped in
+Phase 3 and is now one of the Goals above — see §8 and the phase table in §17.)
 
 ---
 
 ## 2. Stack
 
-- **Python 3.12**, **asyncio** throughout. Pub/Sub gRPC streaming (`grpc.aio`), Loki HTTP push
+- **Python 3.14**, **asyncio** throughout. Pub/Sub gRPC streaming (`grpc.aio`), Loki HTTP push
   (`httpx`), and SOQL polling are all I/O-bound — one event loop, `uvloop`, no thread/GIL contention.
 - **uv** (deps + lockfile), **ruff**, **mypy --strict**, **pytest** + **pytest-asyncio**, **just**.
 - Runtime deps: `grpcio` / `grpcio-tools`, `fastavro`, `httpx`, `pydantic` + `pydantic-settings`,
@@ -89,7 +92,10 @@ they are locked here.
 @dataclass(frozen=True, slots=True)
 class CheckpointToken:
     key: str      # "pubsub:/event/LoginEventStream" | "eventlog_objects:LoginEvent"
-    value: str    # base64(replay_id) for streaming; ISO-8601 EventDate for polling
+    value: str    # base64(replay_id) for Pub/Sub streaming; for polling sources (SOQL
+                  # objects, EventLogFile, ApexLog) a JSON blob carrying the watermark
+                  # plus a rolling dedup id-set, e.g. {"last_ts": ..., "ids": [...]} /
+                  # {"last_created": ..., "ids": [...]} — not a bare ISO-8601 timestamp
 
 @dataclass(slots=True)
 class LogEntry:
@@ -364,13 +370,15 @@ tooling-query mode on `SoqlClient` (path `/services/data/v{ver}/tooling/query`) 
 
 **Stream labels — low-cardinality, ~constant per deployment:**
 
-| label         | source                | distinct values            |
-|---------------|-----------------------|----------------------------|
-| `job`         | constant (`sf2loki`)  | 1                          |
-| `source`      | module                | 3 (`pubsub`/`eventlog_objects`/`eventlogfile`) |
-| `event_type`  | event name            | ~20–50                     |
-| `sf_org_id`   | resolved org id       | 1 per deployment           |
-| `environment` | operator-set          | 1 per deployment           |
+| label          | source                | distinct values            |
+|----------------|------------------------|----------------------------|
+| `job`          | constant (`sf2loki`)  | 1                          |
+| `service_name` | constant (`sf2loki`)  | 1 (OTel resource convention; same value as `job`) |
+| `source`       | module                | 3 (`pubsub`/`eventlog_objects`/`eventlogfile`) |
+| `event_type`   | event name            | ~20–50                     |
+| `sf_org_id`    | resolved org id       | 1 per deployment           |
+| `environment`  | operator-set          | 1 per deployment           |
+| `org`          | multi-org config name | 1 per configured org (single-org: absent) |
 
 → **active streams ≈ `source × event_type` ≈ 30–90 per deployment** — comfortably within Grafana
 Cloud per-tenant stream limits and cheap in DPM terms.
@@ -467,7 +475,6 @@ sources:
       - {name: ReportExport, structured_metadata_fields: [REPORT_ID], labels: [DELEGATED_USER]}
 
 sink:
-  type: loki
   loki:
     url: https://logs-prod-xx.grafana.net/loki/api/v1/push   # or http://alloy:3100/loki/api/v1/push
     tenant_id: "123456"                          # GC user id / X-Scope-OrgID; omit for Alloy
@@ -543,7 +550,7 @@ election drop in later without reshaping sources or sink. Topic-sharding is a fu
 ## 14. Packaging & delivery
 
 - **Dockerfile**: multi-stage — `uv`-based builder (deps + already-committed stubs) → slim,
-  non-root runtime (distroless-python or `python:3.12-slim`), `HEALTHCHECK` against `/healthz`.
+  non-root runtime (`python:3.14-slim`, digest-pinned), `HEALTHCHECK` against `/readyz`.
 - **Docker Compose** (`docker-compose.yml`): the published image with `config.docker.yaml` +
   `./secrets` mounted read-only and `./state` bind-mounted at `/var/lib/sf2loki` for durable
   checkpoints. Single service, `restart: unless-stopped`.

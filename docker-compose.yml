@@ -1,7 +1,7 @@
-# Docker run for sf2loki — pulls the prebuilt image published to GHCR on every
-# push to main (the `:main` edge tag). This is the deploy target (e.g. jules):
+# Docker run for sf2loki — pulls the published GHCR image (the semver `:latest`
+# release tag by default). This is the deploy target (e.g. jules):
 #
-#   docker compose --env-file .env.dev pull        # fetch the latest :main
+#   docker compose --env-file .env.dev pull        # fetch :latest
 #   docker compose --env-file .env.dev up -d        # run it
 #
 # To build from local source instead (dev iteration), layer the build override:
@@ -12,9 +12,12 @@
 # values are interpolated from the env_file. config.docker.yaml carries no secrets.
 services:
   sf2loki:
-    # Pin a specific build with SF2LOKI_TAG=main-<sha> if you need to; defaults to
-    # the rolling :main edge tag.
-    image: ghcr.io/rknightion/sf2loki:${SF2LOKI_TAG:-main}
+    # Defaults to the released :latest tag (semver'd by release-please — check
+    # the CHANGELOG for a `feat!:`/breaking entry before bumping). Set
+    # SF2LOKI_TAG=main for the rolling edge image (dev/staging only — it can
+    # carry unreleased/breaking changes) or SF2LOKI_TAG=main-<sha> to pin a
+    # specific edge build.
+    image: ghcr.io/rknightion/sf2loki:${SF2LOKI_TAG:-latest}
     pull_policy: always
     env_file:
       - .env.dev
@@ -26,7 +29,8 @@ services:
       - ./secrets:/etc/sf2loki/secrets:ro
       # Durable checkpoint state (replay_id / watermark per source) survives
       # container recreation. The container runs as uid 10001, so ./state must
-      # be writable by it: `mkdir -p state && chmod 777 state` (or chown 10001).
+      # be writable by it: `mkdir -p state && chmod 770 state && chown 10001 state`
+      # (770 + chown, not a permissive 777 — matches `sf2loki doctor`'s own hint).
       - ./state:/var/lib/sf2loki
     command: ["--config", "/etc/sf2loki/config.yaml"]
     ports:
@@ -34,6 +38,19 @@ services:
       # don't expose them to the network. Change to "8080:8080" if an external
       # probe (load balancer, monitoring host) needs to reach them.
       - "127.0.0.1:8080:8080"   # /healthz, /readyz (metrics are OTLP-push, no scrape port)
+    # service.shutdown_grace (config.docker.yaml, default 25s) plus the app's
+    # own ~5s closer budget need a stop timeout that outlives them, or Docker
+    # SIGKILLs mid-drain (default stop_grace_period is only 10s). 35s = 25s +
+    # 5s + margin. Raise this if you raise shutdown_grace.
+    stop_grace_period: 35s
+    # Bounds worst-case memory: the Loki sink queue (sink.loki.batch.queue_max_bytes,
+    # default 256 MiB) plus the Pub/Sub bridge queue (sources.pubsub.bridge_max_bytes,
+    # default 128 MiB) can both fill during a sink outage, plus Python/uv runtime
+    # overhead. 512m gives headroom above the ~384 MiB queue ceiling without
+    # inviting a much larger straggler batch to OOM the host; raise it if you
+    # raise either queue's byte budget.
+    mem_limit: 512m
+    mem_reservation: 128m
     # Note: Docker does NOT restart a container because its HEALTHCHECK fails —
     # "unless-stopped" only covers process exit. Pair an unhealthy-state restart
     # with an orchestrator (ECS/K8s) or something like willfarrell/autoheal.

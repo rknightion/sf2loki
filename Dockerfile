@@ -1,11 +1,16 @@
 # syntax=docker/dockerfile:1
 
 # --- Builder: resolve deps + install the project with uv ----------------------
-FROM python:3.14-slim AS builder
+# Digest-pinned (tag kept alongside for readability): reproducible builds +
+# Renovate proposes bumps to the digest as new 3.14-slim images publish
+# (":latest" or a bare tag defeats both).
+# renovate: datasource=docker depName=python versioning=docker
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 
-# Pinned minor tag: reproducible builds + Renovate can propose bumps
+# Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
-COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
+# renovate: datasource=docker depName=ghcr.io/astral-sh/uv versioning=docker
+COPY --from=ghcr.io/astral-sh/uv:0.11@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -24,7 +29,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # --- Runtime: slim, non-root --------------------------------------------------
-FROM python:3.14-slim AS runtime
+# renovate: datasource=docker depName=python versioning=docker
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS runtime
 
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev

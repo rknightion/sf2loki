@@ -1,0 +1,141 @@
+# Example active-passive HA Deployment for sf2loki on Kubernetes. Pair with
+# rbac.yaml (ServiceAccount + Role + RoleBinding for the Lease) and, if you
+# want Service-based routing to whichever replica is currently the leader,
+# service.yaml. See deploy/k8s/README.md and the README.md "High availability"
+# section for the full picture.
+#
+# Both replicas run concurrently the whole time — that's how Lease-based HA
+# works, the standby is idle, not absent. Kubernetes has no idea which one is
+# "the leader"; that election happens entirely inside the app via the
+# coordinate.k8s_lease Lease. Kubernetes just keeps 2 pods scheduled and
+# routes traffic (if you use service.yaml) only to whichever one is Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sf2loki
+  namespace: sf2loki
+  labels:
+    app: sf2loki
+spec:
+  replicas: 2 # exactly 2 for an active-passive pair; more than 2 just adds
+              # idle standbys (harmless, but pointless cost)
+  selector:
+    matchLabels:
+      app: sf2loki
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1 # keep at least 1 replica up during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: sf2loki
+    spec:
+      serviceAccountName: sf2loki
+      # Spread the pair across nodes on a best-effort basis so a single node
+      # failure can't take out both replicas at once. "preferred", not
+      # "required" — don't block scheduling on a single-node/small cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sf2loki
+                topologyKey: kubernetes.io/hostname
+      # service.shutdown_grace (config, default 25s) + the app's own ~5s
+      # closer budget (app.py _CLOSE_TIMEOUT) need a grace period that
+      # outlives them, or kubelet SIGKILLs mid-drain (k8s default is only
+      # 30s, already borderline). 40s = 25s + 5s + margin. Raise this if you
+      # raise shutdown_grace — see the README HA section.
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: sf2loki
+          # Defaults to the released :latest tag (semver'd by release-please
+          # — check the CHANGELOG for a `feat!:`/breaking entry before
+          # bumping). Pin main-<sha> for a specific edge build if you're
+          # tracking unreleased fixes; :main itself is a dev/staging-only
+          # rolling tag, same guidance as docker-compose.yml.
+          image: ghcr.io/rknightion/sf2loki:latest
+          imagePullPolicy: Always
+          args: ["--config", "/etc/sf2loki/config.yaml"]
+          ports:
+            - name: health
+              containerPort: 8080 # /healthz, /readyz — metrics are OTLP-push, no scrape port
+          # Non-secret ${VAR} interpolation values (Salesforce login URL,
+          # consumer key, username, Loki URL/tenant, ...) — the k8s analogue
+          # of docker-compose's env_file: .env.dev. Create your own ConfigMap
+          # (kubectl create configmap sf2loki-env --from-env-file=.env.dev),
+          # not included here since its contents are deployment-specific.
+          envFrom:
+            - configMapRef:
+                name: sf2loki-env
+                optional: true
+          volumeMounts:
+            # config.yaml — the k8s analogue of config.docker.yaml, mounted
+            # from a ConfigMap you create (kubectl create configmap
+            # sf2loki-config --from-file=config.yaml=your-config.yaml). Set
+            # coordinate.type: k8s_lease + coordinate.k8s_lease in it (README
+            # "Kubernetes-native (Lease coordinator)"), and state.store: s3
+            # or gcs — the HA state store must be shared, and neither needs a
+            # volume, so this manifest mounts no PersistentVolumeClaim.
+            - name: config
+              mountPath: /etc/sf2loki/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            # Private key / Loki token / any *_file secrets, same uid-10001
+            # readability rule as the Docker Compose section of the README —
+            # a Kubernetes Secret volume is world-readable-by-owner (0644) by
+            # default via defaultMode, which already satisfies that.
+            - name: secrets
+              mountPath: /etc/sf2loki/secrets
+              readOnly: true
+          # Readiness gates traffic (Service below only sends to a Ready
+          # pod — i.e. the current leader, or a standalone instance).
+          # Liveness gates the pod's own restart. These must target
+          # DIFFERENT endpoints on an HA replica: the standby is
+          # legitimately, permanently NOT ready (`503 standby` on
+          # `/readyz`, by design), so pointing livenessProbe at /readyz
+          # would restart-loop the standby forever and defeat failover.
+          # See the README HA section's "Sharp edge" callouts. Values
+          # mirror the Dockerfile HEALTHCHECK (interval=15s, timeout=3s,
+          # start-period=20s, retries=3).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Bounds worst-case memory the same way as docker-compose.yml's
+          # mem_limit: the Loki sink queue (sink.loki.batch.queue_max_bytes,
+          # default 256 MiB) plus the Pub/Sub bridge queue
+          # (sources.pubsub.bridge_max_bytes, default 128 MiB) can both fill
+          # during a sink outage, plus Python/uv runtime overhead. Raise the
+          # limit if you raise either queue's byte budget. CPU is I/O-bound
+          # workload headroom, not a hard requirement — tune to your cluster.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: sf2loki-config
+        - name: secrets
+          secret:
+            secretName: sf2loki-secrets

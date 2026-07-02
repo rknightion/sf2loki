@@ -1,0 +1,33 @@
+# RBAC for the Kubernetes-native HA coordinator (coordinate.type: k8s_lease,
+# README "Kubernetes-native (Lease coordinator)"). The coordinator only ever
+# reads/writes ONE named Lease object, so the Role is scoped to this
+# namespace, not cluster-wide — a compromised sf2loki pod can't touch Leases
+# (or anything else) outside it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sf2loki-lease
+  namespace: sf2loki
+rules:
+  # get: read the current holder/renewTime to decide standby-vs-takeover.
+  # create: first replica to start creates the Lease if it doesn't exist yet.
+  # update: renew (leader) or take over (standby) via a resourceVersion CAS —
+  # a lost race comes back as HTTP 409, which the coordinator treats as
+  # "someone else won", so no delete permission is ever needed.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sf2loki-lease
+  namespace: sf2loki
+subjects:
+  - kind: ServiceAccount
+    name: sf2loki
+    namespace: sf2loki
+roleRef:
+  kind: Role
+  name: sf2loki-lease
+  apiGroup: rbac.authorization.k8s.io
