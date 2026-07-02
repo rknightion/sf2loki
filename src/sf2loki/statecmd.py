@@ -202,7 +202,7 @@ async def run_state_delete(
     source's next run re-lists its lookback/preset window from scratch —
     records already pushed to Loki within that window are pushed again
     (a duplicate window), not lost. See the runbook linked from
-    ``docs/state-runbook.md`` for the exact recovery procedure.
+    ``docs/deployment/state.md`` for the exact recovery procedure.
     """
     if key in _RESERVED_KEYS:
         print(

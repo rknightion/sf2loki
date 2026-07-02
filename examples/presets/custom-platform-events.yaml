@@ -17,7 +17,7 @@
 #
 # CDC caveat: the ChangeEventHeader.changedFields / nulledFields bitmap fields
 # are shipped as their raw encoded strings — sf2loki does not expand them into
-# field-name lists. See docs/configuring-sources.md.
+# field-name lists. See docs/sources/pubsub.md.
 #
 # OVERLAP: custom-event / CDC categories are orthogonal to the RTEM/ELF
 # categories, so the overlap guard never flags them against Login/API/etc.

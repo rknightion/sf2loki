@@ -1,7 +1,7 @@
 # Preset: ingest Salesforce login activity.
 #
 # Login data is reachable multiple ways — pick exactly ONE per the
-# either/or-per-category overlap rule (see docs/configuring-sources.md §1/§3):
+# either/or-per-category overlap rule (see docs/sources/index.md):
 #
 #   (a) SOQL-poll the standard `LoginHistory` object (this preset, below) —
 #       no Shield/Event Monitoring entitlement required, just standard API

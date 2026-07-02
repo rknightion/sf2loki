@@ -5,7 +5,7 @@
 # doubles as general-purpose custom-object log collection. This preset polls
 # a custom object `MyAudit__c`; swap in your own object + field names.
 #
-# See docs/configuring-sources.md §2 for the full recipe (query shape, the
+# See docs/sources/eventlog-objects.md for the full recipe (query shape, the
 # FIELDS(ALL) LIMIT 200 cap, and BigObject/EventStore caveats).
 #
 # This is a fragment, not a runnable standalone file — merge these keys into

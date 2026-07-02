@@ -7,7 +7,7 @@ Monitoring** (RTEM) streaming events via the Pub/Sub API (gRPC + Avro) and store
 SOQL, then pushes them to Loki with strict label-cardinality discipline. It targets Grafana Cloud
 Loki, self-hosted Loki, and local Alloy (`loki.source.api`).
 
-See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strategy, and phase plan.
+See [the architecture docs](docs/architecture.md) for the full architecture, frozen seams, and label strategy.
 
 ## Highlights
 
@@ -17,10 +17,10 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   overlap guard refuses to start if a category is enabled on more than one (bypass: `allow_overlap`).
   A separate opt-in **ApexLog** source (`sources.apexlog`) streams Apex debug logs via the Tooling
   API for developer debugging — off by default, one API call per log body (see
-  [configuring-sources §7](docs/configuring-sources.md#7-apex-debug-logs-apexlog)). The Pub/Sub
+  [sources: ApexLog](docs/sources/apexlog.md)). The Pub/Sub
   source also carries **your own custom platform events** (`/event/My_Event__e`) and **Change Data
   Capture** channels (`/data/AccountChangeEvent`) — any explicit topic, no engine change (see
-  [configuring-sources §8](docs/configuring-sources.md#8-custom-platform-events--change-data-capture)).
+  [sources: Pub/Sub — custom events & CDC](docs/sources/pubsub.md)).
 - **Loki sink**: protobuf + snappy by default (canonical push wire format), JSON + gzip as a debug
   encoding. Both carry structured metadata.
 - **Cardinality discipline**: a fixed label allowlist (`job`, `source`, `event_type`, `sf_org_id`,
@@ -53,18 +53,20 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 
 ## Documentation
 
-- [DESIGN.md](DESIGN.md) — full architecture, frozen seams, label strategy, phase plan, HA model.
-- [docs/configuring-sources.md](docs/configuring-sources.md) — source/config reference: custom
-  object polling, login history / setup audit trail recipes, the overlap rule, cardinality controls,
-  PII redaction & sampling, cost controls.
-- [docs/alerts.md](docs/alerts.md) — the Grafana-managed alert + recording-rule pack: what each
-  rule means and how to apply it with `gcx`.
-- [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard-v2 suite +
-  rule pack, the `gcx` apply workflow, and the metric-suffix requirement.
-- [deploy/k8s/README.md](deploy/k8s/README.md) — example Kubernetes manifests for the
+Full documentation is published at **[m7kni.io/sf2loki](https://m7kni.io/sf2loki/)**. Key pages:
+
+- [Architecture](docs/architecture.md) — composition root, the four frozen seams, data flow,
+  label strategy, multi-org, checkpoint stores, HA model.
+- [Sources](docs/sources/index.md) — the source model + per-source guides: custom object polling,
+  login history / setup audit trail recipes, the overlap rule, PII redaction & sampling, cost controls.
+- [Observability › Alerts](docs/observability/alerts.md) — the Grafana-managed alert + recording-rule
+  pack: what each rule means and how to apply it with `gcx`.
+- [Observability › Dashboards](docs/observability/dashboards.md) — the bundled Grafana dashboard-v2
+  suite, the `gcx` apply workflow, and the metric-suffix requirement.
+- [Deployment › Kubernetes](docs/deployment/kubernetes.md) — example manifests for the
   active-passive HA pair (Deployment, ServiceAccount/RBAC, probes).
-- [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
-  exercising a dev org's Event Monitoring pipeline.
+- [Development › Synthetic Activity Tool](docs/development/generate-activity.md) — synthetic activity
+  generator for exercising a dev org's Event Monitoring pipeline.
 
 ## Install
 
@@ -99,7 +101,7 @@ The service authenticates server-to-server, no interactive login. Pick one flow 
   user pre-authorisation). See [Client Credentials flow](#alternative-client-credentials-flow).
 
 Both reuse the same External Client App shell and the same integration-user permissions (step 4); the
-JWT bearer walkthrough follows. See [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials)
+JWT bearer walkthrough follows. See [the auth guide](docs/getting-started.md)
 for the protocol-level detail (JWT claims, token endpoint, why each scope/toggle is set the way it is).
 
 ### 1. Generate the keypair and certificate
@@ -148,7 +150,7 @@ Field by field:
   Cloud / platform scopes (`cdp_segment_api`, `cdp_identityresolution_api`,
   `cdp_calculated_insight_api`, `sfap_api`, `interaction_api`, `cdp_api`). `refresh_token` is required
   even though this flow never issues or uses a refresh token — see
-  [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials) for why. `openid`
+  [the auth guide](docs/getting-started.md) for why. `openid`
   is needed only if you leave `salesforce.org_id` unset; set `org_id` in config to avoid needing it.
 - **Introspect all Tokens** — ❌ leave unticked (authorises introspecting *every* token in the org; the
   app can already introspect its own).
@@ -164,7 +166,7 @@ Field by field:
 **Security** — leave every default as-is (`Require secret for Web Server Flow` / `…Refresh Token Flow`
 / `Require PKCE` ticked; refresh-token rotation/idle-TTL/IP-allowlist and named-user JWT access tokens
 unticked). These toggles govern flows and refresh-token behaviour this connector doesn't use — see
-[DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials) if you want the
+[the auth guide](docs/getting-started.md) if you want the
 reasoning for each.
 
 Then: **OAuth Settings → JWT Bearer Flow → upload `server.crt`**, **Save**, and copy the **Consumer
@@ -233,7 +235,7 @@ Simpler than JWT bearer — no keypair, certificate, or user pre-authorisation. 
 
 > Trade-off: client credentials transmits a shared secret (symmetric); JWT bearer never sends a secret
 > over the wire (asymmetric key). Both yield an access token that works identically for the Pub/Sub,
-> REST/SOQL, and EventLogFile paths. See [DESIGN.md §5](DESIGN.md#5-salesforce-auth--oauth-jwt-bearer-or-client-credentials)
+> REST/SOQL, and EventLogFile paths. See [the auth guide](docs/getting-started.md)
 > for the protocol-level detail.
 
 ### Token lifetime and reconnect churn (ops note)
@@ -329,7 +331,7 @@ auth at all.
 
 ### Source recipes
 
-See [`docs/configuring-sources.md`](docs/configuring-sources.md) for recipes — polling arbitrary
+See [the sources guide](docs/sources/index.md) for recipes — polling arbitrary
 custom objects, ingesting login history / setup audit trail, the either/or-per-category rule,
 PII redaction & sampling, and cost controls (rate caps + the daily byte budget).
 
@@ -402,7 +404,7 @@ the relevant keys into your `config.yaml` alongside sink/state/service — see
   (`/data/AccountChangeEvent`, `/data/MyChannel__chn`) via `sources.pubsub`. No engine change —
   the source subscribes to any explicit topic. Note custom/CDC events count against event-delivery
   allocations (RTEM streams don't), and CDC bitmap fields ship unexpanded — see
-  [`docs/configuring-sources.md`](docs/configuring-sources.md).
+  [the sources guide](docs/sources/index.md).
 
 ### Metrics (OTLP)
 
@@ -424,7 +426,7 @@ and the connector alert rules query the suffixed names and go silently blank oth
 A set of hand-authored **Grafana dashboard-schema-v2 dashboards** (Salesforce security, API,
 Apex/performance, an overview, and the connector's own health) plus a **Grafana-managed alert +
 recording-rule pack** live in [`deploy/grafana/`](deploy/grafana/) — apply them with `gcx`; see
-[deploy/grafana/README.md](deploy/grafana/README.md) and [docs/alerts.md](docs/alerts.md).
+[deploy/grafana/README.md](deploy/grafana/README.md) and [docs/observability/alerts.md](docs/observability/alerts.md).
 
 ### Stateless deployments (S3 checkpoint store)
 
@@ -584,7 +586,7 @@ compose `stop_grace_period`) if you raise `shutdown_grace`.
 **Run exactly one ACTIVE replica** (stop-then-start rollout, not overlapping) — the Pub/Sub API
 delivers events independently per subscriber connection, so a second active instance
 double-delivers. For automatic failover, run an active-passive pair with the file-lease or
-Kubernetes-Lease coordinator (next section); see [DESIGN.md §13](DESIGN.md#13-resilience-lifecycle--ha)
+Kubernetes-Lease coordinator (next section); see [the HA docs](docs/deployment/high-availability.md)
 for the full HA/replica model.
 
 > **Loki requirement**: structured metadata needs schema **v13 + TSDB + `allow_structured_metadata:

@@ -3,7 +3,7 @@
 Example manifests for running sf2loki's active-passive HA pair on Kubernetes with the
 `k8s_lease` coordinator (`coordinate.type: k8s_lease`) — see the main
 [README.md "High availability" section](../../README.md#high-availability-active-passive) and
-[DESIGN.md §13](../../DESIGN.md#13-resilience-lifecycle--ha) for the mechanism itself. These are a
+the [High Availability docs](../../docs/deployment/high-availability.md) for the mechanism itself. These are a
 starting point to adapt, not a Helm chart or Kustomize base — namespaces, image tag, resource
 sizing, and the config/secret contents are all yours to fill in.
 

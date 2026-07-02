@@ -1,7 +1,7 @@
 # CLAUDE.md — src/sf2loki/auth
 
 `jwt_auth.py` — the sole client of Salesforce OAuth, shared by every client in
-`../salesforce/`. See DESIGN.md §5 for the full setup/scopes walkthrough
+`../salesforce/`. See docs/getting-started.md for the full setup/scopes walkthrough
 (External Client App config, licences, security toggles).
 
 ## Two auth modes, one `TokenProvider`

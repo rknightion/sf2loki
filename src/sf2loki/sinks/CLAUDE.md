@@ -2,7 +2,7 @@
 
 `Sink` protocol in `base.py`; `loki/` is the only implementation
 (`sink.py` retry/push orchestration, `push.py` wire encoding, `labels.py`
-allowlist guard). DESIGN.md §9-10 covers the full design.
+allowlist guard). docs/architecture.md covers the full design.
 
 ## Encoding: protobuf+snappy is the default, JSON+gzip is for debugging
 `push.py` implements both `encode_protobuf` (canonical `logproto.PushRequest`,

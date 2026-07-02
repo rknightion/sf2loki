@@ -1,11 +1,12 @@
 # CLAUDE.md — sf2loki
 
-Working notes for Claude. See `CONTRIBUTING.md` for the human-facing version,
-`DESIGN.md` for the original architecture spec, and `README.md` for
-operator-facing config. **DESIGN.md is not fully current** — later features
-(multi-org ingestion, the HA file-lease coordinator, the S3 checkpoint store)
-are documented only in `README.md`, not backfilled into `DESIGN.md`. Trust
-`README.md`/code over `DESIGN.md` where they'd disagree.
+Working notes for Claude. See `CONTRIBUTING.md` for the contributor-facing
+version, `docs/architecture.md` for the canonical architecture (composition
+root, frozen seams, label strategy, multi-org, checkpoint stores, HA), and
+`README.md` for operator-facing config. The full docs site lives under `docs/`
+(published at https://m7kni.io/sf2loki/); trust `docs/`/`README.md`/code as the
+source of truth. (The old `DESIGN.md` spec was retired once the docs site
+superseded it.)
 
 ## What this is
 A long-running Python/asyncio service: Salesforce Event Monitoring data

@@ -1,6 +1,6 @@
 """SOQL REST API client with pagination and 401-retry logic.
 
-Ref: DESIGN.md §7.
+Ref: docs/sources/eventlog-objects.md.
 """
 
 from __future__ import annotations

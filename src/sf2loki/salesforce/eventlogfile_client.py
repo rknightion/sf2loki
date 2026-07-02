@@ -1,6 +1,6 @@
 """EventLogFile REST client: lists ELF metadata via SOQL, downloads + parses LogFile CSVs.
 
-Ref: DESIGN.md §8.
+Ref: docs/sources/eventlogfile.md.
 
 All failures surface as the :class:`EventLogFileError` family (SOQL errors from
 the internal listing client and httpx transport errors are re-wrapped), so the

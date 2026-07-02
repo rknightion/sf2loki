@@ -6,7 +6,7 @@
 #
 # This is a fragment, not a runnable standalone file — merge into config.yaml
 # (see config.example.yaml for the full schema, auth, sink, state, service).
-# See docs/configuring-sources.md §3 for the full recipe.
+# See docs/sources/eventlog-objects.md for the full recipe.
 
 salesforce:
   environment: production

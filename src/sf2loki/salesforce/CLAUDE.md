@@ -6,7 +6,7 @@ streaming), `soql_client.py` (REST/Tooling SOQL), `eventlogfile_client.py`
 logs), `metadata_client.py` (describeGlobal discovery), `limits_client.py`
 (org API-limit polling), `avro_codec.py` (Pub/Sub payload decode). All take a
 shared `auth.jwt_auth.TokenProvider` — see `../auth/CLAUDE.md` for auth
-selection/refresh. DESIGN.md §5-8b covers the full protocol detail per client.
+selection/refresh. docs/architecture.md covers the full protocol detail per client.
 
 ## `_generated/` — never hand-edit
 `_generated/pubsub_api_pb2{,_grpc}.py` are committed generated gRPC stubs from
@@ -29,7 +29,7 @@ Threat-Detection `*EventStore`, ...) are BigObjects: they reject `ORDER BY ASC`
 (`ORDER BY <ts> DESC`) with a ratcheting `<=` upper bound, dedups within the
 drain and against the checkpoint id-window, and re-sorts each cycle's window
 ascending before emitting so the watermark/dedup/checkpoint semantics match the
-ASC path (see DESIGN.md §7). `FIELDS(ALL)` itself works on BigObjects; only the
+ASC path (see docs/sources/eventlog-objects.md). `FIELDS(ALL)` itself works on BigObjects; only the
 ASC order was the problem. Standard/custom objects (`LoginHistory`,
 `MyAudit__c`) leave the flag false and use the ASC path. Historical backfill
 beyond the poll window is a deferred follow-up, not this path.

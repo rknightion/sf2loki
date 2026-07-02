@@ -2,7 +2,8 @@
 
 Producers implementing the `Source` protocol (`base.py`): `pubsub_source.py`,
 `eventlog_objects_source.py`, `eventlogfile_source.py`, `apexlog_source.py`.
-See `DESIGN.md` §4/§6-8b for the frozen `Source` contract and per-source design.
+See `docs/architecture.md` for the frozen `Source` contract and
+`docs/sources/index.md` for per-source design.
 
 ## Either/or overlap guard
 `overlap.py` normalises every enabled source's identifiers (Pub/Sub topics,

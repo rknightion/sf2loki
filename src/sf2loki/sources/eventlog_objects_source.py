@@ -1,6 +1,6 @@
 """EventLog Objects source: polls Salesforce SOQL for EventLog object records.
 
-Ref: DESIGN.md §7.
+Ref: docs/sources/eventlog-objects.md.
 
 Supports any sObject that Salesforce surfaces as a queryable EventLog object
 (e.g. LoginEvent, ApiEvent). Uses FIELDS(ALL) which requires LIMIT <=200

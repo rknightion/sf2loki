@@ -1,6 +1,6 @@
 """Salesforce OAuth 2.0 JWT bearer flow — server-to-server token provider.
 
-Ref: DESIGN.md §5 + §13.
+Ref: docs/getting-started.md (auth), docs/deployment/high-availability.md (HA).
 """
 
 from __future__ import annotations

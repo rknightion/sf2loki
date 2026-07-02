@@ -108,7 +108,7 @@ sf2loki config example > config.yaml
 ## `sf2loki state show|set|delete`
 
 Inspects and repairs checkpoints in the configured state store. See the
-[state runbook](../state-runbook.md) for stuck-watermark recovery walkthroughs.
+[state runbook](../deployment/state.md) for stuck-watermark recovery walkthroughs.
 
 All three subcommands share `--force`, which bypasses the file store's exclusive lock — unsafe if
 the daemon is still running against the same state file.

@@ -1,6 +1,6 @@
 """EventLogFile source: lists + downloads Salesforce EventLogFile CSVs.
 
-Ref: DESIGN.md §8.
+Ref: docs/sources/eventlogfile.md.
 
 Each poll cycle, for every configured ``event_type``: list new EventLogFile
 records since the last checkpoint, download and parse each file's CSV body,

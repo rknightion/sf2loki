@@ -47,7 +47,7 @@ class StrictModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Duration shorthand: "5m", "1h30m", "25s", "500ms" (DESIGN.md §11), in
+# Duration shorthand: "5m", "1h30m", "25s", "500ms" (docs/config-reference.md), in
 # addition to pydantic's own timedelta/ISO-8601/numeric-seconds parsing.
 
 _DURATION_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h|d|w)")
@@ -81,7 +81,7 @@ Duration = Annotated[timedelta, BeforeValidator(_parse_duration)]
 
 
 # ---------------------------------------------------------------------------
-# ${VAR} interpolation in YAML-sourced values (DESIGN.md §11): a referenced
+# ${VAR} interpolation in YAML-sourced values (docs/config-reference.md): a referenced
 # environment variable that is unset is fatal at load time (fail fast, no
 # silent blanks — same policy as *_file secrets below).
 

@@ -4,7 +4,8 @@ The `Coordinator` seam (`base.py`) for active-passive HA. `NoopCoordinator`
 (always leader, the single-instance default), `FileLeaseCoordinator`
 (`file_lease.py`, lease on shared storage), and `K8sLeaseCoordinator`
 (`k8s_lease.py`, a `coordination.k8s.io/v1` Lease) all implement it with zero
-changes required in sources/sinks/state — see `../CLAUDE.md` and DESIGN.md §13
+changes required in sources/sinks/state — see `../CLAUDE.md` and
+docs/deployment/high-availability.md
 for why sf2loki is single-instance-only without a coordinator (Pub/Sub has no
 consumer-group semantics; two subscribers double-deliver).
 

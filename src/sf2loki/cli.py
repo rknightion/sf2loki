@@ -143,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     state_parser = subparsers.add_parser(
         "state",
         help="Inspect/repair checkpoints in the configured state store (see "
-        "docs/state-runbook.md for stuck-watermark recovery).",
+        "docs/deployment/state.md for stuck-watermark recovery).",
     )
     state_subparsers = state_parser.add_subparsers(dest="state_command", required=True)
 

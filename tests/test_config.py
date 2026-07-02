@@ -101,7 +101,7 @@ def test_missing_required_field_is_config_error(tmp_path: Path) -> None:
         load(p)
 
 
-# --- Duration shorthand (DESIGN.md §11: "5m", "1s", "25s") ------------------
+# --- Duration shorthand (docs/config-reference.md: "5m", "1s", "25s") ------
 
 
 @pytest.mark.parametrize(
@@ -135,7 +135,7 @@ def test_duration_shorthand_rejects_garbage() -> None:
         ServiceConfig(shutdown_grace="5x")  # type: ignore[arg-type]
 
 
-# --- ${ENV} interpolation (DESIGN.md §11: "client_id: ${SF_CLIENT_ID}") -----
+# --- ${ENV} interpolation (docs/config-reference.md: "client_id: ${SF_CLIENT_ID}") -----
 
 
 def test_env_interpolation_in_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
