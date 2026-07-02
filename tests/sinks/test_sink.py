@@ -676,6 +676,32 @@ class TestLineCap:
         )
 
     @respx.mock
+    async def test_truncation_invalidates_cached_line_nbytes(self) -> None:
+        """The cap mutates entry.line, so the memoized byte length (issue #69,
+        set during pipeline accounting) must be dropped — else the sink's
+        pre-encode size estimate would use the stale pre-cap length."""
+        respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
+        cfg = _cfg_line_cap(200)
+        big = "x" * 5000
+        entry = LogEntry(
+            timestamp=TS,
+            labels={"source": "eventlogfile", "event_type": "API"},
+            line=big,
+            structured_metadata={},
+            checkpoint=CheckpointToken(key="eventlogfile:API", value="1"),
+        )
+        # Simulate the pipeline having already computed + memoized the pre-cap
+        # length (5000) before the entry reached the sink.
+        assert entry.line_nbytes() == 5000
+        async with httpx.AsyncClient() as client:
+            s = LokiSink(cfg, client, metrics=Metrics())
+            await s.push(Batch(entries=[entry]))
+
+        # After the cap, the memo reflects the truncated line, not the stale 5000.
+        assert entry.line_nbytes() <= 200
+        assert entry.line_nbytes() == len(entry.line.encode("utf-8"))
+
+    @respx.mock
     async def test_under_cap_line_untouched(self) -> None:
         route = respx.post(PUSH_URL).mock(return_value=httpx.Response(204))
         cfg = _cfg_line_cap(262144)

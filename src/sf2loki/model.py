@@ -40,6 +40,26 @@ class LogEntry:
     structured_metadata: Mapping[str, str]
     checkpoint: CheckpointToken
     checkpoint_only: bool = False
+    # Memoized UTF-8 byte length of ``line`` (issue #69 item 2); -1 = not yet
+    # computed. Excluded from equality/repr so two otherwise-equal entries stay
+    # equal regardless of whether the length has been cached. Reset to -1 by any
+    # code that mutates ``line`` (the sink's line cap) so the memo can't go stale.
+    _line_nbytes: int = field(default=-1, compare=False, repr=False)
+
+    def line_nbytes(self) -> int:
+        """UTF-8 byte length of ``line``, computed once and memoized.
+
+        The line is finalized by the source's shaping before the entry enters
+        the pipeline, where its byte length is needed up to ~4x purely for byte
+        accounting (queue byte budget on charge + release, consumer batch
+        accounting, governor admission, sink pre-encode size estimate) before the
+        one unavoidable wire encode. Encoding once removes those redundant UTF-8
+        passes on the hot path. Any code that reassigns ``line`` MUST reset
+        ``_line_nbytes`` to -1 (see the Loki sink's line cap).
+        """
+        if self._line_nbytes < 0:
+            self._line_nbytes = len(self.line.encode("utf-8"))
+        return self._line_nbytes
 
 
 @dataclass(slots=True)

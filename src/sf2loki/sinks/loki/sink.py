@@ -164,8 +164,11 @@ class LokiSink:
         Not the final wire size (labels, structured metadata, and protobuf/gzip
         framing all add overhead) — just enough to decide, before paying the
         encode cost, whether this batch is worth offloading to a thread.
+
+        Uses the memoized per-entry line length (issue #69) so this reuses the
+        UTF-8 encode already paid during pipeline byte accounting.
         """
-        return sum(len(entry.line.encode("utf-8")) for entry in batch.entries)
+        return sum(entry.line_nbytes() for entry in batch.entries)
 
     async def _encode_async(self, batch: Batch) -> tuple[bytes, dict[str, str]]:
         """Encode *batch*, offloading to a worker thread above a size threshold.
@@ -321,9 +324,15 @@ class LokiSink:
         if cap <= 0:
             return
         for entry in batch.entries:
+            # Fast path (the common case): the memoized line length (already
+            # computed during pipeline byte accounting, issue #69) says the line
+            # fits, so skip cap_line's re-encode entirely.
+            if entry.line_nbytes() <= cap:
+                continue
             capped, truncated = cap_line(entry.line, cap)
             if truncated:
                 entry.line = capped
+                entry._line_nbytes = -1  # line mutated: drop the stale memo
                 self._metrics.lines_truncated.labels(
                     source=entry.labels.get("source", "unknown")
                 ).inc()

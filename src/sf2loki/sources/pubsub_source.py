@@ -65,7 +65,10 @@ def _entry_bytes(item: LogEntry | None) -> int:
     """
     if item is None or item.checkpoint_only:
         return 0
-    return len(item.line.encode("utf-8")) + _BRIDGE_ENTRY_OVERHEAD
+    # Memoized (issue #69): the bridge is the FIRST place a streaming entry's
+    # line is measured, so caching it here means the downstream pipeline byte
+    # accounting, governor, and sink size estimate all reuse this one encode.
+    return item.line_nbytes() + _BRIDGE_ENTRY_OVERHEAD
 
 
 def _jitter(backoff: float) -> float:

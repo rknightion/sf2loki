@@ -336,7 +336,7 @@ class Pipeline:
         """
         if not isinstance(item, LogEntry) or item.checkpoint_only:
             return 0
-        cost = len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
+        cost = item.line_nbytes() + _QUEUE_ENTRY_OVERHEAD
         for key, value in item.labels.items():
             cost += len(key) + len(value)
         for key, value in item.structured_metadata.items():
@@ -410,7 +410,7 @@ class Pipeline:
             assert isinstance(item, LogEntry)
             batch.append(item)
             if not item.checkpoint_only:
-                approx_bytes += len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
+                approx_bytes += item.line_nbytes() + _QUEUE_ENTRY_OVERHEAD
             if deadline is None:
                 deadline = loop.time() + flush_interval
             if len(batch) >= self._batch.max_entries or approx_bytes >= self._batch.max_bytes:
@@ -437,7 +437,7 @@ class Pipeline:
         lines = len(real)
         bytes_ = 0
         if self._governor is not None:
-            bytes_ = sum(len(e.line.encode("utf-8")) for e in real)
+            bytes_ = sum(e.line_nbytes() for e in real)
             admitted = await self._governor.admit(lines, bytes_, stop)
             if not admitted:
                 # Drop-mode budget exhaustion: discard this batch (counted) but
