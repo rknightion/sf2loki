@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
@@ -1210,3 +1211,304 @@ async def test_big_object_drain_aborts_on_stop_without_committing(
     assert entries == []  # nothing emitted from an aborted drain
     assert calls["n"] == 1  # page 2 was never queried (stop caught at the loop top)
     assert await store.load("eventlog_objects:LoginEvent") is None  # watermark uncommitted
+
+
+# ---------------------------------------------------------------------------
+# Issue #38: a full page of >_PAGE_LIMIT records sharing ONE timestamp must
+# drain COMPLETELY (not permanently stall) on both the ASC and DESC paths, and
+# a stall that repeats at the SAME boundary across cycles must escalate.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_asc_more_than_page_limit_ties_drains_completely(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """>_PAGE_LIMIT records sharing one timestamp must drain COMPLETELY within
+    a cycle via the ASC path's Id tiebreak, not stall after the first page."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    tie_ts = "2026-06-30T10:00:00Z"
+    ids = [f"r{i:03d}" for i in range(250)]
+
+    call_count = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        # Query-aware: WITHOUT the Id tiebreak fix, every query is identical
+        # (plain ``>= wm``) and this always returns the same first 200 (the
+        # real stall behaviour) -- the fixed code sends ``Id > 'rNNN'`` on the
+        # follow-up query, which this mock honours to serve the NEXT slice.
+        nonlocal call_count
+        call_count += 1
+        q = parse_qs(urlparse(str(request.url)).query)["q"][0]
+        match = re.search(r"Id > '(\w+)'", q)
+        page_ids = [i for i in ids if i > match.group(1)][:200] if match else ids[:200]
+        return httpx.Response(
+            200,
+            json={"records": [{"Id": i, "EventDate": tie_ts} for i in page_ids], "done": True},
+        )
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = make_elo_cfg()
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 250  # ALL 250 tied records emitted, not just the first page
+    assert call_count == 2
+    final = json.loads(entries[-1].checkpoint.value)
+    assert final["last_ts"] == tie_ts
+    assert "r249" in final["ids"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_more_than_page_limit_ties_drains_completely(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """The DESC symmetric fix: >_PAGE_LIMIT tied records at the ratchet bound
+    must fully drain via a page-aware id-window escape (NOT IN pagination),
+    not stop after the first page. Big Objects reject a compound ORDER BY, so
+    this mirrors the ASC path's Id tiebreak without one."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    tie_ts = "2026-06-30T10:00:00.000+0000"
+    ids = [f"x{i:03d}" for i in range(250)]
+
+    call_count = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            page_ids = ids[:200]
+        elif call_count == 2:
+            page_ids = ids[200:]
+        else:
+            page_ids = []
+        return httpx.Response(
+            200,
+            json={"records": [{"Id": i, "EventDate": tie_ts} for i in page_ids], "done": True},
+        )
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 250
+    assert call_count == 3
+    finals = {json.loads(e.checkpoint.value)["last_ts"] for e in entries}
+    assert finals == {tie_ts}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_asc_repeated_stall_at_same_boundary_escalates_to_error_and_counts(
+    tmp_path: pytest.TempPathFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stall that repeats at the SAME watermark boundary across cycles is a
+    permanent halt, not a one-off busy poll -- escalate to ERROR and increment
+    the watermark_stalls metric (only from the 2nd occurrence onward)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    tie_ts = "2026-06-30T10:00:00Z"
+    ids = [f"r{i:03d}" for i in range(200)]
+    await store.commit(
+        "eventlog_objects:LoginEvent",
+        json.dumps({"last_ts": tie_ts, "ids": ids}),
+    )
+
+    # Every query returns the SAME already-seen full page: a genuine repeated
+    # stall (every id truly already committed, tiebreak can't get past it).
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={"records": [{"Id": i, "EventDate": tie_ts} for i in ids], "done": True},
+        )
+    )
+
+    cfg = make_elo_cfg()
+    metrics = Metrics()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True, metrics=metrics)
+
+        with caplog.at_level("WARNING"):
+            entries1 = [e async for e in source.events(store, asyncio.Event())]
+        assert entries1 == []
+        assert metrics.registry.get_sample_value(
+            "sf2loki_watermark_stalls_total",
+            {"source": "eventlog_objects", "object": "LoginEvent"},
+        ) in (None, 0.0)
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            entries2 = [e async for e in source.events(store, asyncio.Event())]
+        assert entries2 == []
+
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+    assert (
+        metrics.registry.get_sample_value(
+            "sf2loki_watermark_stalls_total",
+            {"source": "eventlog_objects", "object": "LoginEvent"},
+        )
+        == 1.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #46: bound the big_object DESC drain's memory via max_catchup_records.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_catchup_bounded_by_max_catchup_records(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A post-outage catch-up over a big backlog must not RETAIN the whole gap
+    in memory. max_catchup_records bounds how much of the (fully-swept,
+    newest-first) window is kept -- the newest overflow is evicted (not lost:
+    the committed watermark stops at the retained boundary, so a later cycle's
+    ordinary >= cursor re-discovers exactly that evicted newer slice)."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    base = datetime(2026, 6, 30, 0, 0, 0, tzinfo=UTC)
+
+    def make_page(start_minute: int, count: int) -> list[dict[str, str]]:
+        return [
+            {
+                "Id": f"p{start_minute + i:04d}",
+                "EventDate": (base - timedelta(minutes=start_minute + i)).strftime(
+                    "%Y-%m-%dT%H:%M:%S.000+0000"
+                ),
+            }
+            for i in range(count)
+        ]
+
+    page1 = make_page(0, 200)  # newest 200 minutes (0..199 minutes old)
+    page2 = make_page(200, 200)  # next 200 (200..399 minutes old)
+    page3 = make_page(400, 50)  # oldest 50 (400..449 minutes old) -- short page
+
+    call_count = 0
+
+    def side_effect(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        page = {1: page1, 2: page2, 3: page3}.get(call_count, [])
+        return httpx.Response(200, json={"records": page, "done": True})
+
+    respx.get(_query_url()).mock(side_effect=side_effect)
+
+    cfg = make_big_object_cfg(lookback=timedelta(days=2))
+    cfg.objects[0].max_catchup_records = 250
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # Bounded: not all 450 records are retained/emitted from one drain, even
+    # though the full backlog was swept over the network to find the true tail.
+    assert len(entries) == 250
+    assert call_count == 3  # the full sweep still ran, all the way to a short page
+
+    ids_kept = {json.loads(e.line)["Id"] for e in entries}
+    assert "p0000" not in ids_kept  # newest-overflow evicted (recoverable later)
+    assert "p0199" not in ids_kept
+    assert "p0200" in ids_kept  # boundary + everything older retained
+    assert "p0449" in ids_kept  # oldest record retained
+
+    committed_wm = json.loads(entries[-1].checkpoint.value)["last_ts"]
+    assert committed_wm == page2[0]["EventDate"]  # boundary of the retained window
+
+
+# ---------------------------------------------------------------------------
+# Issue #64: a fully-filtered/sampled cycle must still durably advance the
+# watermark via a checkpoint_only token, so the next cycle doesn't re-fetch
+# and deterministically re-drop the identical window forever.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fully_sampled_out_cycle_emits_checkpoint_only_and_advances_watermark(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [
+                    {"EventDate": "2026-06-30T10:00:00Z", "Id": "005a", "UserId": "u1"},
+                    {"EventDate": "2026-06-30T10:01:00Z", "Id": "005b", "UserId": "u2"},
+                ],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    cfg.objects[0].sample = 0.0  # deterministically drops every row
+    sf_cfg = make_sf_cfg()
+    tokens = FakeTokenProvider()
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(sf_cfg, tokens, client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # No real log entry (everything sampled out) but a checkpoint_only token
+    # carrying the advanced watermark rides through so it durably commits.
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is True
+    assert entries[0].line == ""
+    final = json.loads(entries[0].checkpoint.value)
+    assert final["last_ts"] == "2026-06-30T10:01:00Z"
+    assert "005a" in final["ids"] and "005b" in final["ids"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_partially_filtered_cycle_does_not_emit_checkpoint_only(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """When at least one row IS emitted, no extra checkpoint_only token is
+    needed -- the real entry's own checkpoint already carries the advance."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "records": [{"EventDate": "2026-06-30T10:00:00Z", "Id": "005a"}],
+                "done": True,
+            },
+        )
+    )
+
+    cfg = make_elo_cfg()
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(cfg, soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is False

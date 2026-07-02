@@ -31,6 +31,36 @@ the source then drains newest-first (ORDER BY <ts> DESC) with a ratcheting
 upper bound and re-sorts each cycle's window ascending before emitting, so the
 watermark/dedup/checkpoint semantics match the ASC path. FIELDS(ALL) itself
 works on Big Objects; only the ASC order was the problem.
+
+Tie-boundary progress (issue #38): a full page (``_PAGE_LIMIT``) can consist
+entirely of records sharing one timestamp (bulk loads, second-granularity
+fields) — without a secondary cursor the watermark could never rise past that
+instant. The ASC path adds an ``Id`` tiebreak (``ts > wm OR (ts = wm AND Id >
+last_id)``, ``ORDER BY ts ASC, Id ASC``) once a prior id is known. Big Objects
+reject a compound ``ORDER BY``, so the DESC drain gets the same guarantee via
+a page-aware ``Id NOT IN (...)`` escape at the stuck boundary instead. A stall
+that repeats at the exact same boundary across POLL CYCLES (not just within
+one cycle's drain-until-short-page loop) escalates from WARNING to ERROR and
+increments ``metrics.watermark_stalls`` — that pattern means the tiebreak
+itself can't make progress (e.g. every id at that instant is already
+committed), a permanent halt worth alerting on.
+
+Catch-up memory bound (issue #46): the DESC drain fully sweeps a cycle's
+window (needed to find the true oldest boundary) but RETAINS at most
+``max_catchup_records`` (0 = unbounded) — once exceeded, the newest-collected
+overflow is evicted. Nothing is lost: the committed watermark only advances
+through the retained (oldest) slice, so a later cycle's ordinary ``>=`` cursor
+naturally re-discovers the evicted newer slice. This bounds memory for a
+post-outage catch-up without changing per-cycle checkpoint semantics.
+
+checkpoint_only advance (issue #64): when a cycle's cursor advances (rows were
+fetched and their ids entered the dedup window) but every row was dropped by a
+transform or deterministic sampling, no real LogEntry is emitted — without a
+durable commit the next cycle would re-fetch and re-drop the identical window
+forever. In that case one checkpoint_only :class:`~sf2loki.model.LogEntry`
+(empty line, no labels) carrying the final watermark/window rides through the
+same pipeline FIFO path as a real entry (mirrors pubsub_source's keepalive
+token for a sampled-out event).
 """
 
 from __future__ import annotations
@@ -40,6 +70,7 @@ import contextlib
 import json
 import logging
 import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
@@ -105,6 +136,24 @@ def _parse_checkpoint(raw: str) -> tuple[str, list[str]]:
     return raw, []
 
 
+def _id_of(record: dict[str, object]) -> str:
+    return str(record.get("Id") or "")
+
+
+def _ts_of(record: dict[str, object], field: str) -> str:
+    return str(record.get(field) or "")
+
+
+def _escape_soql_string(value: str) -> str:
+    """Escape a value for interpolation into a SOQL string literal."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _soql_id_list(ids: Sequence[str]) -> str:
+    """A quoted, comma-separated SOQL literal list for an ``Id IN``/``NOT IN`` clause."""
+    return ", ".join(f"'{_escape_soql_string(i)}'" for i in ids)
+
+
 class EventLogObjectsSource:
     """Polls Salesforce EventLog sObjects via SOQL and yields :class:`~sf2loki.model.LogEntry`.
 
@@ -136,6 +185,16 @@ class EventLogObjectsSource:
         self._poll_once = poll_once
         self._consecutive_failures: dict[str, int] = {}
         self._cycle_throttled = False
+        # Per-object watermark stall boundary from the LAST cycle that stalled
+        # (issue #38 item 3): a repeat at the SAME boundary escalates WARNING
+        # -> ERROR + a metric, since that means the tiebreak/escape itself
+        # can't make progress (a permanent halt), not just a busy poll.
+        self._stall_boundaries: dict[str, str] = {}
+        # Per-key cache of the last (watermark, window) -> serialized
+        # checkpoint JSON (issue #69): reused verbatim when unchanged (e.g. a
+        # run of consecutive dropped rows with no Id and no valid timestamp),
+        # avoiding a wasted re-serialization of the up-to-500-entry id window.
+        self._checkpoint_cache: dict[str, tuple[str, tuple[str, ...], str]] = {}
         # Precompiled redaction/filter pipeline (empty when no transforms).
         self._transforms = compile_rules(
             cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
@@ -252,6 +311,12 @@ class EventLogObjectsSource:
             # Format as SOQL datetime literal: ISO-8601 with Z suffix.
             watermark = default_wm.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # issue #64: track whether the cursor moves without anything actually
+        # being emitted (every row dropped/sampled out), so a checkpoint_only
+        # token can still durably commit the advance at cycle end.
+        initial_watermark, initial_window = watermark, list(window)
+        emitted_any = False
+
         if obj.big_object:
             try:
                 records = await self._drain_big_object(obj, watermark, stop)
@@ -285,15 +350,18 @@ class EventLogObjectsSource:
                 return
 
             seen = set(window)
-            records = [r for r in records if str(r.get("Id") or "") not in seen]
+            records = [r for r in records if _id_of(r) not in seen]
 
             for record in records:
                 if stop.is_set():
                     return
                 entry, watermark, window = self._emit_record(obj, key, record, watermark, window)
                 if entry is not None:
+                    emitted_any = True
                     yield entry
             self._consecutive_failures.pop(obj.name, None)
+            if not emitted_any and (watermark, window) != (initial_watermark, initial_window):
+                yield self._checkpoint_only_entry(key, watermark, window)
             return
 
         # --- 2/3. Drain pages until a short page (or no progress) ---
@@ -302,13 +370,25 @@ class EventLogObjectsSource:
             # "…+0000"), which is NOT a legal SOQL literal — reformat before
             # interpolating it into the WHERE clause.
             # FIELDS(ALL) is a Salesforce convenience that selects every field;
-            # it requires LIMIT <=200 (platform constraint). ``>=`` (with the id
-            # window) instead of ``>`` so a timestamp tie at the page boundary
-            # is never skipped.
+            # it requires LIMIT <=200 (platform constraint). Once a prior Id is
+            # known (issue #38), the cursor adds an Id tiebreak (``ts > wm OR
+            # (ts = wm AND Id > last_id)``, ordered by both) so a full page of
+            # timestamp ties still advances; before that (nothing seen yet)
+            # plain ``>=`` covers a resumed boundary tie via the id window.
+            last_id = window[-1] if window else ""
+            ts_lit = to_soql_datetime_literal(watermark)
+            if last_id:
+                where = (
+                    f"({obj.timestamp_field} > {ts_lit} OR "
+                    f"({obj.timestamp_field} = {ts_lit} AND "
+                    f"Id > '{_escape_soql_string(last_id)}'))"
+                )
+            else:
+                where = f"{obj.timestamp_field} >= {ts_lit}"
             soql = (
                 f"SELECT FIELDS(ALL) FROM {obj.name} "
-                f"WHERE {obj.timestamp_field} >= {to_soql_datetime_literal(watermark)} "
-                f"ORDER BY {obj.timestamp_field} ASC "
+                f"WHERE {where} "
+                f"ORDER BY {obj.timestamp_field} ASC, Id ASC "
                 f"LIMIT {_PAGE_LIMIT}"
             )
 
@@ -351,31 +431,35 @@ class EventLogObjectsSource:
                 return
 
             seen = set(window)
-            new_records = [r for r in page if str(r.get("Id") or "") not in seen]
+            new_records = [r for r in page if _id_of(r) not in seen]
 
             if not new_records:
                 if len(page) >= _PAGE_LIMIT:
-                    _log.warning(
-                        "eventlog_objects[%s]: a full page at watermark %s contained "
-                        "only already-seen records (>%d records share one timestamp?); "
-                        "stopping this cycle to avoid a hot loop",
-                        obj.name,
+                    self._record_watermark_stall(
+                        obj,
                         watermark,
-                        _PAGE_LIMIT,
+                        f"eventlog_objects[{obj.name}]: a full page at watermark {watermark} "
+                        f"contained only already-seen records (>{_PAGE_LIMIT} records share "
+                        "one timestamp?); stopping this cycle to avoid a hot loop",
                     )
                 break
 
+            self._stall_boundaries.pop(obj.name, None)
             for record in new_records:
                 if stop.is_set():
                     return
                 entry, watermark, window = self._emit_record(obj, key, record, watermark, window)
                 if entry is not None:
+                    emitted_any = True
                     yield entry
 
             self._consecutive_failures.pop(obj.name, None)
 
             if len(page) < _PAGE_LIMIT:
                 break  # short page: caught up for this cycle
+
+        if not emitted_any and (watermark, window) != (initial_watermark, initial_window):
+            yield self._checkpoint_only_entry(key, watermark, window)
 
     def _emit_record(
         self,
@@ -428,10 +512,7 @@ class EventLogObjectsSource:
         line, sm = route_fields(record, self._sm_fields)
 
         labels: dict[str, str] = {"source": "eventlog_objects", "event_type": obj.name}
-        checkpoint = CheckpointToken(
-            key=key,
-            value=json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True),
-        )
+        checkpoint = CheckpointToken(key=key, value=self._checkpoint_value(key, window, watermark))
         entry = LogEntry(
             timestamp=ts,
             labels=labels,
@@ -440,6 +521,57 @@ class EventLogObjectsSource:
             checkpoint=checkpoint,
         )
         return entry, watermark, window
+
+    def _checkpoint_value(self, key: str, window: list[str], watermark: str) -> str:
+        """Serialize the checkpoint JSON, reusing the previous string verbatim
+        when (watermark, window) is unchanged since the last call for *key*
+        (issue #69) — avoids re-serializing the up-to-500-entry id window when
+        nothing actually changed (e.g. consecutive rows with no Id and no
+        valid timestamp).
+        """
+        window_t = tuple(window)
+        cached = self._checkpoint_cache.get(key)
+        if cached is not None and cached[0] == watermark and cached[1] == window_t:
+            return cached[2]
+        value = json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True)
+        self._checkpoint_cache[key] = (watermark, window_t, value)
+        return value
+
+    def _checkpoint_only_entry(self, key: str, watermark: str, window: list[str]) -> LogEntry:
+        """A checkpoint_only LogEntry so a fully-filtered/sampled cycle still
+        durably advances the stored watermark (issue #64; mirrors
+        ``pubsub_source._keepalive_entry``): the cursor moved (rows were
+        dropped/sampled, each still entering the id-dedup window) but nothing
+        was emitted, so without this token the next cycle would deterministically
+        re-fetch and re-drop the identical window forever.
+        """
+        value = self._checkpoint_value(key, window, watermark)
+        return LogEntry(
+            timestamp=datetime.now(UTC),
+            labels={},
+            line="",
+            structured_metadata={},
+            checkpoint=CheckpointToken(key=key, value=value),
+            checkpoint_only=True,
+        )
+
+    def _record_watermark_stall(
+        self, obj: EventLogObjectConfig, boundary: str, message: str
+    ) -> None:
+        """Log (+ maybe count) a poll cycle that made no progress at *boundary*.
+
+        Escalates WARNING -> ERROR and increments ``metrics.watermark_stalls``
+        when THIS SAME boundary already stalled on a previous cycle — a repeat
+        means the tiebreak/escape itself can't get past it (a permanent halt,
+        not a one-off busy poll), which is worth alerting on (issue #38).
+        """
+        repeat = self._stall_boundaries.get(obj.name) == boundary
+        if repeat:
+            _log.error(message)
+            self._metrics.watermark_stalls.labels(source="eventlog_objects", object=obj.name).inc()
+        else:
+            _log.warning(message)
+        self._stall_boundaries[obj.name] = boundary
 
     async def _drain_big_object(
         self, obj: EventLogObjectConfig, watermark: str, stop: asyncio.Event
@@ -451,15 +583,28 @@ class EventLogObjectsSource:
         <ts> DESC and a ratcheting upper bound: each full page lowers the bound to
         its oldest timestamp (``<=`` so a tie straddling the 200-row boundary is
         re-fetched and deduped, never skipped — the mirror of the ASC path's
-        ``>=`` + id-window). Drains until a short page or a full page that adds no
-        new id (all-ties guard). The collected window is sorted ASCENDING before
+        ``>=`` + id-window). The collected window is sorted ASCENDING before
         return so :meth:`_emit_record` advances the watermark forward monotonically
         exactly as in the ASC mode — keeping crash-safety identical.
 
-        Memory note: this buffers one cycle's window (bounded by poll_interval of
-        data in steady state; a first-run lookback or post-outage catch-up buffers
-        the whole window). Large historical backfills are a separate command, not
-        this poll path.
+        Tie escape (issue #38): a full page can consist entirely of records
+        sharing ONE timestamp (the ratchet can't lower the bound at all). Big
+        Objects reject a compound ``ORDER BY`` (no ``, Id`` tiebreak like the
+        ASC path), so instead this pages through that exact boundary via
+        ``Id NOT IN (...)`` (a page-aware id window scoped to just this tied
+        timestamp) until a short page confirms it is exhausted, then resumes
+        the normal ratchet strictly below it. Only if THAT escape also makes no
+        progress is it a genuine stall.
+
+        Memory bound (issue #46): ``collected`` is bounded to
+        ``obj.max_catchup_records`` (0 = unbounded) via an
+        insertion-ordered eviction — since pages arrive newest-first, the
+        OLDEST-inserted entries are the NEWEST timestamps, so evicting from the
+        front once over the cap keeps exactly the oldest-known records so far.
+        Nothing is lost: the full sweep still runs to completion (needed to
+        find the true oldest boundary), and the discarded newest overflow is
+        naturally re-discovered by a LATER cycle's ordinary ``>=`` cursor once
+        the watermark has advanced through this cycle's retained (older) slice.
 
         Shutdown note: ``stop`` is checked before each page query, so a large
         multi-page catch-up aborts promptly on shutdown instead of draining to
@@ -469,14 +614,27 @@ class EventLogObjectsSource:
         watermark past the un-drained older records and lose them. Next cycle
         re-drains from the same watermark (at-least-once, no gap).
         """
-        collected: dict[str, dict[str, object]] = {}
+        cap = obj.max_catchup_records
+        collected: OrderedDict[str, dict[str, object]] = OrderedDict()
         upper: str | None = None
+        upper_exclusive = False
+        tie_ts: str | None = None
+        tie_ids: list[str] = []
+
+        def oldest_dt(value: str) -> datetime:
+            return _watermark_datetime(value) or datetime.max.replace(tzinfo=UTC)
+
         while True:
             if stop.is_set():
                 return []
             clauses = [f"{obj.timestamp_field} >= {to_soql_datetime_literal(watermark)}"]
-            if upper is not None:
-                clauses.append(f"{obj.timestamp_field} <= {to_soql_datetime_literal(upper)}")
+            if tie_ts is not None:
+                clauses.append(f"{obj.timestamp_field} = {to_soql_datetime_literal(tie_ts)}")
+                if tie_ids:
+                    clauses.append(f"Id NOT IN ({_soql_id_list(tie_ids)})")
+            elif upper is not None:
+                op = "<" if upper_exclusive else "<="
+                clauses.append(f"{obj.timestamp_field} {op} {to_soql_datetime_literal(upper)}")
             soql = (
                 f"SELECT FIELDS(ALL) FROM {obj.name} "
                 f"WHERE {' AND '.join(clauses)} "
@@ -484,43 +642,69 @@ class EventLogObjectsSource:
                 f"LIMIT {_PAGE_LIMIT}"
             )
             page = [record async for record in self._soql.query(soql)]
-            if not page:
-                break
 
-            new_in_page = 0
+            new_ids: list[str] = []
             for record in page:
-                rid = str(record.get("Id") or "")
+                rid = _id_of(record)
                 if rid and rid not in collected:
                     collected[rid] = record
-                    new_in_page += 1
+                    new_ids.append(rid)
+            if new_ids:
+                self._stall_boundaries.pop(obj.name, None)
+            if cap:
+                while len(collected) > cap:
+                    collected.popitem(last=False)  # evict newest-so-far overflow
 
-            if len(page) < _PAGE_LIMIT:
-                break  # short page: window fully drained
-            if new_in_page == 0:
-                _log.warning(
-                    "eventlog_objects[%s]: a full DESC page at bound %s added no new "
-                    "records (>%d rows share one timestamp?); stopping drain to avoid "
-                    "a hot loop",
-                    obj.name,
-                    upper,
-                    _PAGE_LIMIT,
+            distinct_ts = {_ts_of(r, obj.timestamp_field) for r in page}
+            short_page = len(page) < _PAGE_LIMIT
+
+            if tie_ts is not None:
+                if short_page:
+                    # Tie group at tie_ts fully drained: resume the normal
+                    # ratchet strictly below it.
+                    upper, upper_exclusive, tie_ts, tie_ids = tie_ts, True, None, []
+                    continue
+                if not new_ids:
+                    self._record_watermark_stall(
+                        obj,
+                        tie_ts,
+                        f"eventlog_objects[{obj.name}]: a full DESC page at the tied "
+                        f"boundary {tie_ts} added no new records even via the Id NOT IN "
+                        f"escape (>{_PAGE_LIMIT} rows share one timestamp?); stopping "
+                        "drain to avoid a hot loop",
+                    )
+                    break
+                tie_ids.extend(new_ids)
+                continue
+
+            if short_page:
+                break  # window fully drained
+
+            if len(distinct_ts) == 1:
+                # The WHOLE page shares one timestamp: the ratchet can't lower
+                # the bound at all. Switch to the Id NOT IN escape instead of
+                # giving up.
+                tie_ts = next(iter(distinct_ts))
+                tie_ids = [rid for r in page if (rid := _id_of(r))]
+                continue
+
+            if not new_ids:
+                self._record_watermark_stall(
+                    obj,
+                    upper or watermark,
+                    f"eventlog_objects[{obj.name}]: a full DESC page at bound {upper} "
+                    "added no new records; stopping drain to avoid a hot loop",
                 )
                 break
 
             # Lower the bound to this page's oldest timestamp for the next sub-query.
-            oldest_rec = min(
-                page,
-                key=lambda r: (
-                    _watermark_datetime(str(r.get(obj.timestamp_field) or ""))
-                    or datetime.max.replace(tzinfo=UTC)
-                ),
-            )
-            upper = str(oldest_rec.get(obj.timestamp_field) or "")
+            upper = min(distinct_ts, key=oldest_dt)
+            upper_exclusive = False
 
         return sorted(
             collected.values(),
             key=lambda r: (
-                _watermark_datetime(str(r.get(obj.timestamp_field) or ""))
+                _watermark_datetime(_ts_of(r, obj.timestamp_field))
                 or datetime.min.replace(tzinfo=UTC)
             ),
         )
