@@ -80,6 +80,18 @@ the Pub/Sub source stops topping up flow-control credits → Salesforce stops se
 lag metrics rise instead (`genai-otel-bridge`'s "block-on-full, never silent loss", via generator
 suspension rather than a bounded channel).
 
+**Lanes (issue #53).** The `Pipeline` is not one queue — sources are split into lanes by class
+(`app._lane_of`: `pubsub` → **streaming**, `eventlogfile`/`eventlog_objects`/`apexlog` → **bulk**),
+and each lane has its own bounded queue, emit worker, and byte budget. A multi-million-row Daily ELF /
+big-object drain therefore backs up and slow-pushes only the bulk lane; the streaming lane keeps
+pushing concurrently, so realtime Pub/Sub is never head-of-line-blocked. Up to `n_lanes` (≤ 2) Loki
+pushes are in flight at once. Per-key commit ordering is preserved because each source's checkpoint
+keys are disjoint and stay within one lane, and the checkpoint stores serialise concurrent
+`commit_many` under their own lock. `sink_failing_since` is tracked per lane and aggregated as the
+earliest failing lane, so a healthy streaming lane can't mask a wedged bulk lane on `/readyz`.
+Worst-case buffered memory during a sink outage is `n_lanes × queue_max_bytes` (≤ 2×). A config that
+resolves to a single lane behaves identically to the pre-#53 single queue + single consumer.
+
 ---
 
 ## 4. Frozen seams

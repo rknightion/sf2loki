@@ -67,15 +67,16 @@ async def test_no_governor_preserves_sink_only_degradation() -> None:
     await health.start("127.0.0.1:0")
     try:
         health.set_ready()
+        lane = appn._pipeline._new_lane()  # failing-since is per-lane now (issue #53)
         async with httpx.AsyncClient() as client:
             base = f"http://127.0.0.1:{health.port}"
             # Sink failing beyond threshold -> degraded (unchanged behaviour).
-            appn._pipeline._sink_failing_since = time.monotonic() - 3600
+            lane.failing_since = time.monotonic() - 3600
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 503
             assert r.text.startswith("degraded: loki pushes failing for")
             # Recovers when the mark clears.
-            appn._pipeline._sink_failing_since = None
+            lane.failing_since = None
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 200
     finally:
@@ -99,10 +100,11 @@ async def test_paused_budget_reason_wins_over_sink_failing() -> None:
     await health.start("127.0.0.1:0")
     try:
         health.set_ready()
+        lane = appn._pipeline._new_lane()  # failing-since is per-lane now (issue #53)
         async with httpx.AsyncClient() as client:
             base = f"http://127.0.0.1:{health.port}"
             # Sink also failing beyond threshold...
-            appn._pipeline._sink_failing_since = time.monotonic() - 3600
+            lane.failing_since = time.monotonic() - 3600
             # ...but the budget-pause reason is checked first and wins.
             gov._paused = True
             gov._date = date(2026, 7, 1)

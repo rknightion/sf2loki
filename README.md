@@ -35,6 +35,11 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   an S3-compatible object store (`sf2loki[s3]` — no persistent volume needed); at-least-once
   delivery, structural backpressure (no silent drops). Optional active-passive HA via a shared
   file lease with commit fencing.
+- **Lanes (bulk can't starve streaming)**: realtime Pub/Sub and bulk sources (EventLogFile,
+  big-object polling, ApexLog) run on separate internal lanes — each its own queue, push worker, and
+  byte budget — so a multi-million-row Daily ELF drain never head-of-line-blocks live streams. Up to
+  two Loki pushes are in flight at once; per-key commit ordering is preserved (a source's checkpoint
+  keys stay within one lane). Worst-case buffered memory is `2 × queue_max_bytes`.
 - **Self-observable (OTel-native)**: all metrics — connector self-observability **and** Salesforce org
   limits (API usage, storage, streaming events) — push via **OTLP/HTTP** (Grafana Cloud or a local
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
@@ -332,7 +337,8 @@ PII redaction & sampling, and cost controls (rate caps + the daily byte budget).
 One sf2loki process can ingest several Salesforce orgs into one shared sink — MSPs, ISV partners, and
 anyone running prod + sandboxes no longer need N containers, N configs, and N state volumes for what is
 logically one job. Replace the top-level `salesforce:`/`sources:` with an `orgs:` list; the sink, state
-store, coordinator, and service settings stay shared (one pipeline, one queue, one Loki tenant):
+store, coordinator, and service settings stay shared (one pipeline, shared streaming/bulk lanes,
+one Loki tenant):
 
 ```yaml
 orgs:

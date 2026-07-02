@@ -862,17 +862,19 @@ class LokiBatchConfig(StrictModel):
         default=10_000,
         ge=100,
         description=(
-            "Entry-count bound of the internal source->sink queue. Producers block "
-            "(structural backpressure) when full."
+            "Entry-count bound of each internal source->sink lane queue. Producers block "
+            "(structural backpressure) when full. Applied PER LANE (streaming vs bulk), so "
+            "the worst-case entry count is queue_maxsize x number-of-lanes (<= 2)."
         ),
     )
     queue_max_bytes: int = Field(
         default=268_435_456,
         ge=0,
         description=(
-            "Approximate byte budget for queued entries (worst-case memory during a sink "
-            "outage). Producers block when exceeded, even if the entry-count bound is not "
-            "reached. Default 256 MiB; 0 disables byte accounting."
+            "Approximate byte budget for queued entries, applied PER LANE (streaming vs bulk). "
+            "Producers on a lane block when its budget is exceeded, even if the entry-count "
+            "bound is not reached. Worst-case buffered memory during a sink outage is therefore "
+            "queue_max_bytes x number-of-lanes (<= 2x). Default 256 MiB; 0 disables accounting."
         ),
     )
 

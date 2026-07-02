@@ -171,8 +171,8 @@
 | `max_bytes` | `int` | 1048576 | no | Flush the batch after this many bytes. |
 | `flush_interval` | `Duration` | 1s | no | Flush the batch after this much time, regardless of size. |
 | `max_line_bytes` | `int` | 262144 | no | Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables. |
-| `queue_maxsize` | `int` | 10000 | no | Entry-count bound of the internal source->sink queue. Producers block (structural backpressure) when full. |
-| `queue_max_bytes` | `int` | 268435456 | no | Approximate byte budget for queued entries (worst-case memory during a sink outage). Producers block when exceeded, even if the entry-count bound is not reached. Default 256 MiB; 0 disables byte accounting. |
+| `queue_maxsize` | `int` | 10000 | no | Entry-count bound of each internal source->sink lane queue. Producers block (structural backpressure) when full. Applied PER LANE (streaming vs bulk), so the worst-case entry count is queue_maxsize x number-of-lanes (<= 2). |
+| `queue_max_bytes` | `int` | 268435456 | no | Approximate byte budget for queued entries, applied PER LANE (streaming vs bulk). Producers on a lane block when its budget is exceeded, even if the entry-count bound is not reached. Worst-case buffered memory during a sink outage is therefore queue_max_bytes x number-of-lanes (<= 2x). Default 256 MiB; 0 disables accounting. |
 
 ## EgressConfig
 

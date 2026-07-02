@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
@@ -444,6 +445,124 @@ async def test_keepalive_commit_fires_commit_metric() -> None:
     assert val is not None and val > 0.0
 
 
+# --- per-lane queues: bulk cannot starve streaming (issue #53) ---------------
+
+
+def _lane_entry(source: str, key: str, value: str, line: str = "{}") -> LogEntry:
+    """A real entry tagged with a ``source`` label so a lane-aware sink can tell
+    which lane pushed it (streaming vs bulk)."""
+    return LogEntry(
+        timestamp=datetime.now(UTC),
+        labels={"source": source, "event_type": "Thing"},
+        line=line,
+        structured_metadata={},
+        checkpoint=CheckpointToken(key=key, value=value),
+    )
+
+
+async def test_saturated_bulk_lane_does_not_starve_streaming(wait_until: WaitUntil) -> None:
+    """The core #53 guarantee: while a bulk push is fully blocked, the streaming
+    lane keeps pushing to completion — bulk head-of-line-blocking is impossible.
+
+    On the old single-queue/single-consumer pipeline the consumer pulls the
+    first-enqueued bulk entry, blocks on its gated push, and NO streaming entry
+    is ever pushed (the shared consumer is wedged). With per-source-class lanes
+    the streaming consumer drains its own queue independently.
+    """
+    bulk_gate = asyncio.Event()
+
+    class LaneAwareSink:
+        def __init__(self) -> None:
+            self.pushed: list[Batch] = []
+
+        async def push(self, batch: Batch) -> None:
+            # Block every bulk push until the test opens the gate; stream is free.
+            if batch.entries[0].labels.get("source") == "eventlogfile":
+                await bulk_gate.wait()
+            self.pushed.append(batch)
+
+        async def aclose(self) -> None:
+            return None
+
+    bulk_src = FakeSource(
+        [_lane_entry("eventlogfile", "eventlogfile:Login", str(i)) for i in range(50)]
+    )
+    bulk_src.name = "eventlogfile"
+    stream_src = FakeSource([_lane_entry("pubsub", "pubsub:/event/X", str(i)) for i in range(3)])
+    stream_src.name = "pubsub"
+
+    sink = LaneAwareSink()
+    state = FakeState()
+    # Bulk source listed first so its producer enqueues entry 0 before the
+    # consumer runs — on the old code that deterministically wedges the shared
+    # consumer on the gated bulk push.
+    pipe = Pipeline(
+        sources=[bulk_src, stream_src],
+        sink=sink,
+        state=state,
+        batch=_batch_cfg(max_entries=1),
+        metrics=Metrics(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(pipe.run(stop))
+    try:
+        # All 3 streaming entries reach the sink while every bulk push is blocked.
+        await wait_until(
+            lambda: (
+                sum(1 for b in sink.pushed for e in b.entries if e.labels.get("source") == "pubsub")
+                == 3
+            )
+        )
+        # ...and not a single bulk entry got through (the bulk lane is fully gated).
+        assert not any(
+            e.labels.get("source") == "eventlogfile" for b in sink.pushed for e in b.entries
+        )
+        # Release the gate: bulk drains and the whole run completes cleanly.
+        bulk_gate.set()
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        bulk_gate.set()
+        stop.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert state.committed == {"eventlogfile:Login": "49", "pubsub:/event/X": "2"}
+
+
+async def test_two_lanes_both_commit_through_real_file_store(tmp_path: object) -> None:
+    """Concurrent commits from two lane consumers both persist (issue #53).
+
+    Guards the design's "no shared pipeline lock needed" conclusion: the real
+    FileCheckpointStore serialises commit_many under its own asyncio.Lock, so
+    two lanes committing disjoint keys never lose an update or self-conflict.
+    """
+    from pathlib import Path
+
+    from sf2loki.state.file_store import FileCheckpointStore
+
+    assert isinstance(tmp_path, Path)
+    store = FileCheckpointStore(tmp_path / "state.json")
+    bulk_src = FakeSource(
+        [_lane_entry("eventlogfile", "eventlogfile:Login", str(i)) for i in range(20)]
+    )
+    bulk_src.name = "eventlogfile"
+    stream_src = FakeSource([_lane_entry("pubsub", "pubsub:/event/X", str(i)) for i in range(20)])
+    stream_src.name = "pubsub"
+    pipe = Pipeline(
+        sources=[bulk_src, stream_src],
+        sink=FakeSink(),
+        state=store,
+        batch=_batch_cfg(max_entries=1),
+        metrics=Metrics(),
+    )
+
+    await asyncio.wait_for(pipe.run(asyncio.Event()), timeout=5)
+
+    assert await store.load("eventlogfile:Login") == "19"
+    assert await store.load("pubsub:/event/X") == "19"
+
+
 # --- queue_depth updated by the producer (A8) --------------------------------
 
 
@@ -453,10 +572,10 @@ async def test_producer_updates_queue_depth_gauge() -> None:
     pipe = Pipeline(
         sources=[], sink=FakeSink(), state=FakeState(), batch=_batch_cfg(), metrics=metrics
     )
-    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
+    lane = pipe._new_lane()
     src = FakeSource([_entry("k", "1"), _entry("k", "2"), _entry("k", "3")])
 
-    await pipe._produce(src, queue, asyncio.Event())
+    await pipe._produce(src, lane, asyncio.Event())
 
     # No consumer ran: the gauge was set by the producer after each put.
     assert metrics.registry.get_sample_value("sf2loki_queue_depth") == 3.0
@@ -502,22 +621,22 @@ async def test_producer_blocks_on_byte_budget_and_resumes_as_consumer_drains(
         batch=_batch_cfg(queue_max_bytes=150),
         metrics=Metrics(),
     )
-    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
-    task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
+    lane = pipe._new_lane()
+    task = asyncio.create_task(pipe._produce(FakeSource(entries), lane, asyncio.Event()))
 
-    await wait_until(lambda: queue.qsize() == 1)  # entry 0 admitted, entry 1 blocked on bytes
+    await wait_until(lambda: lane.queue.qsize() == 1)  # entry 0 admitted, entry 1 blocked on bytes
     assert not task.done()
 
     # Drain one item the way the consumer does; the producer resumes.
-    item = await queue.get()
-    await pipe._release(item)
-    await wait_until(lambda: queue.qsize() == 1)  # entry 1 admitted, entry 2 blocked
+    item = await lane.queue.get()
+    await pipe._release(lane, item)
+    await wait_until(lambda: lane.queue.qsize() == 1)  # entry 1 admitted, entry 2 blocked
 
-    item = await queue.get()
-    await pipe._release(item)
-    item = await asyncio.wait_for(queue.get(), timeout=1)
-    await pipe._release(item)
-    sentinel = await asyncio.wait_for(queue.get(), timeout=1)
+    item = await lane.queue.get()
+    await pipe._release(lane, item)
+    item = await asyncio.wait_for(lane.queue.get(), timeout=1)
+    await pipe._release(lane, item)
+    sentinel = await asyncio.wait_for(lane.queue.get(), timeout=1)
     assert not isinstance(sentinel, LogEntry)
     await asyncio.wait_for(task, timeout=1)
 
@@ -553,14 +672,14 @@ async def test_count_bound_still_enforced_when_byte_accounting_disabled(
         batch=_batch_cfg(queue_maxsize=100, queue_max_bytes=0),
         metrics=Metrics(),
     )
-    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=pipe._queue_maxsize)
-    task = asyncio.create_task(pipe._produce(FakeSource(entries), queue, asyncio.Event()))
+    lane = pipe._new_lane()  # queue maxsize == pipe._queue_maxsize (100)
+    task = asyncio.create_task(pipe._produce(FakeSource(entries), lane, asyncio.Event()))
 
-    await wait_until(lambda: queue.qsize() == 100)  # count bound reached
+    await wait_until(lambda: lane.queue.qsize() == 100)  # count bound reached
     assert not task.done()
 
     while not task.done():
-        await asyncio.wait_for(queue.get(), timeout=1)
+        await asyncio.wait_for(lane.queue.get(), timeout=1)
         await asyncio.sleep(0)
     await asyncio.wait_for(task, timeout=1)
 
@@ -575,11 +694,11 @@ async def test_checkpoint_only_entries_cost_no_bytes() -> None:
         batch=_batch_cfg(queue_max_bytes=1),
         metrics=Metrics(),
     )
-    queue: asyncio.Queue[LogEntry | object] = asyncio.Queue()
+    lane = pipe._new_lane()
 
-    await asyncio.wait_for(pipe._produce(FakeSource(keepalives), queue, asyncio.Event()), timeout=1)
+    await asyncio.wait_for(pipe._produce(FakeSource(keepalives), lane, asyncio.Event()), timeout=1)
 
-    assert queue.qsize() == 6  # 5 keepalives + sentinel, none blocked
+    assert lane.queue.qsize() == 6  # 5 keepalives + sentinel, none blocked
 
 
 async def test_clean_shutdown_with_byte_blocked_producer(
@@ -617,7 +736,8 @@ async def test_flush_success_sets_last_push_metric_and_clears_failing_since(
     metrics = Metrics()
     pipe = Pipeline(sources=[], sink=sink, state=FakeState(), batch=_batch_cfg(), metrics=metrics)
 
-    await asyncio.wait_for(pipe._flush([_entry("k", "v")], asyncio.Event()), timeout=2)
+    lane = pipe._new_lane()
+    await asyncio.wait_for(pipe._flush(lane, [_entry("k", "v")], asyncio.Event()), timeout=2)
 
     assert pipe.sink_failing_since is None  # cleared on the eventual success
     val = metrics.registry.get_sample_value("sf2loki_last_push_success_timestamp_seconds")

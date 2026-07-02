@@ -1,10 +1,13 @@
 """Composition root and the shared Pipeline.
 
-``Pipeline`` fans every enabled :class:`~sf2loki.sources.base.Source` into one
-bounded queue and drains it with a single sequential emit worker that batches by
-size/bytes/interval, pushes to the sink, and commits checkpoints on success.
-``App`` wires the concrete implementations together from config and owns process
-lifecycle (signals, metrics/health servers, graceful shutdown).
+``Pipeline`` splits its sources into lanes by class (streaming vs bulk, see
+:func:`_lane_of`) and fans each lane's :class:`~sf2loki.sources.base.Source`\\ s
+into that lane's own bounded queue, drained by that lane's own emit worker which
+batches by size/bytes/interval, pushes to the sink, and commits checkpoints on
+success. Per-lane queues stop a bulk drain (a Daily ELF / big-object cycle) from
+head-of-line-blocking realtime streaming (issue #53). ``App`` wires the concrete
+implementations together from config and owns process lifecycle (signals,
+metrics/health servers, graceful shutdown).
 """
 
 from __future__ import annotations
@@ -76,6 +79,40 @@ _RETRY_BACKOFF_MAX = 30.0
 # timestamps, object headers — cheap to compute, close enough to bound memory).
 _QUEUE_ENTRY_OVERHEAD = 64
 
+# Source classes get separate lanes so a bulk drain (a Daily ELF / big-object
+# cycle of millions of rows) can't head-of-line-block realtime streaming
+# (issue #53). pubsub is the only streaming class; every other source
+# (eventlogfile/eventlog_objects/apexlog) is bulk. Classification is by
+# source.name, which OrgSource preserves verbatim, so multi-org works unchanged.
+_STREAMING_SOURCE_NAMES = frozenset({"pubsub"})
+
+
+def _lane_of(source: Source) -> str:
+    """The lane class for *source*: ``streaming`` (pubsub) or ``bulk`` (all else)."""
+    return "streaming" if source.name in _STREAMING_SOURCE_NAMES else "bulk"
+
+
+@dataclass
+class _LaneState:
+    """One ingestion lane: its own bounded queue, byte budget, and push worker.
+
+    Splitting sources into lanes (streaming vs bulk) gives each lane an
+    independent queue + consumer, so a saturated bulk lane's backpressure and
+    slow Loki pushes cannot block the streaming lane's producers or its pushes.
+    Per-key FIFO (and thus commit monotonicity) is preserved because each
+    source's checkpoint keys are disjoint and stay within one lane.
+    """
+
+    name: str
+    queue: asyncio.Queue[LogEntry | object]
+    byte_cond: asyncio.Condition
+    queued_bytes: int = 0
+    n_producers: int = 0
+    # Monotonic instant this lane's sink pushes started failing continuously
+    # (None while healthy). Per-lane so a healthy streaming lane cannot clear a
+    # failing bulk lane's outage mark and mask /readyz degradation (issue #53).
+    failing_since: float | None = None
+
 
 def build_static_labels(
     *, environment: str, org_id: str, operator_labels: Mapping[str, str]
@@ -115,13 +152,20 @@ _HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 class Pipeline:
     """Drain sources into batches and push them to the sink, committing on success.
 
-    Backpressure is structural and two-dimensional: a slow sink leaves the
-    bounded queue full — by entry count (``batch.queue_maxsize``) or by
-    approximate bytes (``batch.queue_max_bytes``) — which blocks producers and
-    therefore suspends each source's event stream — Salesforce stops being
-    asked for more. The byte bound caps worst-case buffered memory during a
-    sink outage (entries can be ~max_line_bytes each, so a count bound alone
-    could buffer gigabytes).
+    Sources are split into lanes by class (:func:`_lane_of`: ``pubsub`` →
+    streaming, everything else → bulk); each lane has its own queue, emit worker,
+    and byte budget, so a saturated bulk lane can't starve realtime streaming
+    (issue #53). With a single lane behaviour is identical to the old shared
+    queue + single consumer.
+
+    Backpressure is structural, two-dimensional, and PER LANE: a slow sink leaves
+    a lane's bounded queue full — by entry count (``batch.queue_maxsize``) or by
+    approximate bytes (``batch.queue_max_bytes``) — which blocks only THAT lane's
+    producers and therefore suspends only those sources' event streams. The byte
+    bound caps worst-case buffered memory during a sink outage (entries can be
+    ~max_line_bytes each, so a count bound alone could buffer gigabytes); because
+    each lane carries the full ``queue_max_bytes``, worst-case buffered memory is
+    ``n_lanes * queue_max_bytes`` (<= 2x — at most a streaming and a bulk lane).
     """
 
     def __init__(
@@ -145,37 +189,69 @@ class Pipeline:
         self._static_labels: dict[str, str] = dict(static_labels or {})
         # Explicit override for tests; production wiring takes the config value.
         self._queue_maxsize = batch.queue_maxsize if queue_maxsize is None else queue_maxsize
-        # Approximate bytes currently sitting in the queue, guarded by the
-        # condition; producers wait on it when over batch.queue_max_bytes.
-        self._queued_bytes = 0
-        self._byte_cond = asyncio.Condition()
-        # Monotonic instant the sink started failing continuously (None while
-        # healthy); feeds the /readyz degradation check installed by App.build.
-        self._sink_failing_since: float | None = None
+        # Lanes built per run() (streaming vs bulk); byte budget + failing-since
+        # are per-lane (see _LaneState). Held on the pipeline so the readiness
+        # property can aggregate across lanes.
+        self._lanes: list[_LaneState] = []
+        # Last-observed qsize per lane name; the unlabelled queue_depth gauge is
+        # their sum (the operationally meaningful "how much is buffered now").
+        self._lane_depths: dict[str, int] = {}
 
     @property
     def sink_failing_since(self) -> float | None:
         """``time.monotonic()`` of the first failure of the current sink outage.
 
-        None while the sink is healthy (or after a permanent drop, which
-        advances the pipeline rather than wedging it).
+        Aggregated across lanes as the EARLIEST (min) failing lane, so the
+        longest-running outage drives the /readyz degradation check — a healthy
+        lane can never mask a wedged one. None while every lane is healthy (or
+        after a permanent drop, which advances the pipeline rather than wedging).
         """
-        return self._sink_failing_since
+        times = [lane.failing_since for lane in self._lanes if lane.failing_since is not None]
+        return min(times) if times else None
+
+    def _new_lane(self, name: str = "lane") -> _LaneState:
+        """Construct a lane (its own bounded queue + byte condition) and register it.
+
+        Registered on ``self._lanes`` so the ``sink_failing_since`` property sees
+        it. The queue takes ``self._queue_maxsize`` so the per-entry count bound
+        applies per lane exactly as it did for the single shared queue.
+        """
+        lane = _LaneState(
+            name=name,
+            queue=asyncio.Queue(maxsize=self._queue_maxsize),
+            byte_cond=asyncio.Condition(),
+        )
+        self._lanes.append(lane)
+        return lane
+
+    def _publish_queue_depth(self, lane: _LaneState) -> None:
+        """Record *lane*'s current depth and publish the sum across all lanes."""
+        self._lane_depths[lane.name] = lane.queue.qsize()
+        self._metrics.queue_depth.set(sum(self._lane_depths.values()))
 
     def set_static_labels(self, labels: Mapping[str, str]) -> None:
         """Set the deployment-wide labels merged into every entry (job/org/env)."""
         self._static_labels = dict(labels)
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Run all producers and the single consumer until ``stop`` and drained.
+        """Run all producers and one consumer PER LANE until ``stop`` and drained.
 
-        FIRST_EXCEPTION semantics for the consumer: it can only finish normally
-        after seeing every producer's sentinel, so if it completes while
-        producers are still running it died (e.g. an ``OSError`` from the
-        checkpoint file write). In that case producers — which would otherwise
-        block forever on the full queue — are cancelled and the exception is
-        re-raised so the process exits nonzero and gets restarted (checkpoints
-        are safe; the batch is simply retried after restart).
+        Sources are split into lanes by class (streaming vs bulk, see
+        :func:`_lane_of`) so a bulk drain can't head-of-line-block streaming
+        (issue #53). Each lane gets its own queue + consumer + byte budget, so
+        up to ``n_lanes`` Loki pushes are in flight concurrently. When every
+        source classifies to one lane this is byte-identical to the old single
+        queue + single consumer.
+
+        Crash semantics generalise across N lanes: a consumer returns normally
+        only after seeing every sentinel from ITS lane's producers, so if ALL
+        consumers returned normally then all producers finished too. Therefore a
+        consumer finishing while producers still run can only mean a consumer
+        RAISED (e.g. an ``OSError`` from the checkpoint write) — producers, which
+        would otherwise block forever on a full queue, are cancelled and the
+        exception re-raised so the process exits nonzero and restarts. A producer
+        exception is surfaced by ``producers_done`` (gather resolves on the first
+        one), never masked by its lane's consumer returning on the sentinel.
         """
         if not self._sources:
             return
@@ -183,37 +259,46 @@ class Pipeline:
         # admission decisions are deterministic from the start.
         if self._governor is not None:
             await self._governor.start()
-        self._queued_bytes = 0  # fresh accounting per run (the queue is fresh too)
-        # Re-invokable across failover: clear any stale outage mark left by a
-        # previous acquisition so a re-acquired leader doesn't report degraded.
-        self._sink_failing_since = None
-        queue: asyncio.Queue[LogEntry | object] = asyncio.Queue(maxsize=self._queue_maxsize)
-        producers = [asyncio.create_task(self._produce(src, queue, stop)) for src in self._sources]
-        consumer = asyncio.create_task(self._consume(queue, len(producers), stop))
-        producers_done = asyncio.gather(*producers)
+        # Fresh lane state per run (queues are fresh too); clears any stale
+        # outage mark / depth left by a previous acquisition so a re-acquired
+        # leader doesn't report degraded.
+        self._lanes = []
+        self._lane_depths = {}
+        grouped: dict[str, list[Source]] = {}
+        for src in self._sources:
+            grouped.setdefault(_lane_of(src), []).append(src)
+        producer_tasks: list[asyncio.Task[None]] = []
+        consumer_tasks: list[asyncio.Task[None]] = []
+        for name, srcs in grouped.items():
+            lane = self._new_lane(name)
+            lane.n_producers = len(srcs)
+            for src in srcs:
+                producer_tasks.append(asyncio.create_task(self._produce(src, lane, stop)))
+            consumer_tasks.append(asyncio.create_task(self._consume(lane, stop)))
+        producers_done = asyncio.gather(*producer_tasks)
+        consumers_done = asyncio.gather(*consumer_tasks)
         try:
-            first_done: set[asyncio.Future[Any]] = {producers_done, consumer}
-            await asyncio.wait(first_done, return_when=asyncio.FIRST_COMPLETED)
-            if consumer.done() and not producers_done.done():
-                # Consumer died mid-stream: crash out instead of hanging.
+            await asyncio.wait(
+                {producers_done, consumers_done}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if consumers_done.done() and not producers_done.done():
+                # A consumer died mid-stream: crash out instead of hanging.
                 producers_done.cancel()
-                exc = consumer.exception()
+                exc = consumers_done.exception()
                 if exc is not None:
                     log.error("pipeline consumer failed; aborting", error=str(exc))
                     raise exc
                 return
             await producers_done
-            # Producers each enqueue a sentinel in their finally; the consumer
-            # returns once it has seen one per producer and flushed the tail.
-            await consumer
+            # Producers each enqueue a sentinel in their finally; each lane's
+            # consumer returns once it has seen one per producer and flushed.
+            await consumers_done
         finally:
             producers_done.cancel()
-            consumer.cancel()
-            await asyncio.gather(producers_done, consumer, return_exceptions=True)
+            consumers_done.cancel()
+            await asyncio.gather(producers_done, consumers_done, return_exceptions=True)
 
-    async def _produce(
-        self, source: Source, queue: asyncio.Queue[LogEntry | object], stop: asyncio.Event
-    ) -> None:
+    async def _produce(self, source: Source, lane: _LaneState, stop: asyncio.Event) -> None:
         try:
             async for entry in source.events(self._state, stop):
                 if not entry.checkpoint_only:
@@ -225,15 +310,15 @@ class Pipeline:
                     ).inc()
                     lag = (datetime.now(UTC) - entry.timestamp).total_seconds()
                     self._metrics.ingest_lag.labels(event_type=event_type).observe(lag)
-                await self._charge(entry)
-                await queue.put(entry)
+                await self._charge(lane, entry)
+                await lane.queue.put(entry)
                 # Also updated here (not just in the consumer) so the gauge keeps
                 # tracking queue growth while the consumer is stuck in sink retry.
-                self._metrics.queue_depth.set(queue.qsize())
+                self._publish_queue_depth(lane)
         finally:
             # Sentinels carry no bytes, so this put can never block on the byte
             # budget — a cancelled/finished producer always delivers its sentinel.
-            await queue.put(_SENTINEL)
+            await lane.queue.put(_SENTINEL)
 
     @staticmethod
     def _entry_cost(item: LogEntry | object) -> int:
@@ -259,15 +344,17 @@ class Pipeline:
         cost += len(item.checkpoint.value)
         return cost
 
-    async def _charge(self, entry: LogEntry) -> None:
-        """Producer side: wait for byte-budget headroom, then account *entry*.
+    async def _charge(self, lane: _LaneState, entry: LogEntry) -> None:
+        """Producer side: wait for *lane*'s byte-budget headroom, then account *entry*.
 
-        Admission rule: admit while the queue is *under* budget — an admitted
-        entry may overshoot it. This guarantees a single entry larger than the
-        whole budget is still admitted once the queue drains (blocking it until
-        "it fits" would deadlock: it never fits, and the consumer would have
-        nothing to drain). Cancellation while waiting is safe: nothing has been
-        accounted yet, and Condition.wait re-raises after reacquiring the lock.
+        The budget is PER LANE: a saturated bulk lane blocks only bulk producers,
+        never the streaming lane's producer (issue #53). Admission rule: admit
+        while the lane is *under* budget — an admitted entry may overshoot it.
+        This guarantees a single entry larger than the whole budget is still
+        admitted once the lane drains (blocking it until "it fits" would deadlock:
+        it never fits, and the consumer would have nothing to drain). Cancellation
+        while waiting is safe: nothing has been accounted yet, and Condition.wait
+        re-raises after reacquiring the lock.
         """
         budget = self._batch.queue_max_bytes
         if budget <= 0:  # 0 disables byte accounting entirely
@@ -275,27 +362,25 @@ class Pipeline:
         cost = self._entry_cost(entry)
         if cost == 0:
             return
-        async with self._byte_cond:
-            await self._byte_cond.wait_for(lambda: self._queued_bytes < budget)
-            self._queued_bytes += cost
+        async with lane.byte_cond:
+            await lane.byte_cond.wait_for(lambda: lane.queued_bytes < budget)
+            lane.queued_bytes += cost
 
-    async def _release(self, item: LogEntry | object) -> None:
-        """Consumer side: return *item*'s bytes to the budget and wake producers."""
+    async def _release(self, lane: _LaneState, item: LogEntry | object) -> None:
+        """Consumer side: return *item*'s bytes to *lane*'s budget and wake producers."""
         if self._batch.queue_max_bytes <= 0:
             return
         cost = self._entry_cost(item)
         if cost == 0:
             return
-        async with self._byte_cond:
-            self._queued_bytes -= cost
-            self._byte_cond.notify_all()
+        async with lane.byte_cond:
+            lane.queued_bytes -= cost
+            lane.byte_cond.notify_all()
 
-    async def _consume(
-        self, queue: asyncio.Queue[LogEntry | object], n_producers: int, stop: asyncio.Event
-    ) -> None:
+    async def _consume(self, lane: _LaneState, stop: asyncio.Event) -> None:
         flush_interval = self._batch.flush_interval.total_seconds()
         loop = asyncio.get_running_loop()
-        active = n_producers
+        active = lane.n_producers
         batch: list[LogEntry] = []
         approx_bytes = 0
         deadline: float | None = None
@@ -303,22 +388,22 @@ class Pipeline:
         while True:
             try:
                 if deadline is None:
-                    item = await queue.get()
+                    item = await lane.queue.get()
                 else:
                     timeout = max(0.0, deadline - loop.time())
-                    item = await asyncio.wait_for(queue.get(), timeout)
+                    item = await asyncio.wait_for(lane.queue.get(), timeout)
             except TimeoutError:
-                await self._flush(batch, stop)
+                await self._flush(lane, batch, stop)
                 batch, approx_bytes, deadline = [], 0, None
                 continue
 
-            self._metrics.queue_depth.set(queue.qsize())
-            await self._release(item)
+            self._publish_queue_depth(lane)
+            await self._release(lane, item)
 
             if item is _SENTINEL:
                 active -= 1
                 if active == 0:
-                    await self._flush(batch, stop)
+                    await self._flush(lane, batch, stop)
                     return
                 continue
 
@@ -329,10 +414,10 @@ class Pipeline:
             if deadline is None:
                 deadline = loop.time() + flush_interval
             if len(batch) >= self._batch.max_entries or approx_bytes >= self._batch.max_bytes:
-                await self._flush(batch, stop)
+                await self._flush(lane, batch, stop)
                 batch, approx_bytes, deadline = [], 0, None
 
-    async def _flush(self, entries: list[LogEntry], stop: asyncio.Event) -> None:
+    async def _flush(self, lane: _LaneState, entries: list[LogEntry], stop: asyncio.Event) -> None:
         if not entries:
             return
         # checkpoint_only entries (e.g. Pub/Sub keepalive replay_ids) ride the
@@ -372,8 +457,8 @@ class Pipeline:
                 await self._sink.push(batch)
             except RetryableSinkError:
                 self._metrics.loki_push.labels(outcome="retried").inc()
-                if self._sink_failing_since is None:
-                    self._sink_failing_since = time.monotonic()
+                if lane.failing_since is None:
+                    lane.failing_since = time.monotonic()
                 if stop.is_set():
                     # Shutting down: abandon this batch uncommitted rather than
                     # hammering a failing sink past the grace period — it will
@@ -390,7 +475,7 @@ class Pipeline:
                 # multi-entry batch drops all of them), not just one.
                 # Not a stuck sink (it answered, the batch advanced) — clear the
                 # continuous-failure mark so readiness doesn't degrade for it.
-                self._sink_failing_since = None
+                lane.failing_since = None
                 self._metrics.loki_entries_dropped.labels(reason=exc.reason).inc(len(batch.entries))
                 log.error(
                     "dropping undeliverable batch and advancing checkpoint",
@@ -401,7 +486,7 @@ class Pipeline:
                 await self._commit(all_entries)
                 return
             else:
-                self._sink_failing_since = None
+                lane.failing_since = None
                 self._metrics.loki_push.labels(outcome="success").inc()
                 self._metrics.last_push_success_ts.set(datetime.now(UTC).timestamp())
                 self._metrics.loki_push_duration.observe(asyncio.get_running_loop().time() - t0)

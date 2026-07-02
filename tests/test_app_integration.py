@@ -192,13 +192,16 @@ async def test_readyz_degrades_after_prolonged_sink_failure_and_recovers() -> No
     await health.start("127.0.0.1:0")
     try:
         health.set_ready()
+        # failing-since is per-lane now (issue #53); drive it via one lane's field.
+        # sink_failing_since aggregates as the earliest failing lane.
+        lane = appn._pipeline._new_lane()
         async with httpx.AsyncClient() as client:
             base = f"http://127.0.0.1:{health.port}"
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 200
 
             # Sink failing continuously for an hour (> 10m threshold).
-            appn._pipeline._sink_failing_since = time.monotonic() - 3600
+            lane.failing_since = time.monotonic() - 3600
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 503
             assert r.text.startswith("degraded: loki pushes failing for")
@@ -207,12 +210,12 @@ async def test_readyz_degrades_after_prolonged_sink_failure_and_recovers() -> No
             assert r.status_code == 200
 
             # Failing for less than the threshold: still ready.
-            appn._pipeline._sink_failing_since = time.monotonic() - 60
+            lane.failing_since = time.monotonic() - 60
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 200
 
             # Next successful push clears the mark -> ready again.
-            appn._pipeline._sink_failing_since = None
+            lane.failing_since = None
             r = await client.get(f"{base}/readyz")
             assert r.status_code == 200
     finally:
@@ -226,7 +229,7 @@ async def test_readyz_degradation_disabled_when_threshold_zero() -> None:
     await health.start("127.0.0.1:0")
     try:
         health.set_ready()
-        appn._pipeline._sink_failing_since = time.monotonic() - 10**6
+        appn._pipeline._new_lane().failing_since = time.monotonic() - 10**6
         async with httpx.AsyncClient() as client:
             r = await client.get(f"http://127.0.0.1:{health.port}/readyz")
         assert r.status_code == 200
