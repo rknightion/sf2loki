@@ -201,7 +201,7 @@ async def test_takeover_after_expiry() -> None:
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
     stop = asyncio.Event()
 
-    assert await coord._acquire(stop) is True
+    assert await coord._acquire(stop) is not None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "B"
@@ -212,7 +212,7 @@ async def test_acquire_absent_lease() -> None:
     clock = FakeClock()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
 
-    assert await coord._acquire(asyncio.Event()) is True
+    assert await coord._acquire(asyncio.Event()) is not None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "B"
@@ -228,7 +228,7 @@ async def test_acquire_returns_false_when_stop_fires_during_standby() -> None:
     sleep = ScriptedSleep([stop.set])  # first poll -> shut down
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep)
 
-    assert await coord._acquire(stop) is False
+    assert await coord._acquire(stop) is None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "A"  # never contested a live lease
@@ -263,7 +263,7 @@ async def test_lost_create_race_backs_off() -> None:
 
     adapter.create_lease = create_with_race  # type: ignore[method-assign]
 
-    assert await coord._acquire(stop) is False
+    assert await coord._acquire(stop) is None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "A"
@@ -295,7 +295,7 @@ async def test_lost_replace_race_backs_off() -> None:
     sleep = ScriptedSleep([None, stop.set])
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep)
 
-    assert await coord._acquire(stop) is False
+    assert await coord._acquire(stop) is None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "C"
@@ -310,12 +310,13 @@ async def test_hold_renews_until_stop() -> None:
     adapter = FakeLeaseAdapter()
     clock = FakeClock()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
-    assert await coord._acquire(asyncio.Event()) is True
+    acquired = await coord._acquire(asyncio.Event())
+    assert acquired is not None
 
     stop = asyncio.Event()
     coord._sleep = ScriptedSleep([None, stop.set])  # type: ignore[assignment]
 
-    await coord._hold(stop)
+    await coord._hold(stop, acquired)
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "B"  # still ours; stop ended the loop, not a loss
@@ -326,7 +327,8 @@ async def test_hold_surrenders_when_taken_over() -> None:
     adapter = FakeLeaseAdapter()
     clock = FakeClock()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
-    assert await coord._acquire(asyncio.Event()) is True
+    acquired = await coord._acquire(asyncio.Event())
+    assert acquired is not None
 
     def foreign_takes_over() -> None:
         adapter.seed("A", clock.now, 30)
@@ -334,7 +336,7 @@ async def test_hold_surrenders_when_taken_over() -> None:
     coord._sleep = ScriptedSleep([foreign_takes_over])  # type: ignore[assignment]
     stop = asyncio.Event()
 
-    await coord._hold(stop)  # returns => leadership lost
+    await coord._hold(stop, acquired)  # returns => leadership lost
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "A"
@@ -346,7 +348,8 @@ async def test_hold_tolerates_transient_api_error_then_surrenders_past_duration(
     adapter = FakeLeaseAdapter()
     clock = FakeClock()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
-    assert await coord._acquire(asyncio.Event()) is True
+    acquired = await coord._acquire(asyncio.Event())
+    assert acquired is not None
 
     def jump_past_duration() -> None:
         clock.advance(31)  # > lease_duration (30)
@@ -359,7 +362,7 @@ async def test_hold_tolerates_transient_api_error_then_surrenders_past_duration(
     adapter.replace_lease = boom  # type: ignore[method-assign]
     stop = asyncio.Event()
 
-    await coord._hold(stop)  # returns => surrendered after duration of failure
+    await coord._hold(stop, acquired)  # returns => surrendered after duration of failure
 
 
 async def test_hold_surrenders_immediately_when_lease_deleted() -> None:
@@ -369,7 +372,8 @@ async def test_hold_surrenders_immediately_when_lease_deleted() -> None:
     adapter = FakeLeaseAdapter()
     clock = FakeClock()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
-    assert await coord._acquire(asyncio.Event()) is True
+    acquired = await coord._acquire(asyncio.Event())
+    assert acquired is not None
 
     async def deleted(body: _LeaseBody) -> _Lease:
         raise FakeApiException(status=404)
@@ -380,7 +384,7 @@ async def test_hold_surrenders_immediately_when_lease_deleted() -> None:
     # forever, since ScriptedSleep never fires stop).
     stop = asyncio.Event()
 
-    await coord._hold(stop)  # returns promptly => surrendered on the 404
+    await coord._hold(stop, acquired)  # returns promptly => surrendered on the 404
 
 
 async def test_hold_returns_when_stop_fires() -> None:
@@ -388,8 +392,9 @@ async def test_hold_returns_when_stop_fires() -> None:
     clock = FakeClock()
     stop = asyncio.Event()
     coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep([stop.set]))
-    assert await coord._acquire(asyncio.Event()) is True
-    await coord._hold(stop)  # first pause sets stop -> returns immediately
+    acquired = await coord._acquire(asyncio.Event())
+    assert acquired is not None
+    await coord._hold(stop, acquired)  # first pause sets stop -> returns immediately
 
 
 # --------------------------------------------------------------------------

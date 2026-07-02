@@ -199,8 +199,8 @@ class K8sLeaseCoordinator:
             self._api = api
             try:
                 while not stop.is_set():
-                    won = await self._acquire(stop)
-                    if not won:
+                    acquired = await self._acquire(stop)
+                    if acquired is None:
                         return  # stop fired while standing by
                     self._is_leader = True
                     log.info(
@@ -210,7 +210,7 @@ class K8sLeaseCoordinator:
                     )
                     await on_acquire()
                     try:
-                        await self._hold(stop)
+                        await self._hold(stop, acquired)
                     finally:
                         self._is_leader = False
                         log.info(
@@ -226,14 +226,16 @@ class K8sLeaseCoordinator:
     # ------------------------------------------------------------------
     # Standby / acquire
 
-    async def _acquire(self, stop: asyncio.Event) -> bool:
-        """Block until this instance owns the lease; return False if stop fires."""
+    async def _acquire(self, stop: asyncio.Event) -> _Lease | None:
+        """Block until this instance owns the lease; return the acquired lease
+        (whose ``resource_version`` seeds the renew loop), or ``None`` if stop
+        fires while standing by."""
         while not stop.is_set():
             lease = await self._read()
             now = self._utcnow()
             if lease is None:
                 try:
-                    await self._require_api.create_lease(
+                    acquired = await self._require_api.create_lease(
                         _LeaseBody(
                             holder=self._holder,
                             renew_time=now,
@@ -245,16 +247,16 @@ class K8sLeaseCoordinator:
                     if _status(exc) == _CONFLICT:
                         log.info("lost k8s-lease create race; backing off", holder=self._holder)
                         if await self._pause(self._renew, stop):
-                            return False
+                            return None
                         continue
                     log.warning("cannot create k8s lease; retrying", error=str(exc))
                     if await self._pause(self._renew, stop):
-                        return False
+                        return None
                     continue
-                return True
+                return acquired
             elif lease.expired(now):
                 try:
-                    await self._require_api.replace_lease(
+                    acquired = await self._require_api.replace_lease(
                         _LeaseBody(
                             holder=self._holder,
                             renew_time=now,
@@ -266,29 +268,31 @@ class K8sLeaseCoordinator:
                     if _status(exc) == _CONFLICT:
                         log.info("lost k8s-lease replace race; backing off", holder=self._holder)
                         if await self._pause(self._renew, stop):
-                            return False
+                            return None
                         continue
                     log.warning("cannot replace k8s lease; retrying", error=str(exc))
                     if await self._pause(self._renew, stop):
-                        return False
+                        return None
                     continue
-                return True
+                return acquired
             else:
                 # A live foreign holder: poll at the renew interval until expiry.
                 if await self._pause(self._renew, stop):
-                    return False
-        return False
+                    return None
+        return None
 
     # ------------------------------------------------------------------
     # Hold / renew
 
-    async def _hold(self, stop: asyncio.Event) -> None:
-        """Renew the lease until leadership is lost or stop fires."""
+    async def _hold(self, stop: asyncio.Event, acquired: _Lease) -> None:
+        """Renew the lease until leadership is lost or stop fires.
+
+        ``acquired`` is the lease returned by :meth:`_acquire`; its
+        ``resource_version`` seeds the first renew, so we skip an opening
+        read — the create/replace that won leadership already handed it to us.
+        """
         last_ok = self._utcnow()
-        resource_version: str | None = None
-        lease = await self._read()
-        if lease is not None:
-            resource_version = lease.resource_version
+        resource_version: str | None = acquired.resource_version
         while not stop.is_set():
             if await self._pause(self._renew, stop):
                 return
