@@ -52,6 +52,7 @@
 | `pubsub` | `PubSubConfig` |  | no | Pub/Sub API streaming source. |
 | `eventlog_objects` | `EventLogObjectsConfig` |  | no | Event-object SOQL polling source. |
 | `eventlogfile` | `EventLogFileConfig` |  | no | EventLogFile (CSV) ingestion source. |
+| `apexlog` | `ApexLogConfig` |  | no | ApexLog (Tooling API debug log) polling source. |
 | `allow_overlap` | `bool` | false | no | Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source. |
 | `transform_salt` | `SecretStr` | *(secret)* | no | Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup. |
 | `transform_salt_file` | `Path` | /etc/sf2loki/secrets/transform-salt | no | File path to the transform hash salt (alternative to transform_salt). |
@@ -125,6 +126,18 @@
 | `structured_metadata_fields` | `list[str]` | [REPORT_ID, OWNER_ID] | no | Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it. |
 | `labels` | `list[str]` | [DELEGATED_USER] | no | Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream. |
 | `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything. |
+
+## ApexLogConfig
+
+| Field | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `enabled` | `bool` | false | no | Enable the ApexLog polling source. |
+| `poll_interval` | `Duration` | 1m | no | How often to poll for new ApexLog rows. |
+| `lookback` | `Duration` | 1h | no | Initial window to fetch on first run (no checkpoint). |
+| `users` | `list[str]` | [integration@example.com] | no | Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user. |
+| `max_body_bytes` | `int` | 5242880 | no | Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped. |
+| `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything. |
+| `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each log's metadata before shaping. |
 
 ## SinkConfig
 

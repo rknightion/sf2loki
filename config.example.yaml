@@ -164,6 +164,29 @@ orgs:  # Multi-org list: ingest several Salesforce orgs from one process into on
             replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
             name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
         concurrency: 4  # Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.
+      # Opt-in developer-focused source. ``ApexLog`` rows only exist while a
+      # ``TraceFlag`` is active for a user (24h retention, TraceFlags expire by
+      # design) — sf2loki does NOT manage TraceFlags; enable them via ``sf debug``
+      # or Setup -> Debug Logs. Each log costs one extra API call to download its
+      # body, so this is disabled by default and excluded from the free-tier path.
+      apexlog:  # ApexLog (Tooling API debug log) polling source.
+        enabled: false  # Enable the ApexLog polling source.
+        poll_interval: 1m  # How often to poll for new ApexLog rows.
+        lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+        users: [integration@example.com]  # Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user.
+        max_body_bytes: 5242880  # Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped.
+        sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything.
+        # Rules run on the decoded payload BEFORE field routing, label promotion,
+        # and timestamp extraction — so redacting the timestamp column triggers the
+        # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+        # is rejected at load time (it would silently drop the label).
+        transforms:  # Redaction/filter rules applied to each log's metadata before shaping.
+          - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+            fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+            match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+            pattern: null  # regex_replace only: the regular expression to replace (must compile).
+            replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+            name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
       allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
       # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
       transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
@@ -272,6 +295,29 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
         replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
         name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
     concurrency: 4  # Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.
+  # Opt-in developer-focused source. ``ApexLog`` rows only exist while a
+  # ``TraceFlag`` is active for a user (24h retention, TraceFlags expire by
+  # design) — sf2loki does NOT manage TraceFlags; enable them via ``sf debug``
+  # or Setup -> Debug Logs. Each log costs one extra API call to download its
+  # body, so this is disabled by default and excluded from the free-tier path.
+  apexlog:  # ApexLog (Tooling API debug log) polling source.
+    enabled: false  # Enable the ApexLog polling source.
+    poll_interval: 1m  # How often to poll for new ApexLog rows.
+    lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+    users: [integration@example.com]  # Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user.
+    max_body_bytes: 5242880  # Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped.
+    sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything.
+    # Rules run on the decoded payload BEFORE field routing, label promotion,
+    # and timestamp extraction — so redacting the timestamp column triggers the
+    # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+    # is rejected at load time (it would silently drop the label).
+    transforms:  # Redaction/filter rules applied to each log's metadata before shaping.
+      - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+        fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+        match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+        pattern: null  # regex_replace only: the regular expression to replace (must compile).
+        replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+        name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
   allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
   # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
   transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).

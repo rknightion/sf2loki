@@ -685,3 +685,25 @@ def test_salesforce_token_ttl_defaults_to_one_hour() -> None:
 def test_salesforce_token_ttl_accepts_shorthand() -> None:
     cfg = SalesforceConfig(client_id="cid", username="svc@example.com", token_ttl="15m")  # type: ignore[arg-type]
     assert cfg.token_ttl == timedelta(minutes=15)
+
+
+def test_apexlog_config_defaults_and_user_validation() -> None:
+    from sf2loki.config import ApexLogConfig
+
+    c = ApexLogConfig()
+    assert c.enabled is False
+    assert c.poll_interval == timedelta(minutes=1)
+    assert c.lookback == timedelta(hours=1)
+    assert c.users == []
+    assert c.max_body_bytes == 5_242_880
+    assert c.sample == 1.0
+
+    # a username with a single quote would break the SOQL IN(...) clause
+    with pytest.raises(ValueError, match="username"):
+        ApexLogConfig(users=["ok@example.com", "bad'; DROP--"])
+
+
+def test_sources_config_has_apexlog() -> None:
+    from sf2loki.config import ApexLogConfig, SourcesConfig
+
+    assert isinstance(SourcesConfig().apexlog, ApexLogConfig)

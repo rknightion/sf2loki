@@ -446,6 +446,70 @@ class EventLogObjectsConfig(StrictModel):
     )
 
 
+# Salesforce usernames are interpolated into a SOQL `LogUser.Username IN (...)`
+# clause; anything with a quote/backslash/control char could break the query or
+# inject SOQL, so restrict to a conservative username charset.
+_SF_USERNAME_RE = re.compile(r"^[A-Za-z0-9._%+\-@]+$")
+
+
+class ApexLogConfig(StrictModel):
+    """Poll Apex debug logs (``ApexLog``) via the Tooling API.
+
+    Opt-in developer-focused source. ``ApexLog`` rows only exist while a
+    ``TraceFlag`` is active for a user (24h retention, TraceFlags expire by
+    design) — sf2loki does NOT manage TraceFlags; enable them via ``sf debug``
+    or Setup -> Debug Logs. Each log costs one extra API call to download its
+    body, so this is disabled by default and excluded from the free-tier path.
+    """
+
+    enabled: bool = Field(default=False, description="Enable the ApexLog polling source.")
+    poll_interval: Duration = Field(
+        default=timedelta(minutes=1), description="How often to poll for new ApexLog rows."
+    )
+    lookback: Duration = Field(
+        default=timedelta(hours=1),
+        description="Initial window to fetch on first run (no checkpoint).",
+    )
+    users: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Salesforce usernames whose logs to ingest (matched via LogUser.Username). "
+            "Empty = every ApexLog visible to the integration user."
+        ),
+        examples=[["integration@example.com"]],
+    )
+    max_body_bytes: int = Field(
+        default=5_242_880,
+        gt=0,
+        description=(
+            "Skip the body download for logs whose LogLength exceeds this (the metadata "
+            "line is still shipped, flagged body_skipped); the per-line cap "
+            "(sink.loki.batch.max_line_bytes) truncates whatever is shipped."
+        ),
+    )
+    sample: SampleRate = Field(
+        default=1.0,
+        description=(
+            "Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic "
+            "by log Id hash (replay-stable). 1.0 keeps everything."
+        ),
+    )
+    transforms: list[TransformRule] = Field(
+        default_factory=list,
+        description="Redaction/filter rules applied to each log's metadata before shaping.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_users(self) -> ApexLogConfig:
+        for user in self.users:
+            if not _SF_USERNAME_RE.match(user):
+                raise ValueError(
+                    f"apexlog user username {user!r} contains characters not allowed in a "
+                    "Salesforce username (must match [A-Za-z0-9._%+-@]+)"
+                )
+        return self
+
+
 # Label keys injected/reserved by the pipeline + sink; a promoted ELF column
 # must not reuse these (it would clobber source identity or be silently
 # overridden by the injected static labels in app._produce).
@@ -698,6 +762,10 @@ class SourcesConfig(StrictModel):
     )
     eventlogfile: EventLogFileConfig = Field(
         default_factory=EventLogFileConfig, description="EventLogFile (CSV) ingestion source."
+    )
+    apexlog: ApexLogConfig = Field(
+        default_factory=ApexLogConfig,
+        description="ApexLog (Tooling API debug log) polling source.",
     )
     allow_overlap: bool = Field(
         default=False,
