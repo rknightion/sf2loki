@@ -1,0 +1,42 @@
+# Preset: poll Salesforce Big Objects (stored RTEM event family) via SOQL.
+#
+# Big Objects (LoginEvent, ApiEvent, FileEventStore, *EventStore, ...) store
+# Event Monitoring data as queryable objects. They reject ORDER BY ASC, so each
+# must be marked `big_object: true` — the source then drains them newest-first
+# (ORDER BY <timestamp_field> DESC) with a ratcheting bound and re-sorts each
+# cycle ascending before shipping. Standard/custom objects do NOT set this flag.
+#
+# OVERLAP: these objects are the persisted form of the same records streamed on
+# /event/<name>Stream and (for some) landed in EventLogFile. Do NOT also stream
+# or ELF-ingest the same category unless sources.allow_overlap is true — the
+# overlap guard maps LoginEvent/ApiEvent to their canonical category.
+#
+# Requires the Shield Event Monitoring add-on for most of these objects.
+
+salesforce:
+  login_url: ${SF_LOGIN_URL}
+  client_id: ${SF_CLIENT_ID}
+  username: ${SF_USERNAME}
+  private_key_file: /etc/sf2loki/secrets/server.key
+  api_version: "60.0"
+
+sources:
+  eventlog_objects:
+    enabled: true
+    objects:
+      # EventDate is the indexed (DESC) watermark field on these Big Objects.
+      - {name: LoginEvent, timestamp_field: EventDate, big_object: true, poll_interval: 5m, lookback: 1h}
+      - {name: ApiEvent,   timestamp_field: EventDate, big_object: true, poll_interval: 5m, lookback: 1h}
+
+sink:
+  type: loki
+  loki:
+    url: ${GC_LOKI}
+    tenant_id: ${GC_LOKI_USER}
+    auth_token_file: /etc/sf2loki/secrets/loki-token
+    labels: {environment: dev}
+
+state:
+  store: file
+  file:
+    path: /var/lib/sf2loki/state.json

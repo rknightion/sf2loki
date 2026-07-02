@@ -1136,3 +1136,35 @@ async def test_big_object_boundary_record_deduped_across_cycles(
     assert '"Id": "b"' in entries[0].line
     final = json.loads(entries[0].checkpoint.value)
     assert boundary_id in final["ids"] and "b" in final["ids"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_asc_big_object_error_logs_hint(
+    tmp_path: pytest.TempPathFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An ASC query against a Big Object logs a hint to set big_object: true."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    respx.get(_query_url()).mock(
+        return_value=httpx.Response(
+            400,
+            json=[
+                {
+                    "message": (
+                        "Unsupported order direction on filter column: EVENTDATE : ASCENDING"
+                    ),
+                    "errorCode": "BIG_OBJECT_UNSUPPORTED_OPERATION",
+                }
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_elo_cfg(), soql, sm_fields=[], poll_once=True)
+        with caplog.at_level("WARNING"):
+            entries = [e async for e in source.events(store, asyncio.Event())]
+
+    assert entries == []
+    assert "big_object: true" in caplog.text

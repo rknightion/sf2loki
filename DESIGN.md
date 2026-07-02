@@ -244,10 +244,15 @@ so ingesting both double-counts. Pick one channel per category (operator config)
 guard (§10) enforces it. Use polling for categories you'd rather poll than stream, or that have
 no streaming channel.
 
-**Caveat (flagged):** Threat-Detection `*EventStore` objects are **BigObjects** with restrictive
-SOQL — you may filter only on indexed fields (in index order) and ORDER BY is limited. Handled
-per-object via a small object descriptor (which field is the indexed watermark, what's queryable),
-not a generic query builder.
+**Big Objects (implemented):** the stored RTEM event family (LoginEvent, ApiEvent,
+FileEventStore, *EventStore, ...) are Big Objects — they reject ORDER BY ASC and
+have no nextRecordsUrl pagination (verified against a live org). Per-object
+`big_object: true` switches the source to a newest-first DESC drain with a
+ratcheting upper bound (`ts >= watermark AND ts <= oldest_seen`, `<=` for tie
+safety), buffering each cycle's window and re-sorting it ascending so the
+forward-only watermark + id-dedup + checkpoint semantics are identical to the ASC
+path. FIELDS(ALL) works on Big Objects; COUNT()/aggregates do not. Historical
+backfill beyond the poll window is a separate command (not this path).
 
 ---
 
@@ -570,8 +575,9 @@ Network is always mocked. TDD throughout.
 2. Naming: `…EventStream` = streaming RTEM channel; `…Event` / `…EventStore` = stored object.
    Anomaly events share the base name for the stream channel (`/event/ApiAnomalyEvent`) and the
    stored BigObject (`ApiAnomalyEventStore`).
-3. Threat-Detection `*EventStore` objects are BigObjects → restrictive SOQL (indexed-field filters,
-   limited ORDER BY).
+3. Threat-Detection `*EventStore` objects (and the wider stored RTEM event family) are BigObjects →
+   they reject ORDER BY ASC. Handled via `big_object: true` (§7), which switches the source to a
+   DESC descending-drain, not merely flagged as a restriction.
 4. Pub/Sub replay retention ≈ 24–72 h.
 5. Most RTEM streaming channels and all Threat-Detection anomaly channels require the **Shield Event
    Monitoring** add-on (+ Threat Detection for anomalies). Topic inclusion/exclusion is operator

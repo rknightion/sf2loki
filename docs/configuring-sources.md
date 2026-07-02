@@ -104,10 +104,14 @@ Config keys (`EventLogObjectConfig`):
 Requirements and caveats:
 - The object must be **API-queryable** via SOQL, and the integration user (the one authenticated
   via the JWT bearer flow) needs **read access** to it and to `timestamp_field`.
-- **BigObject/EventStore caveat**: objects in the EventStore family (e.g. `ApiEventStream`) have
-  restrictive SOQL support — `FIELDS(ALL)` and `ORDER BY` may not work on them. This source is
-  built for standard queryable sObjects (custom objects, `LoginEvent`, `SetupAuditTrail`, etc.);
-  EventStore BigObjects are out of scope.
+- **BigObject/EventStore caveat**: objects in the stored RTEM family (`LoginEvent`, `ApiEvent`,
+  `FileEventStore`, `*EventStore`, ...) are Salesforce Big Objects — they reject `ORDER BY ASC`.
+  Set `big_object: true` on the object entry to poll them; the source then drains them
+  newest-first (`ORDER BY timestamp_field DESC`) and re-sorts each cycle's window ascending
+  before emitting, so watermark/dedup/checkpoint behavior matches standard objects. Leave the
+  flag unset for standard/custom objects (`LoginHistory`, `MyAudit__c`, `SetupAuditTrail`), which
+  use the `ASC` path. See
+  [`examples/presets/event-log-objects.yaml`](../examples/presets/event-log-objects.yaml).
 - The watermark is the previous record's `timestamp_field` value, stored per-object under state
   key `eventlog_objects:<name>` as JSON (`{"last_ts": ..., "ids": [...]}` — the Id list is the
   boundary dedup window); a crash mid-poll re-queries from the last committed watermark

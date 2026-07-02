@@ -341,6 +341,13 @@ class EventLogObjectsSource:
                     count,
                     exc,
                 )
+                if "BIG_OBJECT_UNSUPPORTED_OPERATION" in str(exc):
+                    _log.warning(
+                        "eventlog_objects[%s]: this looks like a Salesforce Big Object "
+                        "(it rejected ORDER BY ASC). Set `big_object: true` on this "
+                        "object in config to poll it (DESC descending-drain mode).",
+                        obj.name,
+                    )
                 return
 
             seen = set(window)

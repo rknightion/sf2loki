@@ -352,6 +352,12 @@ the relevant keys into your `config.yaml` alongside sink/state/service — see
   one process into one shared sink via the `orgs:` list.
 - [`custom-object-polling.yaml`](examples/presets/custom-object-polling.yaml) — SOQL-poll an
   arbitrary custom object (e.g. `MyAudit__c`) via `sources.eventlog_objects`.
+- [`event-log-objects.yaml`](examples/presets/event-log-objects.yaml) — SOQL-poll Salesforce Big
+  Objects (the stored RTEM `*Event`/`*EventStore` family, e.g. `LoginEvent`, `ApiEvent`) via
+  `sources.eventlog_objects` with `big_object: true`. Big Objects reject `ORDER BY ASC`, so this flag
+  is required for them; standard/custom objects (`LoginHistory`, `MyAudit__c`) must leave it unset.
+  Same either/or-per-category overlap rule applies — don't also stream or ELF-ingest the same
+  category unless `sources.allow_overlap` is set.
 - [`login-history.yaml`](examples/presets/login-history.yaml) — ingest login activity via
   `LoginHistory` polling, with the `LoginEvent`/`/event/LoginEventStream`/ELF `Login` alternatives
   shown as commented blocks (pick exactly one — they're the same overlap-guard category).
