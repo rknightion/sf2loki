@@ -362,6 +362,27 @@ async def test_hold_tolerates_transient_api_error_then_surrenders_past_duration(
     await coord._hold(stop)  # returns => surrendered after duration of failure
 
 
+async def test_hold_surrenders_immediately_when_lease_deleted() -> None:
+    """A 404 on renew (the Lease was deleted out from under us) surrenders at
+    once — NOT tolerated as a transient error until lease_duration elapses, which
+    would leave a bounded split-brain window while a standby recreates the lease."""
+    adapter = FakeLeaseAdapter()
+    clock = FakeClock()
+    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
+    assert await coord._acquire(asyncio.Event()) is True
+
+    async def deleted(body: _LeaseBody) -> _Lease:
+        raise FakeApiException(status=404)
+
+    adapter.replace_lease = deleted  # type: ignore[method-assign]
+    # The clock never advances, so the "failing past lease_duration" timeout path
+    # cannot be what returns — only the 404 special-case can (otherwise this loops
+    # forever, since ScriptedSleep never fires stop).
+    stop = asyncio.Event()
+
+    await coord._hold(stop)  # returns promptly => surrendered on the 404
+
+
 async def test_hold_returns_when_stop_fires() -> None:
     adapter = FakeLeaseAdapter()
     clock = FakeClock()
@@ -466,12 +487,18 @@ async def test_run_enters_and_exits_api_factory() -> None:
 def test_module_imports_without_kubernetes_asyncio_installed() -> None:
     """Importing the module must never require ``kubernetes_asyncio`` — it is
     only imported lazily inside ``_default_api_factory``."""
-    import sys
+    with pytest.raises(ImportError):
+        import kubernetes_asyncio  # noqa: F401
 
-    assert "kubernetes_asyncio" not in sys.modules or True  # module import already happened
-    from sf2loki.coordinate import k8s_lease
+    # If we got here the extra genuinely isn't installed in this env, so the fact
+    # that sf2loki.coordinate.k8s_lease imported cleanly proves the lazy boundary
+    # holds. Reload to confirm it's still importable now.
+    import importlib
 
-    assert hasattr(k8s_lease, "K8sLeaseCoordinator")
+    import sf2loki.coordinate.k8s_lease as k8s_lease_module
+
+    importlib.reload(k8s_lease_module)
+    assert hasattr(k8s_lease_module, "K8sLeaseCoordinator")
 
 
 async def test_default_api_factory_used_when_none_injected() -> None:

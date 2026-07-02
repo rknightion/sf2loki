@@ -317,9 +317,20 @@ class K8sLeaseCoordinator:
                 resource_version = renewed.resource_version
                 last_ok = now
             except Exception as exc:
-                if _status(exc) == _CONFLICT:
+                status = _status(exc)
+                if status == _CONFLICT:
                     log.warning(
                         "k8s lease renewal lost the CAS; surrendering",
+                        holder=self._holder,
+                    )
+                    return
+                if status == _NOT_FOUND:
+                    # The Lease was deleted out from under us (e.g. kubectl delete).
+                    # Surrender immediately so a standby can recreate and lead —
+                    # holding is_leader here would leave a bounded split-brain
+                    # window until the create/recreate race resolves.
+                    log.warning(
+                        "k8s lease disappeared (deleted); surrendering",
                         holder=self._holder,
                     )
                     return
