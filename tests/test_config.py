@@ -707,3 +707,10 @@ def test_sources_config_has_apexlog() -> None:
     from sf2loki.config import ApexLogConfig, SourcesConfig
 
     assert isinstance(SourcesConfig().apexlog, ApexLogConfig)
+
+
+def test_eventlog_object_big_object_flag_defaults_false() -> None:
+    from sf2loki.config import EventLogObjectConfig
+
+    assert EventLogObjectConfig(name="MyAudit__c").big_object is False
+    assert EventLogObjectConfig(name="LoginEvent", big_object=True).big_object is True

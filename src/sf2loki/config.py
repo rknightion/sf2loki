@@ -424,6 +424,17 @@ class EventLogObjectConfig(StrictModel):
             "by record Id hash (replay-stable). 1.0 keeps everything."
         ),
     )
+    big_object: bool = Field(
+        default=False,
+        description=(
+            "Set true for Salesforce Big Objects (the stored RTEM event family: "
+            "LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects "
+            "reject ORDER BY ASC, so the source drains them newest-first (ORDER BY "
+            "timestamp_field DESC) with a ratcheting upper bound and re-sorts each "
+            "cycle's window ascending before emitting. Leave false for standard and "
+            "custom objects (LoginHistory, MyAudit__c), which use the ASC path."
+        ),
+    )
 
 
 class EventLogObjectsConfig(StrictModel):

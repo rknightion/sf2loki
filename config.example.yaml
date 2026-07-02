@@ -100,6 +100,7 @@ orgs:  # Multi-org list: ingest several Salesforce orgs from one process into on
             poll_interval: 5m  # How often to poll this object.
             lookback: 1h  # Initial window to fetch on first run (no checkpoint).
             sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+            big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
         # Rules run on the decoded payload BEFORE field routing, label promotion,
         # and timestamp extraction — so redacting the timestamp column triggers the
         # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
@@ -231,6 +232,7 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
         poll_interval: 5m  # How often to poll this object.
         lookback: 1h  # Initial window to fetch on first run (no checkpoint).
         sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+        big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
     # Rules run on the decoded payload BEFORE field routing, label promotion,
     # and timestamp extraction — so redacting the timestamp column triggers the
     # timestamp-fallback path, and a ``drop_field`` of a label-promoted column

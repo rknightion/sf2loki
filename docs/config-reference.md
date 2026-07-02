@@ -100,6 +100,7 @@
 | `poll_interval` | `Duration` | 5m | no | How often to poll this object. |
 | `lookback` | `Duration` | 1h | no | Initial window to fetch on first run (no checkpoint). |
 | `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything. |
+| `big_object` | `bool` | false | no | Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path. |
 
 ## EventLogFileConfig
 
