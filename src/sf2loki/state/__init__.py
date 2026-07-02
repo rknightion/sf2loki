@@ -9,7 +9,7 @@ from sf2loki.state.base import CheckpointStore
 from sf2loki.state.file_store import FileCheckpointStore
 
 
-def build_store(cfg: StateConfig) -> CheckpointStore:
+def build_store(cfg: StateConfig, *, exclusive_lock: bool = True) -> CheckpointStore:
     """Construct the configured checkpoint store.
 
     The S3 backend keeps aiobotocore out of its module imports (so its unit
@@ -17,6 +17,10 @@ def build_store(cfg: StateConfig) -> CheckpointStore:
     import — check dependency availability explicitly here instead, so a
     missing extra fails fast at build/--check time with an actionable message
     rather than as a raw ImportError on the first commit.
+
+    ``exclusive_lock`` applies only to the file backend: the app passes ``False``
+    when a real coordinator is configured (the lease, not a sidecar flock, is
+    the exclusivity mechanism for HA). The object stores ignore it.
     """
     if cfg.store == "s3":
         if importlib.util.find_spec("aiobotocore") is None:
@@ -40,4 +44,4 @@ def build_store(cfg: StateConfig) -> CheckpointStore:
         from sf2loki.state.gcs_store import GcsCheckpointStore
 
         return GcsCheckpointStore(cfg.gcs)
-    return FileCheckpointStore(cfg.file.path)
+    return FileCheckpointStore(cfg.file.path, exclusive_lock=exclusive_lock)

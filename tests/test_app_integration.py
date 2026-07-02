@@ -403,6 +403,11 @@ class _CountingPipeline:
     def set_static_labels(self, labels: Any) -> None:
         pass
 
+    def reset_state(self) -> None:
+        # Invoked by on_lose to invalidate the checkpoint cache on demotion; the
+        # counting double just needs the method to exist.
+        pass
+
     async def run(self, stop: asyncio.Event) -> None:
         self.runs += 1
         await stop.wait()  # hold leadership until this acquisition's stop fires

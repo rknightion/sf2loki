@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import inspect
 import json
 import os
 import signal
@@ -236,15 +237,27 @@ class Pipeline:
 
     @staticmethod
     def _entry_cost(item: LogEntry | object) -> int:
-        """Approximate queued bytes for one item (same accounting as _consume).
+        """Approximate queued *memory* for one item (the queue byte budget).
 
         checkpoint_only entries (keepalive tokens with an empty line) and the
         internal sentinel are free — they must never contribute to, or block
         on, the byte budget.
+
+        Counts the line plus the labels dict, the structured_metadata dict, and
+        the checkpoint value string — an ELF/eventlog_objects entry carries a
+        multi-KB carried-id-window checkpoint string, so ignoring those (as the
+        original len(line)+64 did) undercounts real RAM at the bound by up to
+        ~2x, precisely during the sink outage the byte budget exists to bound.
         """
         if not isinstance(item, LogEntry) or item.checkpoint_only:
             return 0
-        return len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
+        cost = len(item.line.encode("utf-8")) + _QUEUE_ENTRY_OVERHEAD
+        for key, value in item.labels.items():
+            cost += len(key) + len(value)
+        for key, value in item.structured_metadata.items():
+            cost += len(key) + len(value)
+        cost += len(item.checkpoint.value)
+        return cost
 
     async def _charge(self, entry: LogEntry) -> None:
         """Producer side: wait for byte-budget headroom, then account *entry*.
@@ -403,9 +416,31 @@ class Pipeline:
         last: dict[str, str] = {}
         for entry in batch.entries:
             last[entry.checkpoint.key] = entry.checkpoint.value
+        # One multi-key write per flush (one serialize + one fsync / one object
+        # PUT) instead of one full-document rewrite per key. commit_many is a
+        # duck-typed optimisation on the real stores; fall back to per-key commit
+        # for any store (e.g. a test fake) that doesn't implement it.
+        commit_many = getattr(self._state, "commit_many", None)
+        if commit_many is not None:
+            await commit_many(last)
+        else:
+            for key, value in last.items():
+                await self._state.commit(key, value)
         for key, value in last.items():
-            await self._state.commit(key, value)
             self._record_commit_metric(key, value)
+
+    def reset_state(self) -> None:
+        """Invalidate the checkpoint store's cached document (on leadership loss).
+
+        Duck-typed like ``commit_many``: only the real stores implement
+        ``reset``. Clearing the cache + CAS token on demotion means a later
+        re-acquisition re-reads fresh checkpoints (another instance may have led
+        in between) instead of serving stale values and crashing on the first
+        conditional-write conflict.
+        """
+        reset = getattr(self._state, "reset", None)
+        if callable(reset):
+            reset()
 
     def _record_commit_metric(self, key: str, value: str) -> None:
         if key.startswith("pubsub:"):
@@ -494,8 +529,8 @@ async def _drain_with_grace(awaitable: Awaitable[None], stop: asyncio.Event, gra
                 await stop_waiter
 
 
-def _build_state(cfg: Config) -> CheckpointStore:
-    return build_store(cfg.state)
+def _build_state(cfg: Config, *, exclusive_lock: bool = True) -> CheckpointStore:
+    return build_store(cfg.state, exclusive_lock=exclusive_lock)
 
 
 def _format_failing_duration(seconds: float) -> str:
@@ -588,6 +623,25 @@ def _build_org_sources(
     transform_salt = (
         org.sources.transform_salt.get_secret_value() if org.sources.transform_salt else ""
     )
+    # Compliance: an `action: hash` rule with no transform_salt produces
+    # unsalted SHA-256 — reversible for low-entropy PII (IPs, usernames) by
+    # rainbow table, silently defeating the redaction the operator configured.
+    # Warn loudly at startup / --check (doctor surfaces the same check).
+    from sf2loki.transforms import unsalted_hash_warnings
+
+    _all_transform_rules = [
+        *org.sources.pubsub.transforms,
+        *org.sources.eventlog_objects.transforms,
+        *org.sources.eventlogfile.transforms,
+        *org.sources.apexlog.transforms,
+    ]
+    for warning in unsalted_hash_warnings(_all_transform_rules, transform_salt):
+        log.warning(
+            "hash transform has no transform_salt — hashes of low-entropy values "
+            "(IPs, usernames) are reversible by table lookup; set sources.transform_salt",
+            org=org.name or "single",
+            rule=warning,
+        )
     sources: list[Source] = []
     closers: list[Callable[[], Awaitable[None]]] = []
     pubsub_topics: list[str] = []
@@ -621,6 +675,7 @@ def _build_org_sources(
             pubsub_client,
             sm_fields=sm_fields,
             metrics=metrics,
+            bridge_max_bytes=org.sources.pubsub.bridge_max_bytes,
             topic_discoverer=MetadataClient(sf_cfg, tokens, sf_http),
             owned_categories=pubsub_owned,
             transform_salt=transform_salt,
@@ -781,7 +836,12 @@ class App:
         loki_http = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         sink = LokiSink(cfg.sink.loki, loki_http, metrics=metrics)
 
-        state = _build_state(cfg)
+        # A real coordinator (not noop) is the exclusivity mechanism, so the file
+        # store must NOT also take its process-lifetime sidecar flock: under a
+        # file-lease HA pair sharing the state volume the flock either crash-loops
+        # the promoted standby (where it propagates) or is a silent no-op (NFS
+        # local_lock) — either way it doesn't fit the HA topology it ships with.
+        state = _build_state(cfg, exclusive_lock=cfg.coordinate.type == "noop")
 
         # Leadership coordinator: noop (standalone, always leader) or a real
         # active-passive coordinator. The fence is wired into the state store
@@ -789,12 +849,18 @@ class App:
         # checkpoints; standalone deployments stay entirely unfenced.
         coordinator: Coordinator
         fence: Callable[[], None] | None = None
+        epoch_source: Callable[[], int | None] | None = None
         if cfg.coordinate.type == "file_lease":
             fl_cfg = cfg.coordinate.file_lease
             holder = fl_cfg.holder_id or f"{socket.gethostname()}-{os.getpid()}"
             file_lease = FileLeaseCoordinator(fl_cfg, holder=holder)
             coordinator = file_lease
             fence = file_lease.check_fence
+            # Durable epoch fence for the CAS-less shared-file store: a stale
+            # leader whose commit carries an epoch older than the doc's is
+            # rejected at write time, matching the ETag/generation CAS the object
+            # stores get for free (the boolean check_fence can lag a renew).
+            epoch_source = lambda: file_lease.epoch  # noqa: E731
         elif cfg.coordinate.type == "k8s_lease":
             if importlib.util.find_spec("kubernetes_asyncio") is None:
                 raise ConfigError(
@@ -812,6 +878,9 @@ class App:
         set_fence = getattr(state, "set_fence", None)
         if set_fence is not None and fence is not None:
             set_fence(fence)
+        set_epoch = getattr(state, "set_epoch", None)
+        if set_epoch is not None and epoch_source is not None:
+            set_epoch(epoch_source)
 
         sm_fields = cfg.sink.loki.structured_metadata_fields
 
@@ -910,9 +979,19 @@ class App:
         # pipeline has drained and committed its final checkpoints.
         state_close = getattr(state, "close", None)
         if callable(state_close):
+            # The file store's close() is sync; the s3/gcs stores' close() is
+            # async (closes the aiobotocore/gcloud-aio client session). Await the
+            # coroutine forms — a bare call would construct-and-discard it, leaking
+            # the connector on every shutdown (getattr types it Any, so mypy can't
+            # see the missing await).
+            if inspect.iscoroutinefunction(state_close):
 
-            async def _close_state() -> None:
-                state_close()
+                async def _close_state() -> None:
+                    await state_close()
+            else:
+
+                async def _close_state() -> None:
+                    state_close()
 
             closers.append(_close_state)
         return cls(
@@ -1035,6 +1114,11 @@ class App:
             self._metrics.leader.set(0)
             log.info("leadership lost — standing by")
             await self._stop_acquisition(current)
+            # Invalidate the cached checkpoint document AFTER the pipeline has
+            # drained: another instance may lead before we re-acquire, so the next
+            # acquisition must re-read fresh state rather than serve stale
+            # checkpoints (re-ingest) or crash on the first CAS conflict.
+            self._pipeline.reset_state()
             self._health.set_not_ready("standby")
 
         try:
@@ -1077,8 +1161,8 @@ class App:
         auth reactively (its sources mint on their own API calls). All-fail means
         nothing can run, so we re-raise (exit nonzero → restart), as before.
         """
-        failed: list[tuple[str, BaseException]] = []
-        for org in self._orgs:
+
+        async def _probe(org: _OrgAuth) -> tuple[_OrgAuth, BaseException | None]:
             try:
                 await org.tokens.token()
                 log.info(
@@ -1086,7 +1170,17 @@ class App:
                     org=org.name,
                     environment=org.environment,
                 )
+                return (org, None)
             except AuthError as exc:
+                return (org, exc)
+
+        # Probe all orgs concurrently (10 orgs x ~300 ms serial = multi-second
+        # startup otherwise); the per-org some-fail/all-fail semantics below are
+        # order-preserving because gather preserves input order.
+        results = await asyncio.gather(*(_probe(org) for org in self._orgs))
+        failed: list[tuple[str, BaseException]] = []
+        for org, exc in results:
+            if exc is not None:
                 failed.append((org.name, exc))
                 self._degraded_orgs[org.name] = org.tokens
                 log.error(
