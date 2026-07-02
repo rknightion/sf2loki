@@ -254,7 +254,7 @@ class EventLogObjectsSource:
 
         if obj.big_object:
             try:
-                records = await self._drain_big_object(obj, watermark)
+                records = await self._drain_big_object(obj, watermark, stop)
             except SoqlThrottledError as exc:
                 self._cycle_throttled = True
                 self._metrics.soql_poll_errors.labels(
@@ -442,7 +442,7 @@ class EventLogObjectsSource:
         return entry, watermark, window
 
     async def _drain_big_object(
-        self, obj: EventLogObjectConfig, watermark: str
+        self, obj: EventLogObjectConfig, watermark: str, stop: asyncio.Event
     ) -> list[dict[str, object]]:
         """Fetch this cycle's window for a Big Object, returned sorted ASC.
 
@@ -461,17 +461,19 @@ class EventLogObjectsSource:
         the whole window). Large historical backfills are a separate command, not
         this poll path.
 
-        Shutdown note: the drain does not observe ``stop`` between pages, so a
-        large multi-page catch-up runs to completion before the source can react
-        to a shutdown signal (a bounded delay — the window is finite). A mid-drain
-        stop-check is a possible follow-up; it must return an empty window (emit
-        nothing, leave the watermark uncommitted) rather than emit a partial
-        newest slice, which would advance the watermark past the un-drained older
-        records and lose them.
+        Shutdown note: ``stop`` is checked before each page query, so a large
+        multi-page catch-up aborts promptly on shutdown instead of draining to
+        completion. On abort the whole window is discarded (returns empty — emit
+        nothing, leave the watermark uncommitted) rather than returning the
+        partially-drained *newest* slice: emitting that would advance the
+        watermark past the un-drained older records and lose them. Next cycle
+        re-drains from the same watermark (at-least-once, no gap).
         """
         collected: dict[str, dict[str, object]] = {}
         upper: str | None = None
         while True:
+            if stop.is_set():
+                return []
             clauses = [f"{obj.timestamp_field} >= {to_soql_datetime_literal(watermark)}"]
             if upper is not None:
                 clauses.append(f"{obj.timestamp_field} <= {to_soql_datetime_literal(upper)}")

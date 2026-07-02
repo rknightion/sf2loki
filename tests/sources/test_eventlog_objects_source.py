@@ -1168,3 +1168,45 @@ async def test_asc_big_object_error_logs_hint(
 
     assert entries == []
     assert "big_object: true" in caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_big_object_drain_aborts_on_stop_without_committing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A stop set mid-drain abandons the whole window (emits nothing, no checkpoint).
+
+    Emitting a partial newest slice would advance the watermark past the
+    un-drained older records and lose them, so the drain returns empty on stop.
+    """
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    stop = asyncio.Event()
+
+    base = datetime(2026, 6, 30, 10, 0, 0, tzinfo=UTC)
+    full_page = [
+        {
+            "Id": f"p-{i}",
+            "EventDate": (base + timedelta(minutes=200 - i)).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+        }
+        for i in range(200)  # a full page -> the drain would ratchet to page 2
+    ]
+    calls = {"n": 0}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        stop.set()  # signal shutdown after the first page is fetched
+        return httpx.Response(200, json={"records": full_page, "done": True})
+
+    respx.get(_query_url()).mock(side_effect=_capture)
+
+    async with httpx.AsyncClient() as client:
+        from sf2loki.salesforce.soql_client import SoqlClient
+
+        soql = SoqlClient(make_sf_cfg(), FakeTokenProvider(), client)
+        source = EventLogObjectsSource(make_big_object_cfg(), soql, sm_fields=[], poll_once=True)
+        entries = [e async for e in source.events(store, stop)]
+
+    assert entries == []  # nothing emitted from an aborted drain
+    assert calls["n"] == 1  # page 2 was never queried (stop caught at the loop top)
+    assert await store.load("eventlog_objects:LoginEvent") is None  # watermark uncommitted
