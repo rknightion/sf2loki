@@ -1,7 +1,7 @@
 """ApexLog source: polls Salesforce debug logs via the Tooling API.
 
 Ref: issue #33. Mirrors the eventlog_objects watermark/dedup design (StartTime
-``>=`` cursor + rolling Id window + drain-until-short-page) since ApexLog is a
+cursor + rolling Id window + drain-until-short-page) since ApexLog is a
 timestamped, id-keyed sObject. One Loki entry per log: the raw debug-log body is
 the line (capped downstream by sink.loki.batch.max_line_bytes); the metadata
 (LogUserId, Operation, Status, ...) goes to structured metadata. Logs whose
@@ -10,6 +10,26 @@ API call) and ship a metadata-only line flagged ``body_skipped``.
 
 TraceFlags are NOT managed here — ApexLog only exists while a TraceFlag is active
 (24h retention); operators enable them out-of-band (``sf debug`` / Setup).
+
+Ref: issue #39. The listing cursor is a compound ``(StartTime, Id)`` pair, not a
+bare ``StartTime``: :meth:`ApexLogClient.list_logs` accepts a ``since_id``
+tiebreak so a resumed poll asks for ``StartTime > since OR (StartTime = since
+AND Id > since_id)`` instead of a plain ``StartTime >= since``. Without the Id
+tiebreak, >``_PAGE_LIMIT`` ApexLog rows sharing one ``StartTime`` (parallel
+batch/async Apex is the realistic trigger) would return the identical page
+forever — the watermark can only advance past a StartTime a full page doesn't
+exceed. A full page that is STILL all-already-seen after the Id tiebreak is
+applied (i.e. the cursor isn't making forward progress — a backend/logic bug,
+not expected in normal operation) is a genuine stall: the first occurrence logs
+a WARNING, a repeat escalates to ERROR and increments
+``metrics.watermark_stalls``.
+
+Ref: issue #64. A cycle whose rows are all dropped by transforms/sampling still
+advances the in-memory (watermark, window) cursor, but if nothing gets yielded
+the pipeline never durably commits that advance — the next cycle (and every
+cycle after a restart) re-fetches and re-drops the identical window. When a
+cycle makes cursor progress but ends without a real entry, one ``checkpoint_only``
+:class:`~sf2loki.model.LogEntry` carries the final position instead.
 """
 
 from __future__ import annotations
@@ -107,6 +127,12 @@ class ApexLogSource:
         self._metrics = metrics if metrics is not None else Metrics()
         self._poll_once = poll_once
         self._consecutive_failures = 0
+        # Consecutive cycles where a full page at the current watermark was
+        # entirely already-seen (see #39) — 1 is logged at WARNING (could be a
+        # transient replication skew); a repeat escalates to ERROR + a metric,
+        # since the (StartTime, Id) cursor should make forward progress every
+        # cycle in normal operation.
+        self._consecutive_stalls = 0
         self._transforms = compile_rules(
             cfg.transforms, salt=transform_salt, source=self.name, metrics=self._metrics
         )
@@ -134,6 +160,7 @@ class ApexLogSource:
         window: list[str] = []
         if raw is not None:
             watermark, window = _parse_checkpoint(raw)
+        window = window[-_MAX_CARRIED_IDS:]
 
         if not _is_valid_watermark(watermark):
             if raw is not None:
@@ -144,10 +171,17 @@ class ApexLogSource:
                 )
             watermark = (datetime.now(UTC) - self._cfg.lookback).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Compound-cursor tiebreak (#39): the most recently advanced id at the
+        # current watermark, so the listing query resumes exactly after it
+        # instead of re-fetching the whole StartTime bucket every cycle.
+        since_id = window[-1] if window else ""
+        emitted_any = False
+        any_progress = False
+
         while True:
             try:
                 page = await self._client.list_logs(
-                    since=watermark, users=self._cfg.users, page_size=_PAGE_LIMIT
+                    since=watermark, users=self._cfg.users, page_size=_PAGE_LIMIT, since_id=since_id
                 )
             except ApexLogThrottledError as exc:
                 self._metrics.soql_poll_errors.labels(source="apexlog", object="apexlog").inc()
@@ -173,19 +207,48 @@ class ApexLogSource:
             new_logs = [m for m in page if m.id and m.id not in seen]
             if not new_logs:
                 if len(page) >= _PAGE_LIMIT:
-                    _log.warning(
-                        "apexlog: full page at watermark %s all already-seen; "
-                        "stopping cycle to avoid a hot loop",
-                        watermark,
-                    )
+                    # With the (StartTime, Id) cursor in place this should not
+                    # happen in normal operation — it means the tiebreak isn't
+                    # making forward progress (a backend/logic bug), which is
+                    # exactly the class of bug #39 fixes. One occurrence is
+                    # logged quietly; a repeat is escalated as a real alarm.
+                    self._consecutive_stalls += 1
+                    if self._consecutive_stalls >= 2:
+                        self._metrics.watermark_stalls.labels(
+                            source="apexlog", object="apexlog"
+                        ).inc()
+                        _log.error(
+                            "apexlog: full page at watermark %s all already-seen for "
+                            "%d consecutive cycles — the (StartTime, Id) cursor is not "
+                            "making forward progress; newer logs may be silently dropped",
+                            watermark,
+                            self._consecutive_stalls,
+                        )
+                    else:
+                        _log.warning(
+                            "apexlog: full page at watermark %s all already-seen; "
+                            "stopping cycle to avoid a hot loop",
+                            watermark,
+                        )
                 break
+
+            self._consecutive_stalls = 0
+            any_progress = True
 
             for m in new_logs:
                 if stop.is_set():
                     return
                 if _is_valid_watermark(m.start_time):
                     watermark = m.start_time
-                window = [*window, m.id][-_MAX_CARRIED_IDS:]
+                # Mutate in place (append + trim) rather than rebuilding the
+                # whole list via `[*window, m.id][-N:]` every row (#69) — each
+                # row still gets its own freshly-serialized checkpoint value
+                # below (required for crash-safety: a mid-page crash must
+                # resume after exactly the last PUSHED row, never later).
+                window.append(m.id)
+                if len(window) > _MAX_CARRIED_IDS:
+                    del window[0]
+                since_id = m.id
 
                 payload = _meta_payload(m)
                 if self._transforms.apply(payload) is None:
@@ -198,7 +261,7 @@ class ApexLogSource:
 
                 # Build the checkpoint HERE — `window` lives in this scope; the
                 # committed value is the advanced watermark + rolling id window.
-                ckpt = json.dumps({"ids": window, "last_ts": watermark}, sort_keys=True)
+                ckpt = json.dumps({"ids": list(window), "last_ts": watermark}, sort_keys=True)
                 try:
                     entry = await self._build_entry(m, payload, watermark, ckpt)
                 except ApexLogThrottledError as exc:
@@ -209,11 +272,28 @@ class ApexLogSource:
                     _log.error("apexlog: body download throttled; backing off: %s", exc)
                     return
                 yield entry
+                emitted_any = True
                 self._metrics.apexlog_logs_ingested.inc()
                 self._consecutive_failures = 0
 
             if len(page) < _PAGE_LIMIT:
                 break
+
+        if any_progress and not emitted_any:
+            # #64: every row this cycle was filtered/sampled out, but the
+            # cursor still advanced — without a durable token the next cycle
+            # (and every cycle after a restart) re-fetches and re-drops the
+            # identical window forever. Commit the final position via a
+            # checkpoint_only entry instead (never sent to the sink).
+            ckpt = json.dumps({"ids": list(window), "last_ts": watermark}, sort_keys=True)
+            yield LogEntry(
+                timestamp=datetime.now(UTC),
+                labels={},
+                line="",
+                structured_metadata={},
+                checkpoint=CheckpointToken(key=_CHECKPOINT_KEY, value=ckpt),
+                checkpoint_only=True,
+            )
 
     async def _build_entry(
         self,

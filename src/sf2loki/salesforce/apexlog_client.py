@@ -90,23 +90,39 @@ class ApexLogClient:
         self._soql = SoqlClient(sf_cfg, tokens, client, metrics=self._metrics, tooling=True)
 
     async def list_logs(
-        self, since: str, users: Sequence[str], page_size: int
+        self, since: str, users: Sequence[str], page_size: int, since_id: str = ""
     ) -> list[ApexLogMeta]:
-        """List ApexLog rows with ``StartTime >= since``, oldest first.
+        """List ApexLog rows ordered by ``(StartTime, Id)`` ascending.
 
         *since* is passed through :func:`to_soql_datetime_literal` (a raw
         Salesforce ``…+0000`` value echoed from a checkpoint is not a legal SOQL
         literal). When *users* is non-empty a ``LogUser.Username IN (...)`` filter
         is added (usernames are validated by config to a safe charset).
+
+        *since_id* is the compound-cursor tiebreak: when supplied, the cursor
+        predicate is ``StartTime > since OR (StartTime = since AND Id >
+        since_id)`` instead of the plain ``StartTime >= since`` used on the
+        first-ever poll (no prior Id to resume from). Without the Id tiebreak, a
+        page of >``page_size`` rows sharing one ``StartTime`` would return the
+        identical page forever — the watermark can only advance to a StartTime
+        that a full page doesn't exceed. ``ORDER BY StartTime ASC, Id ASC`` makes
+        the (StartTime, Id) pair a total order so repeated calls with an
+        advancing since_id always make forward progress within a tied StartTime.
         """
-        where = [f"StartTime >= {to_soql_datetime_literal(since)}"]
+        ts_literal = to_soql_datetime_literal(since)
+        if since_id:
+            where = [
+                f"(StartTime > {ts_literal} OR (StartTime = {ts_literal} AND Id > '{since_id}'))"
+            ]
+        else:
+            where = [f"StartTime >= {ts_literal}"]
         if users:
             joined = ",".join(f"'{u}'" for u in users)
             where.append(f"LogUser.Username IN ({joined})")
         soql = (
             f"SELECT {_APEXLOG_FIELDS} FROM ApexLog "
             f"WHERE {' AND '.join(where)} "
-            f"ORDER BY StartTime ASC LIMIT {page_size}"
+            f"ORDER BY StartTime ASC, Id ASC LIMIT {page_size}"
         )
         logs: list[ApexLogMeta] = []
         try:
