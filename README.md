@@ -45,8 +45,8 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
   Alloy `otelcol.receiver.otlp`); plus `/healthz`, `/readyz`, structured logs, graceful shutdown.
 - **Operable from day one**: `sf2loki doctor` runs a live end-to-end preflight (auth, permissions,
   entitlements, Pub/Sub reachability, a Loki test write); `sf2loki backfill` loads historical
-  EventLogFile data; a generated Grafana dashboard **and alert-rule pack** ship in
-  [`deploy/grafana/`](deploy/grafana/).
+  EventLogFile data; a suite of Grafana **dashboards and a Grafana-managed alert + recording-rule
+  pack** ship in [`deploy/grafana/`](deploy/grafana/).
 - **Compliance & cost controls**: declarative PII transforms (hash / mask / drop field / drop row /
   regex), deterministic per-type sampling, sink rate caps, and a daily byte budget with a lossless
   pause mode — all opt-in.
@@ -57,9 +57,10 @@ See [DESIGN.md](DESIGN.md) for the full architecture, frozen seams, label strate
 - [docs/configuring-sources.md](docs/configuring-sources.md) — source/config reference: custom
   object polling, login history / setup audit trail recipes, the overlap rule, cardinality controls,
   PII redaction & sampling, cost controls.
-- [docs/alerts.md](docs/alerts.md) — the shipped Grafana alert-rule pack: what each alert means and
-  the first response step.
-- [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard.
+- [docs/alerts.md](docs/alerts.md) — the Grafana-managed alert + recording-rule pack: what each
+  rule means and how to apply it with `gcx`.
+- [deploy/grafana/README.md](deploy/grafana/README.md) — the bundled Grafana dashboard-v2 suite +
+  rule pack, the `gcx` apply workflow, and the metric-suffix requirement.
 - [deploy/k8s/README.md](deploy/k8s/README.md) — example Kubernetes manifests for the
   active-passive HA pair (Deployment, ServiceAccount/RBAC, probes).
 - [docs/generate-activity.md](docs/generate-activity.md) — synthetic activity generator for
@@ -410,11 +411,20 @@ All metrics push via OTLP/HTTP. Set `service.telemetry.enabled: true` and `servi
 local Alloy `http://alloy:4318/v1/metrics`). Basic auth defaults to the Loki sink's
 `tenant_id`/`auth_token` (Grafana Cloud uses one stack credential for Loki and OTLP); use
 `service.telemetry.auth: none` for an unauthenticated in-cluster Alloy. Enable Salesforce org-limit
-metrics (API usage, storage, streaming events, …) with `salesforce.limits.enabled: true`. A ready-made
-Grafana dashboard lives in [`deploy/grafana/`](deploy/grafana/), alongside a generated
-**alert-rule pack** ([`deploy/grafana/alerts.yaml`](deploy/grafana/alerts.yaml)) covering every
-data-loss and degradation signal — see [docs/alerts.md](docs/alerts.md) for what each alert means
-and how to provision it.
+metrics (API usage, storage, streaming events, …) with `salesforce.limits.enabled: true`.
+
+**Metric-name suffixes.** Instruments are created unsuffixed in code (e.g.
+`sf2loki_events_ingested`), but appear in Prometheus/Grafana with the OpenTelemetry→Prometheus
+suffixes `_total` / `_bucket` / `_count` / `_sum` (e.g. `sf2loki_events_ingested_total`,
+`sf2loki_ingest_lag_seconds_bucket`). Grafana Cloud's OTLP endpoint adds these by default. **If you
+route metrics through your own OpenTelemetry Collector or Grafana Alloy, keep `add_metric_suffixes`
+(a.k.a. `AddMetricSuffixes`) enabled on the Prometheus exporter** — the connector-health dashboard
+and the connector alert rules query the suffixed names and go silently blank otherwise.
+
+A set of hand-authored **Grafana dashboard-schema-v2 dashboards** (Salesforce security, API,
+Apex/performance, an overview, and the connector's own health) plus a **Grafana-managed alert +
+recording-rule pack** live in [`deploy/grafana/`](deploy/grafana/) — apply them with `gcx`; see
+[deploy/grafana/README.md](deploy/grafana/README.md) and [docs/alerts.md](docs/alerts.md).
 
 ### Stateless deployments (S3 checkpoint store)
 

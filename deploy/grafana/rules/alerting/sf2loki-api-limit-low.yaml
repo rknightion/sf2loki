@@ -1,0 +1,53 @@
+# Managed by sf2loki. Apply the whole pack with:
+#   gcx resources push -p deploy/grafana/rules/
+# gcx reads ONE resource per file, so each rule is its own file.
+# Datasource UIDs (grafanacloud-logs / grafanacloud-prom) are the Grafana Cloud
+# defaults; on self-hosted Grafana, replace them with your Loki/Prometheus UIDs.
+apiVersion: rules.alerting.grafana.app/v0alpha1
+kind: AlertRule
+metadata:
+  name: sf2loki-api-limit-low
+  annotations:
+    grafana.app/folder: sf2loki
+spec:
+  title: sf2loki Salesforce API limit low
+  trigger:
+    interval: 60s
+  for: 5m
+  noDataState: Ok
+  execErrState: Error
+  labels:
+    severity: critical
+    service: sf2loki
+  annotations:
+    summary: Salesforce org API limit headroom low
+    description: Lowest Salesforce org-limit headroom is {{ $values.A.Value }}% (below 10%).
+  expressions:
+    A:
+      source: true
+      datasourceUID: grafanacloud-prom
+      relativeTimeRange:
+        from: 10m
+        to: 0s
+      model:
+        refId: A
+        expr: min(sf2loki_salesforce_limit_remaining{job="sf2loki"} / sf2loki_salesforce_limit_max{job="sf2loki"}) * 100
+        instant: true
+        range: false
+        datasource:
+          type: prometheus
+          uid: grafanacloud-prom
+    C:
+      datasourceUID: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 10

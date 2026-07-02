@@ -24,7 +24,6 @@ just test        # pytest only
 just lint        # ruff check + format check
 just proto       # regen gRPC/protobuf stubs (only when proto/ changes)
 just gen-config  # regen config.example.yaml + docs/config-reference.md (only when config.py changes)
-just gen-grafana # regen deploy/grafana/{sf2loki-dashboard.json,alerts.yaml} (only when gen_*.py changes)
 just run config=config.yaml
 ```
 
@@ -39,9 +38,19 @@ just run config=config.yaml
   drift gate fails otherwise, enforced via `tests/test_config_artifacts_drift.py`).
 - proto stubs (`src/sf2loki/**/_generated/`) come from `just proto` (only when
   `proto/` changes).
-- `deploy/grafana/sf2loki-dashboard.json` / `alerts.yaml` come from
-  `just gen-grafana` after editing `deploy/grafana/gen_*.py` — no CI drift gate,
-  but keep the committed files in sync by hand.
+
+## Grafana dashboards & rules — hand-authored, NOT generated
+- `deploy/grafana/dashboards/*.json` are hand-authored **dashboard-schema-v2**
+  dashboards (`dashboard.grafana.app/v2`); `deploy/grafana/rules/{recording,alerting}/`
+  are **Grafana-managed** rules (`rules.alerting.grafana.app/v0alpha1`), one resource
+  per file (`gcx resources push` reads one per file). There is NO generator and no
+  drift gate — edit the JSON/YAML directly and validate/push/snapshot with `gcx`
+  (see `deploy/grafana/README.md`). Datasources bind via a template variable in
+  dashboards; rules embed the Grafana Cloud UIDs `grafanacloud-logs`/`grafanacloud-prom`.
+- SF-event dashboards query Loki with **scoped** `| json FIELD="FIELD"` extraction
+  (never bare `| json` — it explodes stream cardinality) and aggregate `by (...)`;
+  connector-health queries Prometheus OTLP metrics whose names carry the
+  `_total`/`_bucket`/`_count`/`_sum` suffixes (keep `add_metric_suffixes` on).
 
 ## Git & commits (this repo)
 - **Commit straight to `main`; push only when asked.** No PR flow for our own work.

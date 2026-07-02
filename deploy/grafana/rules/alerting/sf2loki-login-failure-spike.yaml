@@ -1,0 +1,53 @@
+# Managed by sf2loki. Apply the whole pack with:
+#   gcx resources push -p deploy/grafana/rules/
+# gcx reads ONE resource per file, so each rule is its own file.
+# Datasource UIDs (grafanacloud-logs / grafanacloud-prom) are the Grafana Cloud
+# defaults; on self-hosted Grafana, replace them with your Loki/Prometheus UIDs.
+apiVersion: rules.alerting.grafana.app/v0alpha1
+kind: AlertRule
+metadata:
+  name: sf2loki-login-failure-spike
+  annotations:
+    grafana.app/folder: sf2loki
+spec:
+  title: sf2loki login failure spike
+  trigger:
+    interval: 60s
+  for: 5m
+  noDataState: Ok
+  execErrState: Error
+  labels:
+    severity: warning
+    service: sf2loki
+  annotations:
+    summary: Elevated Salesforce login failures
+    description: 'More than 10 failed Salesforce logins in the last 10m (value: {{ $values.A.Value }}).'
+  expressions:
+    A:
+      source: true
+      datasourceUID: grafanacloud-logs
+      queryType: instant
+      relativeTimeRange:
+        from: 10m
+        to: 0s
+      model:
+        refId: A
+        expr: sum(count_over_time({job="sf2loki", event_type="Login", source="eventlogfile"} | json s="LOGIN_STATUS" | s!="LOGIN_NO_ERROR" | s!="" [10m]))
+        queryType: instant
+        datasource:
+          type: loki
+          uid: grafanacloud-logs
+    C:
+      datasourceUID: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 10

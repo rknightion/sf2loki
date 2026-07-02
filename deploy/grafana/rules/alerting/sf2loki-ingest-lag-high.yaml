@@ -1,0 +1,53 @@
+# Managed by sf2loki. Apply the whole pack with:
+#   gcx resources push -p deploy/grafana/rules/
+# gcx reads ONE resource per file, so each rule is its own file.
+# Datasource UIDs (grafanacloud-logs / grafanacloud-prom) are the Grafana Cloud
+# defaults; on self-hosted Grafana, replace them with your Loki/Prometheus UIDs.
+apiVersion: rules.alerting.grafana.app/v0alpha1
+kind: AlertRule
+metadata:
+  name: sf2loki-ingest-lag-high
+  annotations:
+    grafana.app/folder: sf2loki
+spec:
+  title: sf2loki ingest lag high
+  trigger:
+    interval: 60s
+  for: 10m
+  noDataState: Ok
+  execErrState: Error
+  labels:
+    severity: warning
+    service: sf2loki
+  annotations:
+    summary: Ingest lag p95 above 15m
+    description: sf2loki p95 ingest lag is {{ $values.A.Value }}s (above 900s) for 10m.
+  expressions:
+    A:
+      source: true
+      datasourceUID: grafanacloud-prom
+      relativeTimeRange:
+        from: 10m
+        to: 0s
+      model:
+        refId: A
+        expr: histogram_quantile(0.95, sum by (le)(rate(sf2loki_ingest_lag_seconds_bucket{job="sf2loki"}[5m])))
+        instant: true
+        range: false
+        datasource:
+          type: prometheus
+          uid: grafanacloud-prom
+    C:
+      datasourceUID: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 900

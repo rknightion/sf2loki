@@ -1,0 +1,1239 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "sf2loki-api-integration",
+    "annotations": {
+      "grafana.app/folder": "sf2loki"
+    }
+  },
+  "spec": {
+    "title": "sf2loki \u00b7 API & Integration",
+    "description": "Salesforce API consumption and integration monitoring.",
+    "tags": [
+      "sf2loki",
+      "salesforce",
+      "api"
+    ],
+    "editable": true,
+    "preload": false,
+    "cursorSync": "Off",
+    "liveNow": false,
+    "links": [],
+    "annotations": [],
+    "timeSettings": {
+      "from": "now-24h",
+      "to": "now",
+      "timezone": "browser",
+      "autoRefresh": "",
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0,
+      "autoRefreshIntervals": [
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d"
+      ]
+    },
+    "variables": [
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "job",
+          "label": "Job",
+          "query": "sf2loki",
+          "current": {
+            "text": "sf2loki",
+            "value": "sf2loki"
+          },
+          "options": [
+            {
+              "text": "sf2loki",
+              "value": "sf2loki",
+              "selected": true
+            }
+          ],
+          "hide": "dontHide",
+          "multi": false,
+          "includeAll": false,
+          "allValue": "",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "ds_loki",
+          "label": "Loki datasource",
+          "pluginId": "loki",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "multi": false,
+          "includeAll": false,
+          "options": [],
+          "refresh": "onDashboardLoad",
+          "regex": ""
+        }
+      },
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "ds_prom",
+          "label": "Prometheus datasource",
+          "pluginId": "prometheus",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "multi": false,
+          "includeAll": false,
+          "options": [],
+          "refresh": "onDashboardLoad",
+          "regex": ""
+        }
+      }
+    ],
+    "elements": {
+      "api-header": {
+        "kind": "Panel",
+        "spec": {
+          "id": 300,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "text",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              },
+              "options": {
+                "mode": "markdown",
+                "content": "## Salesforce API & Integration\nAPI consumption from **EventLogFile** (`ApiTotalUsage`, `RestApi`, `BulkApi2`, `CompositeApi`) and real-time `ApiEventStream`. The org API-limit gauge is sourced from the connector's own OTLP metrics (needs the Prometheus datasource)."
+              }
+            }
+          }
+        }
+      },
+      "api-total": {
+        "kind": "Panel",
+        "spec": {
+          "id": 301,
+          "title": "API calls (total)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"ApiTotalUsage\", source=\"eventlogfile\"}[$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "api-rest": {
+        "kind": "Panel",
+        "spec": {
+          "id": 302,
+          "title": "REST calls",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"RestApi\", source=\"eventlogfile\"}[$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "api-resources": {
+        "kind": "Panel",
+        "spec": {
+          "id": 303,
+          "title": "REST error rate",
+          "description": "Share of RestApi calls with a 4xx/5xx STATUS_CODE.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"RestApi\", source=\"eventlogfile\"} | json sc=\"STATUS_CODE\" | sc=~\"4..|5..\" [$__range])) / sum(count_over_time({job=\"$job\", event_type=\"RestApi\", source=\"eventlogfile\"}[$__range])) * 100",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 1
+                      },
+                      {
+                        "color": "red",
+                        "value": 5
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "api-limit": {
+        "kind": "Panel",
+        "spec": {
+          "id": 304,
+          "title": "Min API limit remaining",
+          "description": "Lowest headroom across all Salesforce org limits (from OTLP metrics).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "min(sf2loki_salesforce_limit_remaining{job=\"$job\"} / sf2loki_salesforce_limit_max{job=\"$job\"}) * 100",
+                        "legendFormat": "",
+                        "range": false,
+                        "instant": true,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "red",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 10
+                      },
+                      {
+                        "color": "green",
+                        "value": 25
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "api-family-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 305,
+          "title": "API usage rate by family",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (API_FAMILY)(rate({job=\"$job\", event_type=\"ApiTotalUsage\", source=\"eventlogfile\"} | json API_FAMILY=\"API_FAMILY\" [$__auto]))",
+                        "legendFormat": "{{API_FAMILY}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 20,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-status-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 306,
+          "title": "REST status codes",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (STATUS_CODE)(rate({job=\"$job\", event_type=\"RestApi\", source=\"eventlogfile\"} | json STATUS_CODE=\"STATUS_CODE\" [$__auto]))",
+                        "legendFormat": "{{STATUS_CODE}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 20,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-top-resources": {
+        "kind": "Panel",
+        "spec": {
+          "id": 307,
+          "title": "Top API consumers",
+          "description": "Busiest API users (per-endpoint resource breakdown exceeds Loki's series cap at this cardinality).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(15, sum by (USER_NAME)(count_over_time({job=\"$job\", event_type=\"ApiTotalUsage\", source=\"eventlogfile\"} | json USER_NAME=\"USER_NAME\" | USER_NAME!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-methods": {
+        "kind": "Panel",
+        "spec": {
+          "id": 308,
+          "title": "HTTP methods",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (HTTP_METHOD)(count_over_time({job=\"$job\", event_type=\"ApiTotalUsage\", source=\"eventlogfile\"} | json HTTP_METHOD=\"HTTP_METHOD\" | HTTP_METHOD!=\"\" [$__range]))",
+                        "legendFormat": "{{HTTP_METHOD}}",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "piechart",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "pieType": "donut",
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "values": [
+                    "percent"
+                  ]
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-bulk-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 309,
+          "title": "Bulk / Composite API volume",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (event_type)(rate({job=\"$job\", event_type=~\"BulkApi2|CompositeApi|CompositeApiSubrequest\", source=\"eventlogfile\"}[$__auto]))",
+                        "legendFormat": "{{event_type}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-stream-ops": {
+        "kind": "Panel",
+        "spec": {
+          "id": 310,
+          "title": "ApiEventStream operations",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(15, sum by (Operation)(count_over_time({job=\"$job\", event_type=\"ApiEventStream\", source=\"pubsub\"} | json Operation=\"Operation\" | Operation!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-limits-table": {
+        "kind": "Panel",
+        "spec": {
+          "id": 311,
+          "title": "Salesforce org limits (headroom %)",
+          "description": "Per-limit remaining headroom from the connector's OTLP metrics.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "max by (limit_name)(sf2loki_salesforce_limit_remaining{job=\"$job\"} / sf2loki_salesforce_limit_max{job=\"$job\"}) * 100",
+                        "legendFormat": "",
+                        "range": false,
+                        "instant": true,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        },
+                        "format": "table"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "api-logs": {
+        "kind": "Panel",
+        "spec": {
+          "id": 312,
+          "title": "Recent API events",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "{job=\"$job\", event_type=~\"ApiTotalUsage|RestApi\"}",
+                        "legendFormat": "",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "logs",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "showCommonLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "dedupStrategy": "none",
+                "sortOrder": "Descending"
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-header"
+              },
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 3
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-total"
+              },
+              "x": 0,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-rest"
+              },
+              "x": 6,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-resources"
+              },
+              "x": 12,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-limit"
+              },
+              "x": 18,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-family-ts"
+              },
+              "x": 0,
+              "y": 7,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-status-ts"
+              },
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-top-resources"
+              },
+              "x": 0,
+              "y": 15,
+              "width": 12,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-methods"
+              },
+              "x": 12,
+              "y": 15,
+              "width": 12,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-bulk-ts"
+              },
+              "x": 0,
+              "y": 24,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-stream-ops"
+              },
+              "x": 12,
+              "y": 24,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-limits-table"
+              },
+              "x": 0,
+              "y": 32,
+              "width": 12,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "api-logs"
+              },
+              "x": 12,
+              "y": 32,
+              "width": 12,
+              "height": 9
+            }
+          }
+        ]
+      }
+    }
+  }
+}

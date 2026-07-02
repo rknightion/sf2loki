@@ -1,0 +1,1518 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "sf2loki-connector-health",
+    "annotations": {
+      "grafana.app/folder": "sf2loki"
+    }
+  },
+  "spec": {
+    "title": "sf2loki \u00b7 Connector Health",
+    "description": "Self-observability for the sf2loki connector (OTLP metrics). See header for the metric-suffix requirement.",
+    "tags": [
+      "sf2loki",
+      "connector",
+      "health"
+    ],
+    "editable": true,
+    "preload": false,
+    "cursorSync": "Off",
+    "liveNow": false,
+    "links": [],
+    "annotations": [],
+    "timeSettings": {
+      "from": "now-6h",
+      "to": "now",
+      "timezone": "browser",
+      "autoRefresh": "",
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0,
+      "autoRefreshIntervals": [
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d"
+      ]
+    },
+    "variables": [
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "job",
+          "label": "Job",
+          "query": "sf2loki",
+          "current": {
+            "text": "sf2loki",
+            "value": "sf2loki"
+          },
+          "options": [
+            {
+              "text": "sf2loki",
+              "value": "sf2loki",
+              "selected": true
+            }
+          ],
+          "hide": "dontHide",
+          "multi": false,
+          "includeAll": false,
+          "allValue": "",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "ds_prom",
+          "label": "Prometheus datasource",
+          "pluginId": "prometheus",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "multi": false,
+          "includeAll": false,
+          "options": [],
+          "refresh": "onDashboardLoad",
+          "regex": ""
+        }
+      }
+    ],
+    "elements": {
+      "hlth-header": {
+        "kind": "Panel",
+        "spec": {
+          "id": 500,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "text",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              },
+              "options": {
+                "mode": "markdown",
+                "content": "## sf2loki Connector Health\nThe connector's own self-observability, exported via **OTLP metrics** (no scrape endpoint).\n\n> **Metric name suffixes (important):** instruments are created unsuffixed (e.g. `sf2loki_events_ingested`), but they appear in Prometheus/Grafana with the OTel Prometheus suffixes `_total` / `_bucket` / `_count` / `_sum` \u2014 every query below relies on that. Grafana Cloud's OTLP endpoint adds these by default; if you route through your own Collector/Alloy, keep `add_metric_suffixes` (a.k.a. `AddMetricSuffixes`) **enabled** or this dashboard and the alert pack go silently blank."
+              }
+            }
+          }
+        }
+      },
+      "hlth-ingest": {
+        "kind": "Panel",
+        "spec": {
+          "id": 501,
+          "title": "Events ingested",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(rate(sf2loki_events_ingested_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "hlth-lag": {
+        "kind": "Panel",
+        "spec": {
+          "id": 502,
+          "title": "Ingest lag p95",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "histogram_quantile(0.95, sum by (le)(rate(sf2loki_ingest_lag_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+                        "legendFormat": "",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 300
+                      },
+                      {
+                        "color": "red",
+                        "value": 900
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "hlth-push": {
+        "kind": "Panel",
+        "spec": {
+          "id": 503,
+          "title": "Loki push success rate",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(rate(sf2loki_loki_push_total{job=\"$job\", outcome=\"success\"}[$__rate_interval])) / clamp_min(sum(rate(sf2loki_loki_push_total{job=\"$job\"}[$__rate_interval])), 0.0001)",
+                        "legendFormat": "",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percentunit",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "red",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 0.95
+                      },
+                      {
+                        "color": "green",
+                        "value": 0.99
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "hlth-lastpush": {
+        "kind": "Panel",
+        "spec": {
+          "id": 504,
+          "title": "Time since last push",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "time() - max(sf2loki_last_push_success_timestamp_seconds{job=\"$job\"})",
+                        "legendFormat": "",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 120
+                      },
+                      {
+                        "color": "red",
+                        "value": 600
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "hlth-ingest-src": {
+        "kind": "Panel",
+        "spec": {
+          "id": 505,
+          "title": "Events ingested by source",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (source)(rate(sf2loki_events_ingested_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "{{source}}",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 20,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-lag-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 506,
+          "title": "Ingest lag percentiles",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "histogram_quantile(0.50, sum by (le)(rate(sf2loki_ingest_lag_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+                        "legendFormat": "p50",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "B",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "histogram_quantile(0.95, sum by (le)(rate(sf2loki_ingest_lag_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+                        "legendFormat": "p95",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "C",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "histogram_quantile(0.99, sum by (le)(rate(sf2loki_ingest_lag_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+                        "legendFormat": "p99",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-push-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 507,
+          "title": "Loki push rate by outcome",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (outcome)(rate(sf2loki_loki_push_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "{{outcome}}",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 15,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-push-dur": {
+        "kind": "Panel",
+        "spec": {
+          "id": 508,
+          "title": "Loki push duration p95",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "histogram_quantile(0.95, sum by (le)(rate(sf2loki_loki_push_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+                        "legendFormat": "p95",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-queue": {
+        "kind": "Panel",
+        "spec": {
+          "id": 509,
+          "title": "Internal queue depth",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "max(sf2loki_queue_depth{job=\"$job\"})",
+                        "legendFormat": "queue depth",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-elf-rows": {
+        "kind": "Panel",
+        "spec": {
+          "id": 510,
+          "title": "EventLogFile rows ingested",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (event_type)(rate(sf2loki_eventlogfile_rows_ingested_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "{{event_type}}",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "rps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-bytes": {
+        "kind": "Panel",
+        "spec": {
+          "id": 511,
+          "title": "Loki bytes pushed",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(rate(sf2loki_loki_bytes_pushed_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "bytes/s",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "Bps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 15,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-auth": {
+        "kind": "Panel",
+        "spec": {
+          "id": 512,
+          "title": "Auth refreshes",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(rate(sf2loki_auth_refreshes_total{job=\"$job\"}[$__rate_interval]))",
+                        "legendFormat": "refreshes/s",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-credits": {
+        "kind": "Panel",
+        "spec": {
+          "id": 513,
+          "title": "Pub/Sub pending credits",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "max(sf2loki_pubsub_pending_credits{job=\"$job\"})",
+                        "legendFormat": "credits",
+                        "range": true,
+                        "instant": false,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "hlth-limits": {
+        "kind": "Panel",
+        "spec": {
+          "id": 514,
+          "title": "Salesforce org limits (headroom %)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "prometheus",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "max by (limit_name)(sf2loki_salesforce_limit_remaining{job=\"$job\"} / sf2loki_salesforce_limit_max{job=\"$job\"}) * 100",
+                        "legendFormat": "",
+                        "range": false,
+                        "instant": true,
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${ds_prom}"
+                        },
+                        "format": "table"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-header"
+              },
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 5
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-ingest"
+              },
+              "x": 0,
+              "y": 5,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-lag"
+              },
+              "x": 6,
+              "y": 5,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-push"
+              },
+              "x": 12,
+              "y": 5,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-lastpush"
+              },
+              "x": 18,
+              "y": 5,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-ingest-src"
+              },
+              "x": 0,
+              "y": 9,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-lag-ts"
+              },
+              "x": 12,
+              "y": 9,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-push-ts"
+              },
+              "x": 0,
+              "y": 17,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-push-dur"
+              },
+              "x": 8,
+              "y": 17,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-queue"
+              },
+              "x": 16,
+              "y": 17,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-elf-rows"
+              },
+              "x": 0,
+              "y": 25,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-bytes"
+              },
+              "x": 12,
+              "y": 25,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-auth"
+              },
+              "x": 0,
+              "y": 33,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-credits"
+              },
+              "x": 8,
+              "y": 33,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "hlth-limits"
+              },
+              "x": 16,
+              "y": 33,
+              "width": 8,
+              "height": 8
+            }
+          }
+        ]
+      }
+    }
+  }
+}

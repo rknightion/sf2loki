@@ -1,0 +1,1176 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "sf2loki-security-access",
+    "annotations": {
+      "grafana.app/folder": "sf2loki"
+    }
+  },
+  "spec": {
+    "title": "sf2loki \u00b7 Security & Access",
+    "description": "Salesforce login/logout security monitoring from EventLogFile and Pub/Sub streaming.",
+    "tags": [
+      "sf2loki",
+      "salesforce",
+      "security"
+    ],
+    "editable": true,
+    "preload": false,
+    "cursorSync": "Off",
+    "liveNow": false,
+    "links": [],
+    "annotations": [],
+    "timeSettings": {
+      "from": "now-24h",
+      "to": "now",
+      "timezone": "browser",
+      "autoRefresh": "",
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0,
+      "autoRefreshIntervals": [
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d"
+      ]
+    },
+    "variables": [
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "job",
+          "label": "Job",
+          "query": "sf2loki",
+          "current": {
+            "text": "sf2loki",
+            "value": "sf2loki"
+          },
+          "options": [
+            {
+              "text": "sf2loki",
+              "value": "sf2loki",
+              "selected": true
+            }
+          ],
+          "hide": "dontHide",
+          "multi": false,
+          "includeAll": false,
+          "allValue": "",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "ds_loki",
+          "label": "Loki datasource",
+          "pluginId": "loki",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "multi": false,
+          "includeAll": false,
+          "options": [],
+          "refresh": "onDashboardLoad",
+          "regex": ""
+        }
+      }
+    ],
+    "elements": {
+      "sec-header": {
+        "kind": "Panel",
+        "spec": {
+          "id": 200,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "text",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              },
+              "options": {
+                "mode": "markdown",
+                "content": "## Salesforce Security & Access\nLogin / logout activity from **EventLogFile** (`Login`) and real-time **Pub/Sub** (`LoginEventStream`, `LogoutEventStream`). Watch for failed-login spikes, unfamiliar source IPs / countries, and weak TLS."
+              }
+            }
+          }
+        }
+      },
+      "sec-logins": {
+        "kind": "Panel",
+        "spec": {
+          "id": 201,
+          "title": "Login attempts",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"}[$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "sec-failures": {
+        "kind": "Panel",
+        "spec": {
+          "id": 202,
+          "title": "Failed logins",
+          "description": "Logins with LOGIN_STATUS other than LOGIN_NO_ERROR.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json s=\"LOGIN_STATUS\" | s!=\"LOGIN_NO_ERROR\" | s!=\"\" [$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 1
+                      },
+                      {
+                        "color": "red",
+                        "value": 50
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "sec-users": {
+        "kind": "Panel",
+        "spec": {
+          "id": 203,
+          "title": "Distinct users",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "count(sum by (USER_NAME)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json USER_NAME=\"USER_NAME\" | USER_NAME!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "sec-countries": {
+        "kind": "Panel",
+        "spec": {
+          "id": 204,
+          "title": "Distinct countries",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "count(sum by (COUNTRY_CODE)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json COUNTRY_CODE=\"COUNTRY_CODE\" | COUNTRY_CODE!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "sec-status-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 205,
+          "title": "Login attempts by status",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (LOGIN_STATUS)(rate({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json LOGIN_STATUS=\"LOGIN_STATUS\" [$__auto]))",
+                        "legendFormat": "{{LOGIN_STATUS}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 25,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-status-pie": {
+        "kind": "Panel",
+        "spec": {
+          "id": 206,
+          "title": "Login outcomes",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (LOGIN_STATUS)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json LOGIN_STATUS=\"LOGIN_STATUS\" [$__range]))",
+                        "legendFormat": "{{LOGIN_STATUS}}",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "piechart",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "pieType": "donut",
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "values": [
+                    "percent"
+                  ]
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-country": {
+        "kind": "Panel",
+        "spec": {
+          "id": 207,
+          "title": "Logins by country",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (COUNTRY_CODE)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json COUNTRY_CODE=\"COUNTRY_CODE\" | COUNTRY_CODE!=\"\" [$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-topusers": {
+        "kind": "Panel",
+        "spec": {
+          "id": 208,
+          "title": "Top users by logins",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(15, sum by (USER_NAME)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json USER_NAME=\"USER_NAME\" | USER_NAME!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-tls": {
+        "kind": "Panel",
+        "spec": {
+          "id": 209,
+          "title": "TLS protocol",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (TLS_PROTOCOL)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json TLS_PROTOCOL=\"TLS_PROTOCOL\" | TLS_PROTOCOL!=\"\" [$__range]))",
+                        "legendFormat": "{{TLS_PROTOCOL}}",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "piechart",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "pieType": "pie",
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "values": [
+                    "percent"
+                  ]
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-failed-ips": {
+        "kind": "Panel",
+        "spec": {
+          "id": 210,
+          "title": "Failed logins by source IP",
+          "description": "Source IPs with non-successful login attempts.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(20, sum by (CLIENT_IP, LOGIN_STATUS)(count_over_time({job=\"$job\", event_type=\"Login\", source=\"eventlogfile\"} | json CLIENT_IP=\"CLIENT_IP\", LOGIN_STATUS=\"LOGIN_STATUS\" | LOGIN_STATUS!=\"LOGIN_NO_ERROR\" | LOGIN_STATUS!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-geo": {
+        "kind": "Panel",
+        "spec": {
+          "id": 211,
+          "title": "Real-time logins by country / city (Pub/Sub)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(20, sum by (Country, City)(count_over_time({job=\"$job\", event_type=\"LoginEventStream\", source=\"pubsub\"} | json Country=\"Country\", City=\"City\" | Country!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "sec-logs": {
+        "kind": "Panel",
+        "spec": {
+          "id": 212,
+          "title": "Recent login / logout events",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "{job=\"$job\", event_type=~\"Login|LoginEventStream|Logout|LogoutEventStream\"}",
+                        "legendFormat": "",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "logs",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "showCommonLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "dedupStrategy": "none",
+                "sortOrder": "Descending"
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-header"
+              },
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 3
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-logins"
+              },
+              "x": 0,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-failures"
+              },
+              "x": 6,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-users"
+              },
+              "x": 12,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-countries"
+              },
+              "x": 18,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-status-ts"
+              },
+              "x": 0,
+              "y": 7,
+              "width": 16,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-status-pie"
+              },
+              "x": 16,
+              "y": 7,
+              "width": 8,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-country"
+              },
+              "x": 0,
+              "y": 15,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-topusers"
+              },
+              "x": 8,
+              "y": 15,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-tls"
+              },
+              "x": 16,
+              "y": 15,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-failed-ips"
+              },
+              "x": 0,
+              "y": 24,
+              "width": 12,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-geo"
+              },
+              "x": 12,
+              "y": 24,
+              "width": 12,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "sec-logs"
+              },
+              "x": 0,
+              "y": 33,
+              "width": 24,
+              "height": 9
+            }
+          }
+        ]
+      }
+    }
+  }
+}

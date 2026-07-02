@@ -1,0 +1,1265 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "sf2loki-apex-performance",
+    "annotations": {
+      "grafana.app/folder": "sf2loki"
+    }
+  },
+  "spec": {
+    "title": "sf2loki \u00b7 Apex & Performance",
+    "description": "Apex callouts and Salesforce request performance from EventLogFile.",
+    "tags": [
+      "sf2loki",
+      "salesforce",
+      "performance"
+    ],
+    "editable": true,
+    "preload": false,
+    "cursorSync": "Off",
+    "liveNow": false,
+    "links": [],
+    "annotations": [],
+    "timeSettings": {
+      "from": "now-24h",
+      "to": "now",
+      "timezone": "browser",
+      "autoRefresh": "",
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0,
+      "autoRefreshIntervals": [
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "1d"
+      ]
+    },
+    "variables": [
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "job",
+          "label": "Job",
+          "query": "sf2loki",
+          "current": {
+            "text": "sf2loki",
+            "value": "sf2loki"
+          },
+          "options": [
+            {
+              "text": "sf2loki",
+              "value": "sf2loki",
+              "selected": true
+            }
+          ],
+          "hide": "dontHide",
+          "multi": false,
+          "includeAll": false,
+          "allValue": "",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "ds_loki",
+          "label": "Loki datasource",
+          "pluginId": "loki",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "multi": false,
+          "includeAll": false,
+          "options": [],
+          "refresh": "onDashboardLoad",
+          "regex": ""
+        }
+      }
+    ],
+    "elements": {
+      "apex-header": {
+        "kind": "Panel",
+        "spec": {
+          "id": 400,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "text",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              },
+              "options": {
+                "mode": "markdown",
+                "content": "## Apex & Performance\nApex callouts, request performance (run time, CPU, DB time) and report execution from EventLogFile. Percentiles use `unwrap` over the numeric CSV fields."
+              }
+            }
+          }
+        }
+      },
+      "apx-callouts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 401,
+          "title": "Apex callouts",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"}[$__range]))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "apx-errrate": {
+        "kind": "Panel",
+        "spec": {
+          "id": 402,
+          "title": "Callout error rate",
+          "description": "ApexCallout with SUCCESS=0 as a share of all callouts.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum(count_over_time({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json s=\"SUCCESS\" | s=\"0\" [$__range])) / sum(count_over_time({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"}[$__range])) * 100",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 2
+                      },
+                      {
+                        "color": "red",
+                        "value": 10
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "apx-uri-p95": {
+        "kind": "Panel",
+        "spec": {
+          "id": 403,
+          "title": "URI run time p95",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.95, {job=\"$job\", event_type=\"URI\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__range]) by (event_type)",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ms",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "apx-callout-p95": {
+        "kind": "Panel",
+        "spec": {
+          "id": 404,
+          "title": "Callout run time p95",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.95, {job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__range]) by (event_type)",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "stat",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ms",
+                  "color": {
+                    "mode": "fixed"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "wideLayout": true,
+                "showPercentChange": false,
+                "percentChangeColorMode": "standard"
+              }
+            }
+          }
+        }
+      },
+      "apx-success-ts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 405,
+          "title": "Apex callout outcomes",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (SUCCESS)(rate({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json SUCCESS=\"SUCCESS\" [$__auto]))",
+                        "legendFormat": "success={{SUCCESS}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cps",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 20,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": [
+                    "sum"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-callout-lat": {
+        "kind": "Panel",
+        "spec": {
+          "id": 406,
+          "title": "Apex callout run time percentiles",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.50, {job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__auto]) by (event_type)",
+                        "legendFormat": "p50",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "B",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.95, {job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__auto]) by (event_type)",
+                        "legendFormat": "p95",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "C",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.99, {job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__auto]) by (event_type)",
+                        "legendFormat": "p99",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ms",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-perf-p95": {
+        "kind": "Panel",
+        "spec": {
+          "id": 407,
+          "title": "Request run time p95 by type",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "quantile_over_time(0.95, {job=\"$job\", event_type=~\"URI|VisualforceRequest|AuraRequest|RestApi\", source=\"eventlogfile\"} | json rt=\"RUN_TIME\" | rt!=\"\" | unwrap rt [$__auto]) by (event_type)",
+                        "legendFormat": "{{event_type}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ms",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "mean",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-db-time": {
+        "kind": "Panel",
+        "spec": {
+          "id": 408,
+          "title": "DB total time avg by type",
+          "description": "DB_TOTAL_TIME is reported in nanoseconds.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "avg_over_time({job=\"$job\", event_type=~\"URI|Report|RestApi|ApexExecution\", source=\"eventlogfile\"} | json db=\"DB_TOTAL_TIME\" | db!=\"\" | unwrap db [$__auto]) by (event_type)",
+                        "legendFormat": "{{event_type}}",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ns",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "mean"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-callout-types": {
+        "kind": "Panel",
+        "spec": {
+          "id": 409,
+          "title": "Apex callout types",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "topk(15, sum by (TYPE)(count_over_time({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json TYPE=\"TYPE\" | TYPE!=\"\" [$__range])))",
+                        "legendFormat": "",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "table",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-callout-status": {
+        "kind": "Panel",
+        "spec": {
+          "id": 410,
+          "title": "Apex callout status codes",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "sum by (STATUS_CODE)(count_over_time({job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"} | json STATUS_CODE=\"STATUS_CODE\" | STATUS_CODE!=\"\" [$__range]))",
+                        "legendFormat": "{{STATUS_CODE}}",
+                        "queryType": "instant",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "piechart",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "pieType": "donut",
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "values": [
+                    "percent"
+                  ]
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-report-rows": {
+        "kind": "Panel",
+        "spec": {
+          "id": 411,
+          "title": "Report row count avg",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "avg_over_time({job=\"$job\", event_type=\"Report\", source=\"eventlogfile\"} | json rc=\"ROW_COUNT\" | rc!=\"\" | unwrap rc [$__auto]) by (event_type)",
+                        "legendFormat": "rows",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "timeseries",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "smooth",
+                    "lineWidth": 1,
+                    "fillOpacity": 10,
+                    "gradientMode": "opacity",
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "axisPlacement": "auto",
+                    "scaleDistribution": {
+                      "type": "linear"
+                    }
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "calcs": []
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              }
+            }
+          }
+        }
+      },
+      "apx-logs": {
+        "kind": "Panel",
+        "spec": {
+          "id": 412,
+          "title": "Recent Apex callouts",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "hidden": false,
+                    "refId": "A",
+                    "query": {
+                      "group": "loki",
+                      "kind": "DataQuery",
+                      "version": "v0",
+                      "spec": {
+                        "expr": "{job=\"$job\", event_type=\"ApexCallout\", source=\"eventlogfile\"}",
+                        "legendFormat": "",
+                        "queryType": "range",
+                        "datasource": {
+                          "type": "loki",
+                          "uid": "${ds_loki}"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {},
+              "transformations": []
+            }
+          },
+          "vizConfig": {
+            "group": "logs",
+            "kind": "VizConfig",
+            "version": "",
+            "spec": {
+              "fieldConfig": {
+                "defaults": {
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "showCommonLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "dedupStrategy": "none",
+                "sortOrder": "Descending"
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apex-header"
+              },
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 3
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-callouts"
+              },
+              "x": 0,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-errrate"
+              },
+              "x": 6,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-uri-p95"
+              },
+              "x": 12,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-callout-p95"
+              },
+              "x": 18,
+              "y": 3,
+              "width": 6,
+              "height": 4
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-success-ts"
+              },
+              "x": 0,
+              "y": 7,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-callout-lat"
+              },
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-perf-p95"
+              },
+              "x": 0,
+              "y": 15,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-db-time"
+              },
+              "x": 12,
+              "y": 15,
+              "width": 12,
+              "height": 8
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-callout-types"
+              },
+              "x": 0,
+              "y": 23,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-callout-status"
+              },
+              "x": 8,
+              "y": 23,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-report-rows"
+              },
+              "x": 16,
+              "y": 23,
+              "width": 8,
+              "height": 9
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "element": {
+                "kind": "ElementReference",
+                "name": "apx-logs"
+              },
+              "x": 0,
+              "y": 32,
+              "width": 24,
+              "height": 9
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+# Managed by sf2loki. Apply the whole pack with:
+#   gcx resources push -p deploy/grafana/rules/
+# gcx reads ONE resource per file, so each rule is its own file.
+# Datasource UIDs (grafanacloud-logs / grafanacloud-prom) are the Grafana Cloud
+# defaults; on self-hosted Grafana, replace them with your Loki/Prometheus UIDs.
+apiVersion: rules.alerting.grafana.app/v0alpha1
+kind: RecordingRule
+metadata:
+  name: sf2loki-rec-events-5m
+  annotations:
+    grafana.app/folder: sf2loki
+spec:
+  title: sf2loki events by source/type (5m)
+  metric: sf2loki_events:count5m
+  targetDatasourceUID: grafanacloud-prom
+  trigger:
+    interval: 60s
+  expressions:
+    A:
+      source: true
+      datasourceUID: grafanacloud-logs
+      queryType: instant
+      relativeTimeRange:
+        from: 5m
+        to: 0s
+      model:
+        refId: A
+        expr: sum by (source, event_type)(count_over_time({job="sf2loki"}[5m]))
+        queryType: instant
+        datasource:
+          type: loki
+          uid: grafanacloud-logs
