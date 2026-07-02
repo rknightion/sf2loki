@@ -1,11 +1,17 @@
 """Kubernetes-Lease :class:`Coordinator`: active-passive failover via ``coordination.k8s.io/v1``.
 
 The leader renews a Lease object (``holderIdentity`` + ``renewTime``); a
-standby watches and takes over once the lease has gone stale (``renewTime +
-leaseDurationSeconds`` in the past). Optimistic concurrency uses the Lease's
-``resourceVersion``: a lost compare-and-swap comes back as HTTP 409, which
-doubles as the race signal — unlike the file lease, no pause-then-verify
-re-read is needed after a contested write.
+standby watches and takes over once the lease has gone stale. Staleness is
+judged with client-go's ``observedTime`` pattern, never by comparing the
+leader-written ``renewTime`` against the observer's own wall clock: each
+coordinator tracks (on its own injected monotonic clock) when it last saw
+this Lease's ``resourceVersion`` change, and only treats it as expired once
+``lease_duration`` seconds have elapsed on THAT clock. This deliberately
+ignores cross-host wall-clock skew — see ``_observe``/``_Lease.is_stale`` and
+GH #51. Optimistic concurrency uses the Lease's ``resourceVersion``: a lost
+compare-and-swap comes back as HTTP 409, which doubles as the race signal —
+unlike the file lease, no pause-then-verify re-read is needed after a
+contested write.
 
 This module mirrors ``coordinate/file_lease.py``'s ``run`` → ``_acquire`` →
 ``_hold`` → ``_pause`` loop shape, injected ``utcnow``/``sleep``, and
@@ -25,10 +31,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sf2loki.coordinate.base import StateFenceError
@@ -48,13 +55,36 @@ def _default_utcnow() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class _Lease:
+    """``holderIdentity``/``renewTime``/``leaseDurationSeconds`` are all
+    OPTIONAL in ``coordination.k8s.io/v1`` (a bare ``kubectl create``d Lease,
+    or one written by another controller, may leave any of them unset) —
+    ``renew_time``/``duration`` are ``None`` rather than assumed present
+    (GH #62); ``holder`` is ``""`` (never ``None``) when ``holderIdentity`` is
+    unset, meaning unheld.
+    """
+
     holder: str
-    renew_time: datetime
-    duration: float
+    renew_time: datetime | None
+    duration: float | None
     resource_version: str
 
-    def expired(self, now: datetime) -> bool:
-        return now >= self.renew_time + timedelta(seconds=self.duration)
+    def is_stale(self, staleness: float) -> bool:
+        """True if this lease should be treated as expired/claimable.
+
+        *staleness* is seconds elapsed on the OBSERVER's own monotonic clock
+        since this lease's ``resource_version`` was last seen to change (see
+        ``K8sLeaseCoordinator._observe``) — never the leader's wall-clock
+        ``renew_time`` (GH #51: cross-host wall-clock skew must never cause a
+        premature takeover).
+
+        A Lease that has never been renewed (``renew_time``/``duration``
+        missing) or that nobody currently holds (``holder`` unset) is
+        immediately claimable — there is no active renewal to protect
+        against clock skew for, so no observation window is needed (GH #62).
+        """
+        if not self.holder or self.renew_time is None or self.duration is None:
+            return True
+        return staleness >= self.duration
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +134,12 @@ _CONFLICT = 409
 class K8sLeaseCoordinator:
     """Lease-based leader election over a Kubernetes ``Lease`` object.
 
-    ``utcnow`` supplies the wall clock written into / compared against the
-    lease (injected in tests); ``sleep`` performs the interval waits
-    (injected so tests never sleep for real). ``holder`` is the
-    ``holderIdentity`` written into the lease — the app derives
+    ``utcnow`` supplies the wall clock written into the lease's ``renewTime``
+    (injected in tests) — it is never read back for expiry math (GH #51);
+    ``monotonic`` supplies the observer's own clock that IS used for expiry,
+    via the ``observedTime`` pattern (see ``_observe``); ``sleep`` performs
+    the interval waits (injected so tests never sleep for real). ``holder``
+    is the ``holderIdentity`` written into the lease — the app derives
     ``hostname-pid`` when config and ``$HOSTNAME`` are both blank.
 
     ``run`` owns the adapter's lifecycle: the ``Coordinator`` protocol has no
@@ -123,6 +155,7 @@ class K8sLeaseCoordinator:
         holder: str | None = None,
         utcnow: Callable[[], datetime] = _default_utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
         api_factory: K8sApiFactory | None = None,
     ) -> None:
         self._cfg = cfg
@@ -136,9 +169,15 @@ class K8sLeaseCoordinator:
         )
         self._utcnow = utcnow
         self._sleep = sleep
+        self._monotonic = monotonic
         self._api_factory = api_factory
         self._api: _LeaseApi | None = None
         self._is_leader: bool = False
+        # observedTime bookkeeping (GH #51): the resource_version we last saw
+        # and the monotonic time at which we first saw it — never reset by
+        # wall-clock reads, only by an actual observed content change.
+        self._observed_version: str | None = None
+        self._observed_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Fencing contract (consumed by the state store via set_fence)
@@ -224,6 +263,26 @@ class K8sLeaseCoordinator:
                 self._api = None
 
     # ------------------------------------------------------------------
+    # observedTime bookkeeping (GH #51)
+
+    def _observe(self, lease: _Lease) -> float:
+        """Record when *lease*'s ``resource_version`` was first seen (on our
+        own monotonic clock), returning the staleness — seconds elapsed since
+        then — as of this call.
+
+        This is client-go leaderelection's ``observedTime`` pattern: a
+        content change (any successful renew or takeover bumps
+        ``resourceVersion``) resets the window; the leader's/observer's wall
+        clock never enters into it, so cross-host clock skew cannot cause a
+        premature (or a delayed) takeover.
+        """
+        now = self._monotonic()
+        if lease.resource_version != self._observed_version:
+            self._observed_version = lease.resource_version
+            self._observed_at = now
+        return now - self._observed_at
+
+    # ------------------------------------------------------------------
     # Standby / acquire
 
     async def _acquire(self, stop: asyncio.Event) -> _Lease | None:
@@ -254,7 +313,7 @@ class K8sLeaseCoordinator:
                         return None
                     continue
                 return acquired
-            elif lease.expired(now):
+            elif lease.is_stale(self._observe(lease)):
                 try:
                     acquired = await self._require_api.replace_lease(
                         _LeaseBody(
@@ -460,10 +519,18 @@ class _RealLeaseAdapter:
 
     @staticmethod
     def _from_v1_lease(lease: Any) -> _Lease:
+        """``holderIdentity``/``renewTime``/``leaseDurationSeconds`` are all
+        OPTIONAL on ``V1LeaseSpec`` (GH #62) — a pre-existing Lease (freshly
+        ``kubectl create``d, or written by another controller) may have any
+        of them unset. Map missing fields to ``_Lease``'s claimable-by-default
+        sentinels instead of blowing up (``float(None)`` et al.) here or,
+        worse, later in ``_Lease.is_stale``/``_hold``.
+        """
         spec = lease.spec
+        duration_seconds = spec.lease_duration_seconds
         return _Lease(
-            holder=spec.holder_identity,
+            holder=spec.holder_identity or "",
             renew_time=spec.renew_time,
-            duration=float(spec.lease_duration_seconds),
+            duration=float(duration_seconds) if duration_seconds is not None else None,
             resource_version=lease.metadata.resource_version,
         )

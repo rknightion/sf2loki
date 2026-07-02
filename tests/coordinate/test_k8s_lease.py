@@ -35,6 +35,25 @@ class FakeClock:
         self.now += timedelta(seconds=seconds)
 
 
+class FakeMonotonic:
+    """Controllable monotonic clock injected as ``monotonic``.
+
+    Separate from :class:`FakeClock` (the wall clock / ``utcnow``) on
+    purpose: the whole point of the observedTime fix (#51) is that lease
+    expiry is judged against THIS clock, never the wall clock either side
+    writes into ``renewTime``.
+    """
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class ScriptedSleep:
     """Instant async sleep that runs a scripted side-effect per call.
 
@@ -77,7 +96,7 @@ class FakeLeaseAdapter:
         self._lease: _Lease | None = None
         self._version = 0
 
-    def seed(self, holder: str, renew_time: datetime, duration: float) -> None:
+    def seed(self, holder: str, renew_time: datetime | None, duration: float | None) -> None:
         self._version += 1
         self._lease = _Lease(
             holder=holder,
@@ -154,6 +173,7 @@ def _coord(
     holder: str = "B",
     utcnow: Callable[[], datetime] | None = None,
     sleep: Callable[[float], object] | None = None,
+    monotonic: Callable[[], float] | None = None,
     cfg: K8sLeaseConfig | None = None,
 ) -> K8sLeaseCoordinator:
     coord = K8sLeaseCoordinator(
@@ -161,6 +181,7 @@ def _coord(
         holder=holder,
         utcnow=utcnow or FakeClock().utcnow,
         sleep=sleep or ScriptedSleep(),  # type: ignore[arg-type]
+        monotonic=monotonic or FakeMonotonic(),
         api_factory=RecordingApiFactory(adapter),  # type: ignore[arg-type]
     )
     coord._api = adapter  # type: ignore[attr-defined]
@@ -188,23 +209,198 @@ async def test_read_existing_lease() -> None:
 
 
 # --------------------------------------------------------------------------
+# Optional Lease fields (#62): holderIdentity/renewTime/leaseDurationSeconds
+# are all OPTIONAL in coordination.k8s.io/v1
+# --------------------------------------------------------------------------
+
+
+def test_lease_is_stale_when_fields_missing() -> None:
+    """Missing renewTime/duration means never-renewed -> immediately
+    claimable; missing holderIdentity means unheld -> also immediately
+    claimable. Only a fully-populated, held lease can be "not stale"."""
+    assert _Lease(holder="", renew_time=None, duration=None, resource_version="1").is_stale(0.0)
+    assert _Lease(holder="A", renew_time=_BASE, duration=None, resource_version="1").is_stale(0.0)
+    assert _Lease(holder="A", renew_time=None, duration=30, resource_version="1").is_stale(0.0)
+    assert _Lease(holder="", renew_time=_BASE, duration=30, resource_version="1").is_stale(0.0)
+
+    held = _Lease(holder="A", renew_time=_BASE, duration=30, resource_version="1")
+    assert held.is_stale(0.0) is False
+    assert held.is_stale(30.0) is True
+
+
+class _FakeV1Meta:
+    def __init__(self, resource_version: str) -> None:
+        self.resource_version = resource_version
+
+
+class _FakeV1Spec:
+    def __init__(
+        self,
+        holder_identity: str | None = None,
+        renew_time: datetime | None = None,
+        lease_duration_seconds: int | None = None,
+    ) -> None:
+        self.holder_identity = holder_identity
+        self.renew_time = renew_time
+        self.lease_duration_seconds = lease_duration_seconds
+
+
+class _FakeV1Lease:
+    def __init__(self, spec: _FakeV1Spec, resource_version: str) -> None:
+        self.spec = spec
+        self.metadata = _FakeV1Meta(resource_version)
+
+
+def test_from_v1_lease_tolerates_all_null_optional_fields() -> None:
+    """A pre-existing Lease with every optional field null (e.g. a bare
+    ``kubectl create``d Lease, or one written by another controller) must not
+    crash the adapter -- it parses into an immediately-claimable, unheld
+    ``_Lease``."""
+    from sf2loki.coordinate.k8s_lease import _RealLeaseAdapter
+
+    v1_lease = _FakeV1Lease(_FakeV1Spec(), resource_version="7")
+
+    lease = _RealLeaseAdapter._from_v1_lease(v1_lease)
+
+    assert lease.holder == ""
+    assert lease.renew_time is None
+    assert lease.duration is None
+    assert lease.resource_version == "7"
+    assert lease.is_stale(0.0) is True
+
+
+def test_from_v1_lease_tolerates_null_duration_only() -> None:
+    from sf2loki.coordinate.k8s_lease import _RealLeaseAdapter
+
+    v1_lease = _FakeV1Lease(
+        _FakeV1Spec(holder_identity="A", renew_time=_BASE, lease_duration_seconds=None),
+        resource_version="2",
+    )
+
+    lease = _RealLeaseAdapter._from_v1_lease(v1_lease)
+
+    assert lease.holder == "A"
+    assert lease.renew_time == _BASE
+    assert lease.duration is None
+    assert lease.is_stale(0.0) is True
+
+
+def test_from_v1_lease_tolerates_null_renew_time_only() -> None:
+    from sf2loki.coordinate.k8s_lease import _RealLeaseAdapter
+
+    v1_lease = _FakeV1Lease(
+        _FakeV1Spec(holder_identity="A", renew_time=None, lease_duration_seconds=30),
+        resource_version="3",
+    )
+
+    lease = _RealLeaseAdapter._from_v1_lease(v1_lease)
+
+    assert lease.holder == "A"
+    assert lease.renew_time is None
+    assert lease.duration == 30.0
+    assert lease.is_stale(0.0) is True
+
+
+async def test_acquire_takes_over_lease_with_null_renew_time_and_duration() -> None:
+    """A pre-existing Lease with a null renewTime/duration is treated as
+    expired/claimable -- not a crash, and not a doomed ``create_lease`` call
+    against an object that already exists (#62)."""
+    adapter = FakeLeaseAdapter()
+    adapter.seed("", None, None)  # unheld, never renewed
+
+    coord = _coord(adapter, holder="B")
+    stop = asyncio.Event()
+
+    acquired = await coord._acquire(stop)
+    assert acquired is not None
+    lease = await coord._read()
+    assert lease is not None
+    assert lease.holder == "B"
+
+
+# --------------------------------------------------------------------------
 # Acquire / takeover
 # --------------------------------------------------------------------------
 
 
 async def test_takeover_after_expiry() -> None:
-    """A standby replaces an expired foreign lease and stamps its own holder."""
+    """A standby replaces a foreign lease once ITS OWN (monotonic) observation
+    window has elapsed since it first saw this resourceVersion -- not merely
+    because the wall-clock renewTime already looks old (the observedTime
+    pattern adopted for #51: the leader's/observer's wall clock is never
+    trusted for expiry)."""
     adapter = FakeLeaseAdapter()
-    adapter.seed("A", _BASE, 30)  # expires at +30s
+    adapter.seed("A", _BASE, 30)  # renewTime already looks stale by wall clock
 
-    clock = FakeClock(_BASE + timedelta(seconds=40))  # well past A's expiry
-    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=ScriptedSleep())
+    clock = FakeClock(_BASE + timedelta(seconds=40))  # observer's wall clock: also past expiry
+    mono = FakeMonotonic()
     stop = asyncio.Event()
 
-    assert await coord._acquire(stop) is not None
+    def advance_past_duration() -> None:
+        mono.advance(30)  # >= lease_duration of OBSERVED (monotonic) time
+
+    sleep = ScriptedSleep([advance_past_duration])
+    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep, monotonic=mono)
+
+    acquired = await coord._acquire(stop)
+    assert acquired is not None
     lease = await coord._read()
     assert lease is not None
     assert lease.holder == "B"
+
+
+async def test_wall_clock_skew_does_not_trigger_premature_takeover() -> None:
+    """A standby whose wall clock races far ahead of the leader's (or whose
+    leader's clock runs slow) must not treat a live, actively-renewed lease as
+    expired just because renewTime + duration is long past by wall clock --
+    expiry is judged purely by how long the OBSERVER has seen this exact
+    resourceVersion on its own monotonic clock (#51)."""
+    adapter = FakeLeaseAdapter()
+    adapter.seed("A", _BASE, 30)  # duration 30s per the (possibly skewed) leader clock
+
+    # The observer's wall clock is wildly ahead of renewTime + duration -- under
+    # the old renew_time-vs-observer-wall-clock comparison this would already
+    # look expired by 970s.
+    clock = FakeClock(_BASE + timedelta(seconds=1000))
+    mono = FakeMonotonic()
+    stop = asyncio.Event()
+
+    def advance_short_of_duration() -> None:
+        mono.advance(29)  # < lease_duration (30) of OBSERVED time
+
+    sleep = ScriptedSleep([advance_short_of_duration, stop.set])
+    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep, monotonic=mono)
+
+    assert await coord._acquire(stop) is None  # never took over
+    lease = await coord._read()
+    assert lease is not None
+    assert lease.holder == "A"
+
+
+async def test_observation_window_resets_when_lease_renews() -> None:
+    """If the leader actually renews (bumping resourceVersion) before the
+    observer's window elapses, the staleness clock resets -- an actively
+    renewed lease is never taken over, no matter how stale it looks by wall
+    clock alone (#51)."""
+    adapter = FakeLeaseAdapter()
+    adapter.seed("A", _BASE, 30)
+
+    clock = FakeClock(_BASE + timedelta(seconds=1000))  # looks ancient by wall clock
+    mono = FakeMonotonic()
+    stop = asyncio.Event()
+
+    def renew_then_advance() -> None:
+        # Would exceed the window if the renewal did NOT reset it.
+        mono.advance(35)
+        adapter.seed("A", clock.now, 30)  # leader renews -> new resourceVersion
+
+    sleep = ScriptedSleep([renew_then_advance, stop.set])
+    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep, monotonic=mono)
+
+    assert await coord._acquire(stop) is None
+    lease = await coord._read()
+    assert lease is not None
+    assert lease.holder == "A"
 
 
 async def test_acquire_absent_lease() -> None:
@@ -270,11 +466,13 @@ async def test_lost_create_race_backs_off() -> None:
 
 
 async def test_lost_replace_race_backs_off() -> None:
-    """409 on replacing an expired foreign lease means we lost the CAS."""
+    """409 on replacing a lease we've observed as stale (via our own
+    monotonic clock, see #51) means we lost the CAS."""
     adapter = FakeLeaseAdapter()
-    adapter.seed("A", _BASE, 30)  # expires at +30s
+    adapter.seed("A", _BASE, 30)
 
     clock = FakeClock(_BASE + timedelta(seconds=40))
+    mono = FakeMonotonic()
     stop = asyncio.Event()
 
     orig_replace = adapter.replace_lease
@@ -292,8 +490,14 @@ async def test_lost_replace_race_backs_off() -> None:
 
     adapter.replace_lease = replace_with_race  # type: ignore[method-assign]
 
-    sleep = ScriptedSleep([None, stop.set])
-    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep)
+    def advance_past_duration() -> None:
+        mono.advance(30)  # reach our own observation window before contesting
+
+    # sleep #0 = standby wait before our observation window elapses;
+    # sleep #1 = back-off after losing the replace race;
+    # sleep #2 = C's freshly-renewed lease resets our window -> stop.
+    sleep = ScriptedSleep([advance_past_duration, None, stop.set])
+    coord = _coord(adapter, holder="B", utcnow=clock.utcnow, sleep=sleep, monotonic=mono)
 
     assert await coord._acquire(stop) is None
     lease = await coord._read()
