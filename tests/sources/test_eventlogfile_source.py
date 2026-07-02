@@ -678,6 +678,111 @@ async def test_persistently_failing_old_file_is_abandoned_past_max_age(
 
 
 @pytest.mark.asyncio
+async def test_mid_file_failure_past_max_age_is_abandoned_and_type_keeps_progressing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Issue #41: a MID-file failure (e.g. csv.Error on an oversized field) on a
+    file older than download_max_age gets the SAME abandon escape as the
+    first-row failure path — previously the mid-file path always returned
+    without abandoning, so the failing file (the watermark boundary) was
+    re-downloaded and re-failed every cycle, wedging the whole EventType."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f_ancient = make_file_meta(id="f_ancient", created_date=_created_ago(timedelta(hours=48)))
+    f_recent = make_file_meta(id="f_recent", created_date=_created_ago(timedelta(hours=1)))
+    client = FakeEventLogFileClient(
+        files=[f_ancient, f_recent],
+        rows_by_id={
+            "f_ancient": [
+                {"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"},
+                {"TIMESTAMP_DERIVED": "20260630010001.000", "ROW": "b"},
+            ],
+            "f_recent": [{"TIMESTAMP_DERIVED": "20260630030000.000", "ROW": "c"}],
+        },
+        mid_stream_errors={"f_ancient"},
+    )
+    cfg = make_elf_cfg(download_max_age=timedelta(hours=24))
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+
+    # Row "a" (before the mid-file fault) still emits with the pre-file
+    # checkpoint; "b" (never confirmed non-last) is discarded along with the
+    # rest of the abandoned file; f_recent still processes normally this same
+    # cycle — the EventType keeps progressing instead of wedging.
+    assert len(entries) == 2
+    assert '"ROW": "a"' in entries[0].line
+    assert '"ROW": "c"' in entries[1].line
+    final_mid = json.loads(entries[-1].checkpoint.value)
+    assert [i for i, _ in final_mid["ids"]] == ["f_ancient", "f_recent"]
+    assert final_mid["last_created"] == f_recent.created_date
+
+    # Next cycle: f_ancient's watermark has been passed, so it is no longer
+    # re-listed/re-downloaded — confirms the type keeps progressing rather
+    # than wedging on the same failing file forever.
+    client.mid_stream_errors.clear()
+    client.download_calls.clear()
+    entries2 = await _run_cycle(source, store)
+    assert entries2 == []
+    assert client.download_calls == []
+
+
+@pytest.mark.asyncio
+async def test_fully_sampled_out_cycle_emits_checkpoint_only_and_advances_watermark(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Issue #64: when every row in a cycle is sampled out, the in-memory
+    cursor still advances past the processed file, but without a
+    checkpoint_only token nothing durable would advance — the next cycle (and
+    every cycle after a restart) would re-list, re-download, and re-drop the
+    exact same file forever."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=1)))
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"}]
+    client = FakeEventLogFileClient(files=[f1], rows_by_id={"f1": rows})
+    cfg = make_elf_cfg(poll_interval=timedelta(0))
+    cfg.event_types[0].sample = 0.0  # deterministically drops every row
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is True
+    assert entries[0].line == ""
+    assert entries[0].labels == {}
+
+    raw = await store.load("eventlogfile:Login")
+    assert raw is not None
+    final_sampled = json.loads(raw)
+    assert [i for i, _ in final_sampled["ids"]] == ["f1"]
+    assert final_sampled["last_created"] == f1.created_date
+
+    # Next cycle: f1 is not re-downloaded — the watermark durably advanced.
+    client.download_calls.clear()
+    entries2 = await _run_cycle(source, store)
+    assert entries2 == []
+    assert client.download_calls == []
+
+
+@pytest.mark.asyncio
+async def test_normal_cycle_does_not_emit_extra_checkpoint_only_entry(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """A cycle where the last emitted entry already carries the final cursor
+    state must NOT also emit a trailing checkpoint_only entry."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f1 = make_file_meta(id="f1", created_date=_created_ago(timedelta(hours=1)))
+    rows = [{"TIMESTAMP_DERIVED": "20260630010000.000", "ROW": "a"}]
+    client = FakeEventLogFileClient(files=[f1], rows_by_id={"f1": rows})
+    cfg = make_elf_cfg()
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+
+    entries = await _run_cycle(source, store)
+
+    assert len(entries) == 1
+    assert entries[0].checkpoint_only is False
+
+
+@pytest.mark.asyncio
 async def test_settle_window_skips_too_fresh_files(
     tmp_path: pytest.TempPathFactory,
 ) -> None:
@@ -703,6 +808,39 @@ async def test_settle_window_skips_too_fresh_files(
     assert len(entries) == 1
     final = json.loads(entries[-1].checkpoint.value)
     assert [i for i, _ in final["ids"]] == ["f_old"]
+
+
+@pytest.mark.asyncio
+async def test_default_hourly_settle_window_defers_recent_file(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Issue #66: EventLogFileConfig auto-defaults settle_window to 5m when
+    interval=Hourly and the operator left it unset (config-level default,
+    already in place). This confirms the SOURCE honours that default
+    end-to-end: a file created within the last 5 minutes is deferred (not
+    downloaded) this cycle, without needing an explicit settle_window."""
+    store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
+    f_fresh = make_file_meta(id="f_fresh", created_date=_created_ago(timedelta(minutes=1)))
+    client = FakeEventLogFileClient(
+        files=[f_fresh],
+        rows_by_id={"f_fresh": [{"TIMESTAMP_DERIVED": "20260630010000.000"}]},
+    )
+    cfg = EventLogFileConfig(
+        enabled=True,
+        interval="Hourly",  # settle_window left unset -> auto-defaults to 5m
+        event_types=["Login"],
+        poll_interval=timedelta(seconds=0),
+        lookback=timedelta(hours=24),
+    )
+    assert cfg.settle_window == timedelta(minutes=5)  # the config-level default landed
+
+    source = EventLogFileSource(cfg, client, sm_fields=[], poll_once=True)  # type: ignore[arg-type]
+    entries = [e async for e in source.events(store, asyncio.Event())]
+
+    # Within the (auto-defaulted) 5m settle window: deferred, not downloaded,
+    # and the checkpoint is untouched (nothing to re-list differently).
+    assert client.download_calls == []
+    assert entries == []
 
 
 # ---------------------------------------------------------------------------
@@ -1469,3 +1607,126 @@ async def test_stop_responsive_with_multiple_concurrent_types(
     # still have completed their current row before noticing `stop`, so we
     # only assert it didn't hang and didn't yield everything from every type.
     assert len(entries) < 4 * 2
+
+
+# ---------------------------------------------------------------------------
+# Per-org clock-skew isolation (issue #68): each EventLogFileClient must track
+# its OWN clock skew even when multiple clients (one per org, in a multi-org
+# deployment) share a single httpx.AsyncClient — a hook registered on the
+# shared client would let one org's response overwrite another's skew.
+
+from datetime import UTC as _UTC  # noqa: E402
+from email.utils import format_datetime as _format_datetime  # noqa: E402
+
+import httpx as _httpx  # noqa: E402
+import respx as _respx  # noqa: E402
+
+from sf2loki.auth.jwt_auth import AccessToken as _AccessToken  # noqa: E402
+from sf2loki.config import SalesforceConfig as _SalesforceConfig  # noqa: E402
+from sf2loki.salesforce.eventlogfile_client import (  # noqa: E402
+    EventLogFileClient as _EventLogFileClient,
+)
+
+
+class _FakeTokenProvider:
+    """Minimal token provider, mirroring tests/salesforce/test_eventlogfile_client.py."""
+
+    def __init__(self, instance_url: str) -> None:
+        self._instance_url = instance_url
+
+    async def token(self) -> _AccessToken:
+        return _AccessToken(
+            value="tok",
+            instance_url=self._instance_url,
+            expires_at=datetime.now(_UTC) + timedelta(hours=1),
+        )
+
+    async def org_id(self) -> str:
+        return "00Dxx"
+
+    def invalidate(self) -> None:
+        pass
+
+
+def _make_sf_cfg() -> _SalesforceConfig:
+    return _SalesforceConfig(
+        client_id="cid", username="svc@example.com", private_key="DUMMYKEY", api_version="60.0"
+    )
+
+
+@pytest.mark.asyncio
+@_respx.mock
+async def test_per_org_clients_on_shared_httpx_client_track_own_clock_skew() -> None:
+    """Two EventLogFileClients (simulating two orgs) sharing ONE httpx.AsyncClient
+    must each capture their own Date-header skew from their OWN LogFile
+    download responses — never via a hook on the shared client, which would
+    let whichever org's response landed last clobber the other's skew."""
+    org_a_meta = EventLogFileMeta(
+        id="0ATa",
+        event_type="Login",
+        interval="Hourly",
+        log_date="2026-06-30T00:00:00.000+0000",
+        created_date="2026-06-30T01:00:00.000+0000",
+        sequence=1,
+        length=10,
+    )
+    org_b_meta = EventLogFileMeta(
+        id="0ATb",
+        event_type="Login",
+        interval="Hourly",
+        log_date="2026-06-30T00:00:00.000+0000",
+        created_date="2026-06-30T01:00:00.000+0000",
+        sequence=1,
+        length=10,
+    )
+
+    now = datetime.now(_UTC)
+    skew_a = timedelta(minutes=10)
+    skew_b = timedelta(minutes=-20)
+
+    def _logfile_url(instance: str, file_id: str) -> str:
+        return f"{instance}/services/data/v60.0/sobjects/EventLogFile/{file_id}/LogFile"
+
+    _respx.get(_logfile_url("https://org-a.my.salesforce.com", "0ATa")).mock(
+        return_value=_httpx.Response(
+            200,
+            text="A,B\r\n1,2\r\n",
+            headers={"Date": _format_datetime(now + skew_a, usegmt=True)},
+        )
+    )
+    _respx.get(_logfile_url("https://org-b.my.salesforce.com", "0ATb")).mock(
+        return_value=_httpx.Response(
+            200,
+            text="A,B\r\n3,4\r\n",
+            headers={"Date": _format_datetime(now + skew_b, usegmt=True)},
+        )
+    )
+
+    async with _httpx.AsyncClient() as shared_client:
+        client_a = _EventLogFileClient(
+            _make_sf_cfg(),
+            _FakeTokenProvider("https://org-a.my.salesforce.com"),
+            shared_client,
+        )
+        client_b = _EventLogFileClient(
+            _make_sf_cfg(),
+            _FakeTokenProvider("https://org-b.my.salesforce.com"),
+            shared_client,
+        )
+
+        assert client_a.clock_skew() is None
+        assert client_b.clock_skew() is None
+
+        rows_a = [r async for r in client_a.download(org_a_meta)]
+        rows_b = [r async for r in client_b.download(org_b_meta)]
+
+    assert rows_a == [{"A": "1", "B": "2"}]
+    assert rows_b == [{"A": "3", "B": "4"}]
+
+    skew_a_seen = client_a.clock_skew()
+    skew_b_seen = client_b.clock_skew()
+    assert skew_a_seen is not None
+    assert skew_b_seen is not None
+    # Each client's own skew, not stomped on by the other's response.
+    assert abs(skew_a_seen - skew_a) < timedelta(seconds=5)
+    assert abs(skew_b_seen - skew_b) < timedelta(seconds=5)

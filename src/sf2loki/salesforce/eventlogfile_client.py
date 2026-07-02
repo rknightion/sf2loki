@@ -42,6 +42,16 @@ _OVERFLOW_KEY = "_extra"
 
 _REQUEST_LIMIT_ERROR_CODE = "REQUEST_LIMIT_EXCEEDED"
 
+# The stdlib csv module caps a single field at 128 KiB by default. ELF
+# free-text columns (QUERY, URI, USER_AGENT, stack traces, ...) can exceed
+# that, making csv.Error deterministic for the whole file (issue #41). Raise
+# it well past the sink's default per-line cap (sink.loki.batch.max_line_bytes,
+# 262144 bytes) — an oversized line is truncated downstream by the sink
+# regardless, so there's no upside to the stdlib's conservative default here.
+# csv.field_size_limit is process-global, so this is set once at import time.
+_CSV_FIELD_SIZE_LIMIT = 4 * 262_144
+csv.field_size_limit(_CSV_FIELD_SIZE_LIMIT)
+
 
 def _as_int(value: object) -> int:
     """Coerce a Salesforce numeric field to int, tolerating floats / float-strings.
@@ -101,17 +111,26 @@ class EventLogFileClient:
         self._metrics = metrics if metrics is not None else Metrics()
         self._soql = SoqlClient(sf_cfg, tokens, client, metrics=self._metrics)
         # Last observed (Salesforce server time - local now), from the Date
-        # response header. Captured via a response event hook on the shared
-        # httpx client because the SOQL listing goes through SoqlClient, which
-        # does not expose response headers — the hook sees every Salesforce
-        # response (listing, discovery, downloads) at zero extra request cost.
+        # response header of this client's OWN requests. Captured PER-REQUEST
+        # (never via a hook registered on the shared httpx client) — a hook on
+        # the shared client fires for every org's responses in a multi-org
+        # deployment, so N clients' hooks would stack and stomp on each
+        # other's `_clock_skew` with whichever org's response landed last
+        # (issue #68). SOQL listing/discovery go through SoqlClient, which
+        # doesn't expose response headers back to this client, so skew is
+        # refreshed only from this client's own LogFile download responses —
+        # sufficient, since the settle/abandon gates only need an occasional
+        # reading of server time, not a per-call one.
         self._clock_skew: timedelta | None = None
-        hooks = dict(client.event_hooks)
-        hooks["response"] = [*hooks.get("response", []), self._capture_server_date]
-        client.event_hooks = hooks
 
-    async def _capture_server_date(self, response: httpx.Response) -> None:
-        """httpx response hook: record clock skew from the Date header, if any."""
+    def _record_server_date(self, response: httpx.Response) -> None:
+        """Record clock skew from *response*'s Date header, if present.
+
+        Called explicitly after every request this client makes itself
+        (currently just LogFile downloads) — never registered as a shared
+        client-wide hook, so this instance's skew can never be overwritten by
+        another org's client sharing the same httpx.AsyncClient.
+        """
         date_header = response.headers.get("Date")
         if not date_header:
             return
@@ -266,6 +285,7 @@ class EventLogFileClient:
             )
             headers = {"Authorization": f"Bearer {tok.value}"}
             async with self._client.stream("GET", url, headers=headers) as response:
+                self._record_server_date(response)
                 if response.status_code == 401 and attempt == 0:
                     self._tokens.invalidate()
                     tok = await self._tokens.token()

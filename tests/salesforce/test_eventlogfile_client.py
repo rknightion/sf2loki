@@ -508,11 +508,15 @@ async def test_download_short_row_fills_missing_columns_with_empty_string() -> N
 async def test_clock_skew_captured_from_date_header() -> None:
     from email.utils import format_datetime
 
+    # Skew is now captured per-request from this client's OWN LogFile download
+    # responses (#68) — NOT via a hook on the shared httpx client, and not from
+    # the SOQL listing (which goes through SoqlClient and exposes no headers).
     server_time = datetime.now(UTC) + timedelta(minutes=10)
-    respx.get(_query_url()).mock(
+    file_meta = make_file_meta()
+    respx.get(_logfile_url(file_meta.id)).mock(
         return_value=httpx.Response(
             200,
-            json={"records": [], "done": True},
+            text="A,B\r\n1,2\r\n",
             headers={"Date": format_datetime(server_time, usegmt=True)},
         )
     )
@@ -521,9 +525,7 @@ async def test_clock_skew_captured_from_date_header() -> None:
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
         assert elf_client.clock_skew() is None  # nothing captured yet
-        await elf_client.list_files(
-            event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
-        )
+        _ = [row async for row in elf_client.download(file_meta)]
         skew = elf_client.clock_skew()
 
     assert skew is not None
@@ -534,16 +536,15 @@ async def test_clock_skew_captured_from_date_header() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_clock_skew_none_without_date_header() -> None:
-    respx.get(_query_url()).mock(
-        return_value=httpx.Response(200, json={"records": [], "done": True})
+    file_meta = make_file_meta()
+    respx.get(_logfile_url(file_meta.id)).mock(
+        return_value=httpx.Response(200, text="A,B\r\n1,2\r\n")
     )
 
     tokens = FakeTokenProvider()
     async with httpx.AsyncClient() as client:
         elf_client = EventLogFileClient(make_sf_cfg(), tokens, client)
-        await elf_client.list_files(
-            event_type="Login", interval="Hourly", since="2026-06-30T00:00:00Z", page_size=10
-        )
+        _ = [row async for row in elf_client.download(file_meta)]
         assert elf_client.clock_skew() is None
 
 

@@ -521,6 +521,13 @@ class EventLogFileSource:
         # processed; it starts as the pre-cycle checkpoint loaded above.
         current_last_created = since
         current_ids = ids
+        # The checkpoint value of the most recently YIELDED entry this cycle
+        # (None if none yet) — used at the end to detect a cursor that
+        # advanced (files processed/abandoned) without any entry actually
+        # carrying that final state downstream (issue #64: e.g. every row
+        # filtered/sampled out, or the last file abandoned past
+        # download_max_age with no rows emitted).
+        last_yielded_value: str | None = None
 
         try:
             files = await self._client.list_files(
@@ -600,6 +607,25 @@ class EventLogFileSource:
 
                 advanced_last_created = file_meta.created_date
                 advanced_ids = _append_carried_id(current_ids, file_meta)
+                # Hoisted once per file (issue #69): every non-last row of this
+                # file shares the identical pre-file checkpoint value, and the
+                # last row shares the identical advanced value — rebuilding
+                # json.dumps(sort_keys=True) per ROW was pure waste over a
+                # window that can hold up to 200 pairs.
+                pre_file_value = json.dumps(
+                    {
+                        "last_created": current_last_created,
+                        "ids": _serialize_carried_ids(current_ids),
+                    },
+                    sort_keys=True,
+                )
+                advanced_value = json.dumps(
+                    {
+                        "last_created": advanced_last_created,
+                        "ids": _serialize_carried_ids(advanced_ids),
+                    },
+                    sort_keys=True,
+                )
 
                 # One-row lookahead: only when the NEXT row is known to exist is
                 # the pending row emitted with the pre-file checkpoint; the final
@@ -616,19 +642,44 @@ class EventLogFileSource:
                             key=key,
                             sm_fields=sm_fields,
                             label_fields=label_fields,
-                            carried_last_created=advanced_last_created,
-                            carried_ids=advanced_ids,
+                            checkpoint_value=advanced_value,
                             sample=type_cfg.sample,
                             ts_fallback=created,
                         )
                         if last_entry is not None:
+                            last_yielded_value = advanced_value
                             yield last_entry
                         break
                     except EventLogFileError as exc:
-                        # Mid-file failure (e.g. CSV parse error): rows emitted so
-                        # far carried the PRE-file checkpoint, so retrying the
-                        # whole file next cycle is safe. Stop the cycle here for
-                        # the same watermark-safety reason as above.
+                        if isinstance(exc, EventLogFileThrottledError):
+                            self._record_cycle_failure(
+                                event_type, f"download of {file_meta.id} (mid-file)", exc
+                            )
+                            return
+                        # A transient mid-file failure (e.g. csv.Error on an
+                        # oversized field, issue #41): rows emitted so far
+                        # carried the PRE-file checkpoint, so retrying the
+                        # whole file next cycle is safe.
+                        age = (now - created) if created is not None else None
+                        if age is not None and age > download_max_age:
+                            # Abandon exactly like the first-row path: the
+                            # unemitted "pending" row (and anything after it)
+                            # is dropped, but the file is still marked
+                            # processed (advanced_last_created/advanced_ids,
+                            # already computed above) via the tail assignment
+                            # below, so it can't wedge the EventType forever.
+                            _log.warning(
+                                "eventlogfile: abandoning file %s after mid-file download "
+                                "failure (created %s, older than download_max_age %s): %s",
+                                file_meta.id,
+                                file_meta.created_date,
+                                download_max_age,
+                                exc,
+                            )
+                            break
+                        # Stop the cycle here for the same watermark-safety
+                        # reason as above: the unprocessed suffix (this file
+                        # and everything after it) is re-listed next cycle.
                         self._record_cycle_failure(
                             event_type, f"download of {file_meta.id} (mid-file)", exc
                         )
@@ -639,12 +690,12 @@ class EventLogFileSource:
                         key=key,
                         sm_fields=sm_fields,
                         label_fields=label_fields,
-                        carried_last_created=current_last_created,
-                        carried_ids=current_ids,
+                        checkpoint_value=pre_file_value,
                         sample=type_cfg.sample,
                         ts_fallback=created,
                     )
                     if entry is not None:
+                        last_yielded_value = pre_file_value
                         yield entry
                     pending = nxt
             finally:
@@ -657,6 +708,31 @@ class EventLogFileSource:
 
             current_last_created, current_ids = advanced_last_created, advanced_ids
 
+        # Issue #64: the cursor may have advanced this cycle (files fully
+        # processed or abandoned past download_max_age) without any yielded
+        # entry actually carrying that final state downstream — e.g. every
+        # row of every file was filtered/sampled out, or the last file was
+        # abandoned mid-file/first-row with no rows emitted. Without a durable
+        # commit here, the next cycle (and every cycle after a restart)
+        # re-fetches and deterministically re-drops/re-abandons the exact same
+        # window forever. Mirrors the pubsub source's keepalive pattern: a
+        # checkpoint_only token rides the same queue/commit path as a real
+        # entry but is never sent to the sink.
+        final_value = json.dumps(
+            {"last_created": current_last_created, "ids": _serialize_carried_ids(current_ids)},
+            sort_keys=True,
+        )
+        cursor_advanced = (current_last_created, current_ids) != (since, ids)
+        if cursor_advanced and final_value != last_yielded_value:
+            yield LogEntry(
+                timestamp=datetime.now(UTC),
+                labels={},
+                line="",
+                structured_metadata={},
+                checkpoint=CheckpointToken(key=key, value=final_value),
+                checkpoint_only=True,
+            )
+
         # The whole type processed without a contained failure: reset escalation.
         self._consecutive_failures.pop(event_type, None)
 
@@ -668,8 +744,7 @@ class EventLogFileSource:
         key: str,
         sm_fields: Sequence[str],
         label_fields: Sequence[str],
-        carried_last_created: str,
-        carried_ids: Sequence[_CarriedId],
+        checkpoint_value: str,
         sample: float,
         ts_fallback: datetime | None = None,
     ) -> LogEntry | None:
@@ -707,13 +782,6 @@ class EventLogFileSource:
             "source": "eventlogfile",
             "event_type": event_type,
         }
-        checkpoint_value = json.dumps(
-            {
-                "last_created": carried_last_created,
-                "ids": _serialize_carried_ids(carried_ids),
-            },
-            sort_keys=True,
-        )
 
         self._metrics.eventlogfile_rows_ingested.labels(event_type=event_type).inc()
 
