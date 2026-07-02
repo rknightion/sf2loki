@@ -118,6 +118,8 @@ logo = "material/upload-network-outline"
 
 [project.plugins.privacy]
 
+[project.plugins.social]
+
 [project.plugins.sitemap]
 changefreq = "weekly"
 priority = 0.8
