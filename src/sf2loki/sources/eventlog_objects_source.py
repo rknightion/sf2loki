@@ -460,6 +460,14 @@ class EventLogObjectsSource:
         data in steady state; a first-run lookback or post-outage catch-up buffers
         the whole window). Large historical backfills are a separate command, not
         this poll path.
+
+        Shutdown note: the drain does not observe ``stop`` between pages, so a
+        large multi-page catch-up runs to completion before the source can react
+        to a shutdown signal (a bounded delay — the window is finite). A mid-drain
+        stop-check is a possible follow-up; it must return an empty window (emit
+        nothing, leave the watermark uncommitted) rather than emit a partial
+        newest slice, which would advance the watermark past the un-drained older
+        records and lose them.
         """
         collected: dict[str, dict[str, object]] = {}
         upper: str | None = None

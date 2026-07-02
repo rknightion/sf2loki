@@ -21,13 +21,18 @@ client, same auth, just a different query path; don't build a second client
 for Tooling queries.
 
 ## BigObjects have restrictive SOQL
-Threat-Detection `*EventStore` objects (queried via `eventlog_objects_source`)
-are BigObjects: you may filter only on **indexed fields, in index order**, and
-`ORDER BY` is limited. This isn't a generic query-builder problem — it's
-handled per-object via a small descriptor of which field is the indexed
-watermark and what's queryable (see the object config in `config.py` /
-DESIGN.md §7). Don't assume an arbitrary `WHERE`/`ORDER BY` will work against
-a BigObject the way it does against a normal sObject.
+The stored RTEM event family (`LoginEvent`, `ApiEvent`, `FileEventStore`,
+Threat-Detection `*EventStore`, ...) are BigObjects: they reject `ORDER BY ASC`
+(the index is DESC-only), expose no `nextRecordsUrl` pagination, and reject
+`COUNT()`/aggregates. Set `big_object: true` per object in config —
+`eventlog_objects_source._drain_big_object` then pages newest-first
+(`ORDER BY <ts> DESC`) with a ratcheting `<=` upper bound, dedups within the
+drain and against the checkpoint id-window, and re-sorts each cycle's window
+ascending before emitting so the watermark/dedup/checkpoint semantics match the
+ASC path (see DESIGN.md §7). `FIELDS(ALL)` itself works on BigObjects; only the
+ASC order was the problem. Standard/custom objects (`LoginHistory`,
+`MyAudit__c`) leave the flag false and use the ASC path. Historical backfill
+beyond the poll window is a deferred follow-up, not this path.
 
 ## EventLogFile CSV parsing is schema-agnostic
 `eventlogfile_client.py` reads each CSV's header (or `LogFileFieldNames`)
