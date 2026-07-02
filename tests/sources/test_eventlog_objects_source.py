@@ -654,9 +654,16 @@ async def test_throttled_aborts_rest_of_cycle(
 @respx.mock
 async def test_per_object_poll_intervals_schedule_independently(
     tmp_path: pytest.TempPathFactory,
+    wait_until: WaitUntil,
 ) -> None:
     """A fast-interval object polls many times while a slow-interval object in
-    the same source polls only once (its next due time is far in the future)."""
+    the same source polls only once (its next due time is far in the future).
+
+    Condition-driven (wait for the fast object to reach N polls) rather than a
+    fixed real sleep, so it is deterministic under a loaded event loop: the slow
+    object (10s interval) is due only at startup, so it is 1 by the time the fast
+    object (20ms interval) has polled several times — no wall-clock dependence.
+    """
     store = FileCheckpointStore(tmp_path / "state.json")  # type: ignore[arg-type]
     calls: dict[str, int] = {"LoginEvent": 0, "ApiEvent": 0}
 
@@ -691,11 +698,13 @@ async def test_per_object_poll_intervals_schedule_independently(
                 pass
 
         task = asyncio.create_task(consume())
-        await asyncio.sleep(0.3)
+        # Wait until the fast object has polled several times (bounded, not a
+        # fixed sleep); the slow object cannot come due again within the test.
+        await wait_until(lambda: calls["LoginEvent"] >= 4)
         stop.set()
         await asyncio.wait_for(task, timeout=1.0)
 
-    # The slow object is due only once in 0.3s; the fast one many times.
+    # The slow object is due only at startup; the fast one many times.
     assert calls["ApiEvent"] == 1
     assert calls["LoginEvent"] >= 4
 
