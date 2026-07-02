@@ -464,6 +464,33 @@ class Metrics:
                 description="Failed SOQL poll cycles, per source and object/event type",
             )
         )
+        self.apexlog_logs_ingested = _Counter(
+            meter.create_counter(
+                "sf2loki_apexlog_logs_ingested",
+                description="ApexLog debug logs ingested",
+            )
+        )
+        self.apexlog_download_bytes = _Counter(
+            meter.create_counter(
+                "sf2loki_apexlog_download_bytes",
+                description="Bytes downloaded from ApexLog Body endpoints",
+            )
+        )
+        self.apexlog_bodies_skipped = _Counter(
+            meter.create_counter(
+                "sf2loki_apexlog_bodies_skipped",
+                description=(
+                    "ApexLog bodies not shipped (over max_body_bytes or download error), "
+                    "per reason"
+                ),
+            )
+        )
+        self.apexlog_download_errors = _Counter(
+            meter.create_counter(
+                "sf2loki_apexlog_download_errors",
+                description="ApexLog body download errors, per reason",
+            )
+        )
         self.timestamp_fallbacks = _Counter(
             meter.create_counter(
                 "sf2loki_timestamp_fallbacks",
