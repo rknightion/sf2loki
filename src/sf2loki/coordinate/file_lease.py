@@ -1,11 +1,12 @@
 """File-lease :class:`Coordinator`: active-passive failover on shared storage.
 
-The leader owns a small JSON lease document — ``{"holder", "expires_at"}`` —
-on storage shared by every replica (NFS/EFS/a shared volume). It renews the
-lease (rewrites ``expires_at``) faster than the ttl; a standby takes over once
-the lease has gone stale. Expiry is **wall-clock** because it must be compared
-across hosts, so the deployment must keep the replicas NTP-synced and set the
-ttl comfortably above worst-case clock skew (see :class:`FileLeaseConfig`).
+The leader owns a small JSON lease document — ``{"holder", "expires_at",
+"epoch"}`` — on storage shared by every replica (NFS/EFS/a shared volume). It
+renews the lease (rewrites ``expires_at``) faster than the ttl; a standby
+takes over once the lease has gone stale. Expiry is **wall-clock** because it
+must be compared across hosts, so the deployment must keep the replicas
+NTP-synced and set the ttl comfortably above worst-case clock skew (see
+:class:`FileLeaseConfig`).
 
 Advisory ``flock`` is deliberately not used: it is unreliable over NFS and does
 not survive the holder disappearing without a clean release. Lease-expiry with
@@ -16,6 +17,19 @@ Races are resolved by "last writer wins on rename" plus a verification re-read:
 two standbys can both rename their tmp file over an expired lease; whichever
 landed last owns it, so after writing we pause briefly and re-read — if the
 holder is no longer us, we lost the race and back off.
+
+``_read`` distinguishes a genuinely absent/corrupt lease (``None`` — safe to
+treat as claimable) from a transient I/O error reading it (``_LeaseReadError``
+— we can't tell if a live holder exists, so never guess: back off instead of
+contesting in ``_acquire``, and go through the same pause+verify discipline as
+a contested rename in ``_hold`` rather than blindly rewriting).
+
+``epoch`` is a monotonically increasing integer fence token written into the
+lease: it bumps by one on every *winning* acquire/takeover and is otherwise
+preserved verbatim across renewals in ``_hold``. It is exposed via the
+``epoch`` property so a checkpoint store can reject a stale leader's commit
+even when the leader's local ``is_leader`` boolean hasn't yet noticed it lost
+the lease (see ``base.StateFenceError`` / README HA section).
 """
 
 from __future__ import annotations
@@ -56,9 +70,20 @@ def _default_utcnow() -> datetime:
 class _Lease:
     holder: str
     expires_at: datetime
+    epoch: int = 0
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
+
+
+class _LeaseReadError(RuntimeError):
+    """A transient (non-``FileNotFoundError``) ``OSError`` reading the lease.
+
+    Raised by :meth:`FileLeaseCoordinator._read` instead of folding into
+    ``None`` so callers can distinguish "genuinely absent, safe to claim"
+    from "can't tell right now" (e.g. a flaky NFS mount) and avoid a false
+    takeover of a lease that may still be live.
+    """
 
 
 class FileLeaseCoordinator:
@@ -88,6 +113,7 @@ class FileLeaseCoordinator:
             _VERIFY_MAX, max(_VERIFY_MIN, self._renew * _VERIFY_FRACTION)
         )
         self._is_leader: bool = False
+        self._epoch: int = 0
 
     # ------------------------------------------------------------------
     # Fencing contract (consumed by the state store via set_fence)
@@ -112,6 +138,13 @@ class FileLeaseCoordinator:
     @property
     def holder(self) -> str:
         return self._holder
+
+    @property
+    def epoch(self) -> int:
+        """The fence epoch of the lease currently held; 0 before the first
+        acquisition. Bumped on every winning acquire/takeover, preserved
+        across renewals — see the module docstring."""
+        return self._epoch
 
     # ------------------------------------------------------------------
     # Coordinator protocol
@@ -151,13 +184,29 @@ class FileLeaseCoordinator:
     async def _acquire(self, stop: asyncio.Event) -> bool:
         """Block until this instance owns the lease; return False if stop fires."""
         while not stop.is_set():
-            lease = self._read()
+            try:
+                lease = self._read()
+            except _LeaseReadError as exc:
+                # Can't tell whether a holder is live right now -- a transient
+                # read error is NOT "absent". Never guess: back off and
+                # re-poll exactly like a live foreign holder, without
+                # contesting anything.
+                log.warning(
+                    "cannot read file lease; backing off without contesting",
+                    error=str(exc),
+                )
+                if await self._pause(self._renew, stop):
+                    return False
+                continue
             now = self._utcnow()
             if lease is None or lease.expired(now):
                 # Contest the (absent/expired) lease, then verify we won the
-                # rename race before declaring leadership.
+                # rename race before declaring leadership. The new epoch is
+                # one past whatever epoch the lease we're superseding carried
+                # (0 if it was genuinely absent).
+                new_epoch = (lease.epoch if lease is not None else 0) + 1
                 try:
-                    self._write(now)
+                    self._write(now, new_epoch)
                 except OSError as exc:
                     log.warning("cannot write file lease; retrying", error=str(exc))
                     if await self._pause(self._renew, stop):
@@ -165,12 +214,16 @@ class FileLeaseCoordinator:
                     continue
                 if await self._pause(self._verify_delay, stop):
                     return False
-                confirm = self._read()
+                try:
+                    confirm = self._read()
+                except _LeaseReadError:
+                    confirm = None
                 if (
                     confirm is not None
                     and confirm.holder == self._holder
                     and not confirm.expired(self._utcnow())
                 ):
+                    self._epoch = confirm.epoch
                     return True
                 # Lost the race to another standby: back off and retry.
                 log.info("lost file-lease race; backing off", holder=self._holder)
@@ -193,8 +246,21 @@ class FileLeaseCoordinator:
                 return
             now = self._utcnow()
             # Re-read before renewing: a foreign holder means we were fenced out
-            # during a pause/GC gap — surrender immediately.
-            lease = self._read()
+            # during a pause/GC gap — surrender immediately. A missing or
+            # unreadable lease (deleted out from under us, or a transient I/O
+            # error) is NOT "safe to blindly rewrite": it's treated as
+            # CONTESTED, same as _acquire — pause + verify-read before
+            # deciding, so a concurrent standby's claim during that window is
+            # honored instead of clobbered.
+            try:
+                lease = self._read()
+            except _LeaseReadError as exc:
+                log.warning(
+                    "cannot read file lease before renew; treating as contested",
+                    holder=self._holder,
+                    error=str(exc),
+                )
+                lease = None
             if lease is not None and lease.holder != self._holder:
                 log.warning(
                     "file lease taken over by another holder; surrendering",
@@ -202,8 +268,23 @@ class FileLeaseCoordinator:
                     new_holder=lease.holder,
                 )
                 return
+            if lease is None:
+                if await self._pause(self._verify_delay, stop):
+                    return
+                try:
+                    verify = self._read()
+                except _LeaseReadError:
+                    verify = None
+                if verify is not None and verify.holder != self._holder:
+                    log.warning(
+                        "file lease taken over while unreadable/absent; surrendering",
+                        holder=self._holder,
+                        new_holder=verify.holder,
+                    )
+                    return
+                now = self._utcnow()
             try:
-                self._write(now)
+                self._write(now, self._epoch)
                 last_ok = now
             except OSError as exc:
                 # Can't reach shared storage. Tolerate transient failures, but
@@ -244,14 +325,21 @@ class FileLeaseCoordinator:
     # Lease file I/O
 
     def _read(self) -> _Lease | None:
-        """Read + parse the lease; None if absent or unparseable (→ takeover)."""
+        """Read + parse the lease.
+
+        ``None`` means genuinely absent (``FileNotFoundError``) or corrupt/
+        unparseable content — both are "no claim to honor", safe to treat as
+        claimable. Any other ``OSError`` raises :class:`_LeaseReadError`
+        instead, so callers never conflate "can't tell right now" with
+        "absent". A lease document with no ``epoch`` field (written before
+        this field existed) defaults to epoch 0.
+        """
         try:
             raw = self._path.read_text()
         except FileNotFoundError:
             return None
         except OSError as exc:
-            log.warning("cannot read file lease; treating as absent", error=str(exc))
-            return None
+            raise _LeaseReadError(str(exc)) from exc
         try:
             data = json.loads(raw)
         except json.JSONDecodeError, UnicodeDecodeError:
@@ -268,12 +356,16 @@ class FileLeaseCoordinator:
             return None
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
-        return _Lease(holder=holder, expires_at=expires_at)
+        epoch_raw = data.get("epoch", 0)
+        epoch = epoch_raw if isinstance(epoch_raw, int) else 0
+        return _Lease(holder=holder, expires_at=expires_at, epoch=epoch)
 
-    def _write(self, now: datetime) -> None:
-        """Atomically (tmp + rename) write our holder + ``now + ttl`` expiry."""
+    def _write(self, now: datetime, epoch: int) -> None:
+        """Atomically (tmp + rename) write our holder + ``now + ttl`` expiry + epoch."""
         expires_at = now + timedelta(seconds=self._ttl)
-        payload = json.dumps({"holder": self._holder, "expires_at": expires_at.isoformat()})
+        payload = json.dumps(
+            {"holder": self._holder, "expires_at": expires_at.isoformat(), "epoch": epoch}
+        )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
         try:
