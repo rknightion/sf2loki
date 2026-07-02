@@ -387,6 +387,18 @@ class PubSubConfig(StrictModel):
             "shaping (see TransformRule)."
         ),
     )
+    bridge_max_bytes: int = Field(
+        default=134_217_728,
+        ge=0,
+        description=(
+            "Approximate byte budget for the Pub/Sub source's internal topic->events "
+            "bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch."
+            "queue_max_bytes. Topic tasks block (structural backpressure, propagated to "
+            "flow-control credits) once the bridged-but-undrained bytes exceed this, so "
+            "a sink outage can't balloon per-org buffering past the count bound. Default "
+            "128 MiB; 0 disables byte accounting on the bridge."
+        ),
+    )
 
 
 # SOQL identifier safety: object/field/EventType names are interpolated into
@@ -433,6 +445,19 @@ class EventLogObjectConfig(StrictModel):
             "timestamp_field DESC) with a ratcheting upper bound and re-sorts each "
             "cycle's window ascending before emitting. Leave false for standard and "
             "custom objects (LoginHistory, MyAudit__c), which use the ASC path."
+        ),
+    )
+    max_catchup_records: int = Field(
+        default=200_000,
+        ge=0,
+        description=(
+            "Cap on records collected into memory per big_object DESC drain cycle. "
+            "The drain buffers a cycle's window in memory to re-sort it ascending; a "
+            "post-outage catch-up over a large gap would otherwise be unbounded and "
+            "can OOM. When the cap is hit the drain emits that (internally sorted) "
+            "segment and ratchets its upper bound down so catch-up proceeds in bounded "
+            "chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the "
+            "ASC path (streamed page-by-page, already bounded)."
         ),
     )
 
@@ -687,8 +712,10 @@ class EventLogFileConfig(StrictModel):
         default=timedelta(0),
         description=(
             "Skip files whose CreatedDate is newer than now-settle_window, so we don't "
-            "pull a half-written hourly CSV. 0 disables (safe for Daily); use a few "
-            "minutes for Hourly."
+            "pull a half-written hourly CSV whose tail rows would then be skipped when "
+            "the watermark passes it. Left unset it defaults to 5m for interval: Hourly "
+            "(Hourly blobs can be listed while server-side incomplete) and 0 for Daily "
+            "(files land long after the day closes). Set explicitly to override either."
         ),
     )
     download_max_age: Duration = Field(
@@ -719,6 +746,17 @@ class EventLogFileConfig(StrictModel):
     def discover(self) -> bool:
         """True when the wildcard "*" is present — ingest all discovered EventTypes."""
         return any(t.name == EVENT_TYPE_WILDCARD for t in self.event_types)
+
+    @model_validator(mode="after")
+    def _default_hourly_settle_window(self) -> EventLogFileConfig:
+        # Hourly EventLogFile blobs can be listed while Salesforce is still writing
+        # them; if ingested incomplete and the watermark then passes, the missing
+        # tail rows are permanently skipped. Default a conservative settle window
+        # for Hourly (only when the operator left it unset) as cheap insurance;
+        # Daily files land long after the day closes and stay at 0.
+        if "settle_window" not in self.model_fields_set and self.interval == "Hourly":
+            self.settle_window = timedelta(minutes=5)
+        return self
 
     @model_validator(mode="after")
     def _require_event_types_when_enabled(self) -> EventLogFileConfig:
@@ -941,9 +979,6 @@ class LokiConfig(StrictModel):
 
 
 class SinkConfig(StrictModel):
-    type: Literal["loki"] = Field(
-        default="loki", description="Sink backend (only loki is supported)."
-    )
     loki: LokiConfig = Field(description="Loki sink settings.")
 
 

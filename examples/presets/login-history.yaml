@@ -75,7 +75,6 @@ sources:
   #                             # checkpoint (default 24h)
 
 sink:
-  type: loki
   loki:
     url: https://logs-prod-xx.grafana.net/loki/api/v1/push
     tenant_id: "123456"

@@ -90,6 +90,7 @@ orgs:  # Multi-org list: ingest several Salesforce orgs from one process into on
             pattern: null  # regex_replace only: the regular expression to replace (must compile).
             replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
             name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+        bridge_max_bytes: 134217728  # Approximate byte budget for the Pub/Sub source's internal topic->events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge.
       # Use for categories you'd rather poll than stream (or that have no stream).
       # Do NOT also stream the same category.
       eventlog_objects:  # Event-object SOQL polling source.
@@ -101,6 +102,7 @@ orgs:  # Multi-org list: ingest several Salesforce orgs from one process into on
             lookback: 1h  # Initial window to fetch on first run (no checkpoint).
             sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
             big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
+            max_catchup_records: 200000  # Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded).
         # Rules run on the decoded payload BEFORE field routing, label promotion,
         # and timestamp extraction — so redacting the timestamp column triggers the
         # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
@@ -151,7 +153,7 @@ orgs:  # Multi-org list: ingest several Salesforce orgs from one process into on
         lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
         timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
         page_size: 1000  # SOQL LIMIT for the file-listing query.
-        settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly.
+        settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either.
         download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
         # Rules run on the decoded payload BEFORE field routing, label promotion,
         # and timestamp extraction — so redacting the timestamp column triggers the
@@ -222,6 +224,7 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
         pattern: null  # regex_replace only: the regular expression to replace (must compile).
         replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
         name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+    bridge_max_bytes: 134217728  # Approximate byte budget for the Pub/Sub source's internal topic->events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge.
   # Use for categories you'd rather poll than stream (or that have no stream).
   # Do NOT also stream the same category.
   eventlog_objects:  # Event-object SOQL polling source.
@@ -233,6 +236,7 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
         lookback: 1h  # Initial window to fetch on first run (no checkpoint).
         sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
         big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
+        max_catchup_records: 200000  # Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded).
     # Rules run on the decoded payload BEFORE field routing, label promotion,
     # and timestamp extraction — so redacting the timestamp column triggers the
     # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
@@ -283,7 +287,7 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
     lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
     timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
     page_size: 1000  # SOQL LIMIT for the file-listing query.
-    settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly.
+    settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either.
     download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
     # Rules run on the decoded payload BEFORE field routing, label promotion,
     # and timestamp extraction — so redacting the timestamp column triggers the
@@ -324,7 +328,6 @@ sources:  # Single-org event source selection and settings. Ignored (and rejecte
   # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
   transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
 sink:  # Log sink settings.
-  type: loki  # Sink backend (only loki is supported).
   # Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+
   # tenant_id + auth_token). Self-hosted: http://loki:3100/loki/api/v1/push (+
   # tenant_id -> X-Scope-OrgID). Local Alloy:

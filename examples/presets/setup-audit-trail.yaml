@@ -35,7 +35,6 @@ sources:
   # for sources.eventlogfile.
 
 sink:
-  type: loki
   loki:
     url: https://logs-prod-xx.grafana.net/loki/api/v1/push
     tenant_id: "123456"

@@ -414,6 +414,34 @@ class Metrics:
                 description="Unix ts of the current polling watermark, per source/object",
             )
         )
+        self.watermark_stalls = _Counter(
+            meter.create_counter(
+                "sf2loki_watermark_stalls",
+                description=(
+                    "Poll cycles that made no progress because a full page shared one "
+                    "timestamp boundary (a compound-cursor stall would silently drop "
+                    "newer data), per source/object"
+                ),
+            )
+        )
+        self.pubsub_decode_stalls = _Counter(
+            meter.create_counter(
+                "sf2loki_pubsub_decode_stalls",
+                description=(
+                    "Topics stuck making zero progress — consecutive batches at 100% "
+                    "decode failure, or repeated schema-fetch failures — per topic"
+                ),
+            )
+        )
+        self.checkpoint_load_errors = _Counter(
+            meter.create_counter(
+                "sf2loki_checkpoint_load_errors",
+                description=(
+                    "Stored checkpoint values that failed to load/decode and fell back "
+                    "to a replay preset / lookback, per source"
+                ),
+            )
+        )
         self.auth_refreshes = _Counter(
             meter.create_counter(
                 "sf2loki_auth_refreshes", description="Total Salesforce OAuth token refreshes"

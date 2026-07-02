@@ -63,7 +63,6 @@ sources:
                                                     # this, so it can't wedge the checkpoint
 
 sink:
-  type: loki
   loki:
     url: ${GC_LOKI}                                # https://logs-prod-035.grafana.net/loki/api/v1/push
     tenant_id: ${GC_LOKI_USER}                     # 1644459

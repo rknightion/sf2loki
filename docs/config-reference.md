@@ -71,6 +71,7 @@
 | `rediscovery_interval` | `Duration` | 1h | no | How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup). |
 | `sample` | `dict[str, typing.Annotated[float, FieldInfo(annotation=NoneType, required=True, metadata=[Gt(gt=0.0), Le(le=1.0)])]]` | {/event/ApiEventStream: 0.25} | no | Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints. |
 | `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule). |
+| `bridge_max_bytes` | `int` | 134217728 | no | Approximate byte budget for the Pub/Sub source's internal topic->events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge. |
 
 ## TransformRule
 
@@ -101,6 +102,7 @@
 | `lookback` | `Duration` | 1h | no | Initial window to fetch on first run (no checkpoint). |
 | `sample` | `float` | 1.0 | no | Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything. |
 | `big_object` | `bool` | false | no | Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path. |
+| `max_catchup_records` | `int` | 200000 | no | Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded). |
 
 ## EventLogFileConfig
 
@@ -114,7 +116,7 @@
 | `lookback` | `Duration` | 1d | no | Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files. |
 | `timestamp_column` | `str` | TIMESTAMP_DERIVED | no | Per-row event time column. |
 | `page_size` | `int` | 1000 | no | SOQL LIMIT for the file-listing query. |
-| `settle_window` | `Duration` | 0s | no | Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV. 0 disables (safe for Daily); use a few minutes for Hourly. |
+| `settle_window` | `Duration` | 0s | no | Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either. |
 | `download_max_age` | `Duration` | 1d | no | A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried. |
 | `transforms` | `list[TransformRule]` |  | no | Redaction/filter rules applied to each CSV row before shaping (see TransformRule). |
 | `concurrency` | `int` | 4 | no | Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool. |
@@ -144,7 +146,6 @@
 
 | Field | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `type` | `Literal['loki']` | loki | no | Sink backend (only loki is supported). |
 | `loki` | `LokiConfig` |  | yes | Loki sink settings. |
 
 ## LokiConfig

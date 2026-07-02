@@ -55,7 +55,6 @@ sources:
     sample: {/data/AccountChangeEvent: 0.25}
 
 sink:
-  type: loki
   loki:
     url: https://logs-prod-xx.grafana.net/loki/api/v1/push
     tenant_id: "123456"

@@ -224,9 +224,28 @@ def test_eventlogfile_config_defaults() -> None:
     assert cfg.lookback == timedelta(hours=24)
     assert cfg.timestamp_column == "TIMESTAMP_DERIVED"
     assert cfg.page_size == 1000
-    # Resiliency knobs (ko.md §7.4): settle disabled by default; abandon after 24h.
-    assert cfg.settle_window == timedelta(0)
+    # Resiliency knobs: settle_window auto-defaults to 5m for the (default) Hourly
+    # interval — Hourly blobs can be listed while server-side incomplete (#66);
+    # abandon after 24h.
+    assert cfg.settle_window == timedelta(minutes=5)
     assert cfg.download_max_age == timedelta(hours=24)
+
+
+def test_eventlogfile_hourly_settle_window_defaults_and_overrides() -> None:
+    # Unset on Hourly (the default interval) → 5m insurance against incomplete blobs.
+    hourly = EventLogFileConfig(enabled=True, event_types=["Login"], interval="Hourly")
+    assert hourly.settle_window == timedelta(minutes=5)
+    # Daily files land long after the day closes → stays 0.
+    daily = EventLogFileConfig(enabled=True, event_types=["Login"], interval="Daily")
+    assert daily.settle_window == timedelta(0)
+    # An explicit value always wins, even 0 on Hourly.
+    explicit_zero = EventLogFileConfig(
+        enabled=True,
+        event_types=["Login"],
+        interval="Hourly",
+        settle_window="0s",  # type: ignore[arg-type]
+    )
+    assert explicit_zero.settle_window == timedelta(0)
 
 
 def test_eventlogfile_resiliency_durations_parse() -> None:
