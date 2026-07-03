@@ -1,0 +1,3616 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Streams Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable.">
+      
+      
+        <meta name="author" content="Rob Knighton">
+      
+      
+        <link rel="canonical" href="https://m7kni.io/sf2loki/config-reference/">
+      
+      
+        <link rel="prev" href="../configuration/">
+      
+      
+        <link rel="next" href="../configuration/presets/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.27">
+    
+    
+  
+  
+    <title>sf2loki configuration reference - sf2loki</title>
+  
+
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.50057488.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.dfe2e883.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../stylesheets/brand.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  
+
+  
+  
+    
+  
+
+  
+    
+  
+
+  
+    
+  
+
+  
+
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="theme-color" content="#2563eb">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="sf2loki">
+  <meta property="og:title" content="sf2loki configuration reference - sf2loki">
+  <meta property="og:description" content="Streams Salesforce Event Monitoring data (Pub&#x2f;Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable.">
+  <meta property="og:url" content="https://m7kni.io/sf2loki/config-reference/">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:image" content="https://m7kni.io/sf2loki/assets/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="sf2loki social preview card">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="sf2loki configuration reference - sf2loki">
+  <meta name="twitter:description" content="Streams Salesforce Event Monitoring data (Pub&#x2f;Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable.">
+  <meta name="twitter:image" content="https://m7kni.io/sf2loki/assets/social-card.png">
+  <meta name="twitter:site" content="@rknightion">
+  <meta name="twitter:creator" content="@rknightion">
+
+  
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "sf2loki",
+    "description": "Streams Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable.",
+    "url": "https://m7kni.io/sf2loki/",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Cross-platform",
+    "codeRepository": "https://github.com/rknightion/sf2loki",
+    "isAccessibleForFree": true,
+    "author": {
+      "@type": "Organization",
+      "name": "Rob Knighton",
+      "url": "https://github.com/rknightion"
+    }
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "Rob Knighton",
+    "url": "https://github.com/rknightion",
+    "sameAs": [
+      "https://github.com/rknightion",
+      "https://m7kni.io"
+    ]
+  }
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#sf2loki-configuration-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="sf2loki" class="md-header__button md-logo" aria-label="sf2loki" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M15 20a1 1 0 0 0-1-1h-1v-2h4a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4v2h-1a1 1 0 0 0-1 1H2v2h7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1h7v-2zm-8-5V5h10v10zm5-9-4 4h3v4h2v-4h3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            sf2loki
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              sf2loki configuration reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 7H7a5 5 0 0 0-5 5 5 5 0 0 0 5 5h10a5 5 0 0 0 5-5 5 5 0 0 0-5-5m0 8a3 3 0 0 1-3-3 3 3 0 0 1 3-3 3 3 0 0 1 3 3 3 3 0 0 1-3 3"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 6H7c-3.31 0-6 2.69-6 6s2.69 6 6 6h10c3.31 0 6-2.69 6-6s-2.69-6-6-6m0 10H7c-2.21 0-4-1.79-4-4s1.79-4 4-4h10c2.21 0 4 1.79 4 4s-1.79 4-4 4M7 9c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/rknightion/sf2loki" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    rknightion/sf2loki
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
+  
+  Home
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../getting-started/" class="md-tabs__link">
+        
+  
+  Getting Started
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../installation/" class="md-tabs__link">
+        
+  
+  Installation
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../configuration/" class="md-tabs__link">
+          
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../sources/" class="md-tabs__link">
+          
+  
+  Sources
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../architecture/" class="md-tabs__link">
+        
+  
+  Architecture
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../deployment/" class="md-tabs__link">
+          
+  
+  Deployment & Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../observability/metrics/" class="md-tabs__link">
+          
+  
+  Observability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../reference/cli/" class="md-tabs__link">
+        
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../troubleshooting/" class="md-tabs__link">
+        
+  
+  Troubleshooting
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../security/" class="md-tabs__link">
+        
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../glossary/" class="md-tabs__link">
+        
+  
+  Glossary
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../changelog/" class="md-tabs__link">
+        
+  
+  Changelog
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../development/contributing/" class="md-tabs__link">
+          
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="sf2loki" class="md-nav__button md-logo" aria-label="sf2loki" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M15 20a1 1 0 0 0-1-1h-1v-2h4a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4v2h-1a1 1 0 0 0-1 1H2v2h7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1h7v-2zm-8-5V5h10v10zm5-9-4 4h3v4h2v-4h3z"/></svg>
+
+    </a>
+    sf2loki
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/rknightion/sf2loki" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    rknightion/sf2loki
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="./.." class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Home
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../configuration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Reference
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+  
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#config" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#salesforceconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SalesforceConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#salesforcelimitsconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SalesforceLimitsConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#orgconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OrgConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sourcesconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SourcesConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pubsubconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PubSubConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transformrule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TransformRule
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#eventlogobjectsconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventLogObjectsConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#eventlogobjectconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventLogObjectConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#eventlogfileconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventLogFileConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#eventlogfiletypeconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EventLogFileTypeConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#apexlogconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ApexLogConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sinkconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SinkConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lokiconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LokiConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lokibatchconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LokiBatchConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#egressconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EgressConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        StateConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#filestateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FileStateConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#s3stateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        S3StateConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gcsstateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GcsStateConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#coordinateconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CoordinateConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fileleaseconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FileLeaseConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#k8sleaseconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        K8sLeaseConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#serviceconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ServiceConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetryconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TelemetryConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/presets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Presets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sources/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sources
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Sources
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/pubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pub/Sub Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/eventlog-objects/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SOQL-Polled Objects
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/eventlogfile/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventLogFile
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/apexlog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ApexLog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/pii-and-sampling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    PII Redaction & Sampling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sources/cost-controls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Controls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../deployment/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment & Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment & Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/high-availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State & Checkpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Observability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboards
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/alerts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alerts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_14" >
+        
+          
+          <label class="md-nav__link" for="__nav_14" id="__nav_14_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/release-process/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/generate-activity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synthetic Activity Tool
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="./.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    sf2loki
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../configuration/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Configuration
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+  
+    <a href="https://github.com/rknightion/sf2loki/edit/main/docs/config-reference.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.71 7.04c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.37-.39-1.02-.39-1.41 0l-1.84 1.83 3.75 3.75M3 17.25V21h3.75L17.81 9.93l-3.75-3.75z"/></svg>
+    </a>
+  
+  
+    
+      
+    
+    <a href="https://github.com/rknightion/sf2loki/raw/main/docs/config-reference.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0 8a5 5 0 0 1-5-5 5 5 0 0 1 5-5 5 5 0 0 1 5 5 5 5 0 0 1-5 5m0-12.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5"/></svg>
+    </a>
+  
+
+
+<h1 id="sf2loki-configuration-reference">sf2loki configuration reference<a class="headerlink" href="#sf2loki-configuration-reference" title="Anchor link to this section for reference">&para;</a></h1>
+<h2 id="config">Config<a class="headerlink" href="#config" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>salesforce</code></td>
+<td><code>SalesforceConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Single-org Salesforce connection and authentication. Set this OR <code>orgs</code> (exactly one). Omit when using the multi-org <code>orgs</code> list.</td>
+</tr>
+<tr>
+<td><code>orgs</code></td>
+<td><code>list[OrgConfig]</code></td>
+<td></td>
+<td>no</td>
+<td>Multi-org list: ingest several Salesforce orgs from one process into one shared sink. Set this OR top-level <code>salesforce</code> (exactly one). Each entry carries its own salesforce + sources; the sink/state/service stay shared.</td>
+</tr>
+<tr>
+<td><code>sources</code></td>
+<td><code>SourcesConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Single-org event source selection and settings. Ignored (and rejected if customized) when <code>orgs</code> is used — put per-org sources under each org.</td>
+</tr>
+<tr>
+<td><code>sink</code></td>
+<td><code>SinkConfig</code></td>
+<td></td>
+<td>yes</td>
+<td>Log sink settings.</td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td><code>StateConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Checkpoint/state store settings.</td>
+</tr>
+<tr>
+<td><code>coordinate</code></td>
+<td><code>CoordinateConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Leadership coordination for active-passive HA.</td>
+</tr>
+<tr>
+<td><code>service</code></td>
+<td><code>ServiceConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Application-level service settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="salesforceconfig">SalesforceConfig<a class="headerlink" href="#salesforceconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>login_url</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Optional: derived from <code>environment</code> when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.</td>
+</tr>
+<tr>
+<td><code>environment</code></td>
+<td><code>Literal['production', 'sandbox']</code></td>
+<td>production</td>
+<td>no</td>
+<td>production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.</td>
+</tr>
+<tr>
+<td><code>auth_mode</code></td>
+<td><code>Literal['jwt_bearer', 'client_credentials']</code></td>
+<td>jwt_bearer</td>
+<td>no</td>
+<td>jwt_bearer (private key + cert) | client_credentials (consumer key + secret).</td>
+</tr>
+<tr>
+<td><code>client_id</code></td>
+<td><code>str</code></td>
+<td>${SF_CLIENT_ID}</td>
+<td>yes</td>
+<td>External Client App consumer key.</td>
+</tr>
+<tr>
+<td><code>client_secret</code></td>
+<td><code>SecretStr</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.</td>
+</tr>
+<tr>
+<td><code>client_secret_file</code></td>
+<td><code>Path</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>File path to the client_credentials secret; required when auth_mode: client_credentials.</td>
+</tr>
+<tr>
+<td><code>username</code></td>
+<td><code>str</code></td>
+<td>svc@example.com</td>
+<td>no</td>
+<td>Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT <code>sub</code> claim); not needed when auth_mode: client_credentials.</td>
+</tr>
+<tr>
+<td><code>private_key_file</code></td>
+<td><code>Path</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.</td>
+</tr>
+<tr>
+<td><code>private_key</code></td>
+<td><code>SecretStr</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>jwt_bearer private key, inline (alternative to private_key_file).</td>
+</tr>
+<tr>
+<td><code>api_version</code></td>
+<td><code>str</code></td>
+<td>"60.0"</td>
+<td>no</td>
+<td>Salesforce REST/SOAP API version to target.</td>
+</tr>
+<tr>
+<td><code>org_id</code></td>
+<td><code>str</code></td>
+<td>null</td>
+<td>no</td>
+<td>Set this to keep the app on the <code>api</code> scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the <code>openid</code> scope).</td>
+</tr>
+<tr>
+<td><code>token_ttl</code></td>
+<td><code>Duration</code></td>
+<td>1h</td>
+<td>no</td>
+<td>Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence.</td>
+</tr>
+<tr>
+<td><code>limits</code></td>
+<td><code>SalesforceLimitsConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Org-limits metric poller settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="salesforcelimitsconfig">SalesforceLimitsConfig<a class="headerlink" href="#salesforcelimitsconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).</td>
+</tr>
+<tr>
+<td><code>poll_interval</code></td>
+<td><code>Duration</code></td>
+<td>5m</td>
+<td>no</td>
+<td>How often to poll the limits endpoint.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="orgconfig">OrgConfig<a class="headerlink" href="#orgconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>prod</td>
+<td>yes</td>
+<td>Org identifier: becomes the <code>org</code> stream label and the checkpoint key prefix. Letters, digits, underscore, hyphen only; must be unique.</td>
+</tr>
+<tr>
+<td><code>salesforce</code></td>
+<td><code>SalesforceConfig</code></td>
+<td></td>
+<td>yes</td>
+<td>This org's Salesforce connection and authentication.</td>
+</tr>
+<tr>
+<td><code>sources</code></td>
+<td><code>SourcesConfig</code></td>
+<td></td>
+<td>no</td>
+<td>This org's event source selection and settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="sourcesconfig">SourcesConfig<a class="headerlink" href="#sourcesconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pubsub</code></td>
+<td><code>PubSubConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Pub/Sub API streaming source.</td>
+</tr>
+<tr>
+<td><code>eventlog_objects</code></td>
+<td><code>EventLogObjectsConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Event-object SOQL polling source.</td>
+</tr>
+<tr>
+<td><code>eventlogfile</code></td>
+<td><code>EventLogFileConfig</code></td>
+<td></td>
+<td>no</td>
+<td>EventLogFile (CSV) ingestion source.</td>
+</tr>
+<tr>
+<td><code>apexlog</code></td>
+<td><code>ApexLogConfig</code></td>
+<td></td>
+<td>no</td>
+<td>ApexLog (Tooling API debug log) polling source.</td>
+</tr>
+<tr>
+<td><code>allow_overlap</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.</td>
+</tr>
+<tr>
+<td><code>transform_salt</code></td>
+<td><code>SecretStr</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>Deployment-wide salt for <code>hash</code> transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.</td>
+</tr>
+<tr>
+<td><code>transform_salt_file</code></td>
+<td><code>Path</code></td>
+<td>/etc/sf2loki/secrets/transform-salt</td>
+<td>no</td>
+<td>File path to the transform hash salt (alternative to transform_salt).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="pubsubconfig">PubSubConfig<a class="headerlink" href="#pubsubconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>true</td>
+<td>no</td>
+<td>Enable the Pub/Sub streaming source.</td>
+</tr>
+<tr>
+<td><code>endpoint</code></td>
+<td><code>str</code></td>
+<td>api.pubsub.salesforce.com:7443</td>
+<td>no</td>
+<td>Pub/Sub API gRPC endpoint.</td>
+</tr>
+<tr>
+<td><code>default_num_requested</code></td>
+<td><code>int</code></td>
+<td>100</td>
+<td>no</td>
+<td>Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked).</td>
+</tr>
+<tr>
+<td><code>replay_preset</code></td>
+<td><code>Literal['LATEST', 'EARLIEST', 'CUSTOM']</code></td>
+<td>CUSTOM</td>
+<td>no</td>
+<td>Replay position; falls back to LATEST when no stored replay_id.</td>
+</tr>
+<tr>
+<td><code>topics</code></td>
+<td><code>list[str]</code></td>
+<td>[/event/LoginEventStream, /event/ApiAnomalyEvent]</td>
+<td>no</td>
+<td>Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.</td>
+</tr>
+<tr>
+<td><code>include</code></td>
+<td><code>list[str]</code></td>
+<td>["*"]</td>
+<td>no</td>
+<td>Operator inclusion globs applied to discovered/explicit topics.</td>
+</tr>
+<tr>
+<td><code>exclude</code></td>
+<td><code>list[str]</code></td>
+<td>[]</td>
+<td>no</td>
+<td>Operator exclusion globs applied to discovered/explicit topics.</td>
+</tr>
+<tr>
+<td><code>rediscovery_interval</code></td>
+<td><code>Duration</code></td>
+<td>1h</td>
+<td>no</td>
+<td>How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).</td>
+</tr>
+<tr>
+<td><code>sample</code></td>
+<td><code>dict[str, typing.Annotated[float, FieldInfo(annotation=NoneType, required=True, metadata=[Gt(gt=0.0), Le(le=1.0)])]]</code></td>
+<td>{/event/ApiEventStream: 0.25}</td>
+<td>no</td>
+<td>Opt-in lossy volume control: topic glob -&gt; keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints.</td>
+</tr>
+<tr>
+<td><code>transforms</code></td>
+<td><code>list[TransformRule]</code></td>
+<td></td>
+<td>no</td>
+<td>Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule).</td>
+</tr>
+<tr>
+<td><code>bridge_max_bytes</code></td>
+<td><code>int</code></td>
+<td>134217728</td>
+<td>no</td>
+<td>Approximate byte budget for the Pub/Sub source's internal topic-&gt;events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="transformrule">TransformRule<a class="headerlink" href="#transformrule" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td><code>Literal['hash', 'mask', 'drop_field', 'drop_row', 'regex_replace']</code></td>
+<td>null</td>
+<td>yes</td>
+<td>hash (salted SHA-256 -&gt; stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via <code>match</code>) | regex_replace (pattern -&gt; replacement).</td>
+</tr>
+<tr>
+<td><code>fields</code></td>
+<td><code>list[str]</code></td>
+<td>[SOURCE_IP, CLIENT_IP]</td>
+<td>no</td>
+<td>Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).</td>
+</tr>
+<tr>
+<td><code>match</code></td>
+<td><code>dict[str, str]</code></td>
+<td>{}</td>
+<td>no</td>
+<td>drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.</td>
+</tr>
+<tr>
+<td><code>pattern</code></td>
+<td><code>str</code></td>
+<td>null</td>
+<td>no</td>
+<td>regex_replace only: the regular expression to replace (must compile).</td>
+</tr>
+<tr>
+<td><code>replacement</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>regex_replace only: the replacement text (backrefs allowed).</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Optional stable rule name used as the <code>rule</code> metric label for drop_row counts; defaults to "<action>-<index>".</td>
+</tr>
+</tbody>
+</table>
+<h2 id="eventlogobjectsconfig">EventLogObjectsConfig<a class="headerlink" href="#eventlogobjectsconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Enable the event-object polling source.</td>
+</tr>
+<tr>
+<td><code>objects</code></td>
+<td><code>list[EventLogObjectConfig]</code></td>
+<td></td>
+<td>no</td>
+<td>Event objects to poll.</td>
+</tr>
+<tr>
+<td><code>transforms</code></td>
+<td><code>list[TransformRule]</code></td>
+<td></td>
+<td>no</td>
+<td>Redaction/filter rules applied to each polled record before shaping (see TransformRule).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="eventlogobjectconfig">EventLogObjectConfig<a class="headerlink" href="#eventlogobjectconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>yes</td>
+<td>The event object API name to poll (e.g. LoginEvent).</td>
+</tr>
+<tr>
+<td><code>timestamp_field</code></td>
+<td><code>str</code></td>
+<td>EventDate</td>
+<td>no</td>
+<td>The field used as the per-row event time for polling/checkpointing.</td>
+</tr>
+<tr>
+<td><code>poll_interval</code></td>
+<td><code>Duration</code></td>
+<td>5m</td>
+<td>no</td>
+<td>How often to poll this object.</td>
+</tr>
+<tr>
+<td><code>lookback</code></td>
+<td><code>Duration</code></td>
+<td>1h</td>
+<td>no</td>
+<td>Initial window to fetch on first run (no checkpoint).</td>
+</tr>
+<tr>
+<td><code>sample</code></td>
+<td><code>float</code></td>
+<td>1.0</td>
+<td>no</td>
+<td>Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.</td>
+</tr>
+<tr>
+<td><code>big_object</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.</td>
+</tr>
+<tr>
+<td><code>max_catchup_records</code></td>
+<td><code>int</code></td>
+<td>200000</td>
+<td>no</td>
+<td>Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="eventlogfileconfig">EventLogFileConfig<a class="headerlink" href="#eventlogfileconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Enable the EventLogFile ingestion source.</td>
+</tr>
+<tr>
+<td><code>interval</code></td>
+<td><code>Literal['Hourly', 'Daily']</code></td>
+<td>Hourly</td>
+<td>no</td>
+<td>Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; check before Hourly.</td>
+</tr>
+<tr>
+<td><code>event_types</code></td>
+<td><code>list[EventLogFileTypeConfig]</code></td>
+<td></td>
+<td>no</td>
+<td>ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.</td>
+</tr>
+<tr>
+<td><code>exclude</code></td>
+<td><code>list[str]</code></td>
+<td>[]</td>
+<td>no</td>
+<td>EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.</td>
+</tr>
+<tr>
+<td><code>poll_interval</code></td>
+<td><code>Duration</code></td>
+<td>1h</td>
+<td>no</td>
+<td>How often to list new files (Daily files land ~once/day).</td>
+</tr>
+<tr>
+<td><code>lookback</code></td>
+<td><code>Duration</code></td>
+<td>1d</td>
+<td>no</td>
+<td>Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.</td>
+</tr>
+<tr>
+<td><code>timestamp_column</code></td>
+<td><code>str</code></td>
+<td>TIMESTAMP_DERIVED</td>
+<td>no</td>
+<td>Per-row event time column.</td>
+</tr>
+<tr>
+<td><code>page_size</code></td>
+<td><code>int</code></td>
+<td>1000</td>
+<td>no</td>
+<td>SOQL LIMIT for the file-listing query.</td>
+</tr>
+<tr>
+<td><code>settle_window</code></td>
+<td><code>Duration</code></td>
+<td>0s</td>
+<td>no</td>
+<td>Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either.</td>
+</tr>
+<tr>
+<td><code>download_max_age</code></td>
+<td><code>Duration</code></td>
+<td>1d</td>
+<td>no</td>
+<td>A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.</td>
+</tr>
+<tr>
+<td><code>transforms</code></td>
+<td><code>list[TransformRule]</code></td>
+<td></td>
+<td>no</td>
+<td>Redaction/filter rules applied to each CSV row before shaping (see TransformRule).</td>
+</tr>
+<tr>
+<td><code>concurrency</code></td>
+<td><code>int</code></td>
+<td>4</td>
+<td>no</td>
+<td>Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="eventlogfiletypeconfig">EventLogFileTypeConfig<a class="headerlink" href="#eventlogfiletypeconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>yes</td>
+<td>The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types.</td>
+</tr>
+<tr>
+<td><code>structured_metadata_fields</code></td>
+<td><code>list[str]</code></td>
+<td>[REPORT_ID, OWNER_ID]</td>
+<td>no</td>
+<td>Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td><code>list[str]</code></td>
+<td>[DELEGATED_USER]</td>
+<td>no</td>
+<td>Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.</td>
+</tr>
+<tr>
+<td><code>sample</code></td>
+<td><code>float</code></td>
+<td>1.0</td>
+<td>no</td>
+<td>Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="apexlogconfig">ApexLogConfig<a class="headerlink" href="#apexlogconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Enable the ApexLog polling source.</td>
+</tr>
+<tr>
+<td><code>poll_interval</code></td>
+<td><code>Duration</code></td>
+<td>1m</td>
+<td>no</td>
+<td>How often to poll for new ApexLog rows.</td>
+</tr>
+<tr>
+<td><code>lookback</code></td>
+<td><code>Duration</code></td>
+<td>1h</td>
+<td>no</td>
+<td>Initial window to fetch on first run (no checkpoint).</td>
+</tr>
+<tr>
+<td><code>users</code></td>
+<td><code>list[str]</code></td>
+<td>[integration@example.com]</td>
+<td>no</td>
+<td>Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user.</td>
+</tr>
+<tr>
+<td><code>max_body_bytes</code></td>
+<td><code>int</code></td>
+<td>5242880</td>
+<td>no</td>
+<td>Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped.</td>
+</tr>
+<tr>
+<td><code>sample</code></td>
+<td><code>float</code></td>
+<td>1.0</td>
+<td>no</td>
+<td>Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything.</td>
+</tr>
+<tr>
+<td><code>transforms</code></td>
+<td><code>list[TransformRule]</code></td>
+<td></td>
+<td>no</td>
+<td>Redaction/filter rules applied to each log's metadata before shaping.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="sinkconfig">SinkConfig<a class="headerlink" href="#sinkconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loki</code></td>
+<td><code>LokiConfig</code></td>
+<td></td>
+<td>yes</td>
+<td>Loki sink settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="lokiconfig">LokiConfig<a class="headerlink" href="#lokiconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>url</code></td>
+<td><code>str</code></td>
+<td>${GC_LOKI}</td>
+<td>yes</td>
+<td>Loki push API URL.</td>
+</tr>
+<tr>
+<td><code>tenant_id</code></td>
+<td><code>str</code></td>
+<td>${GC_TENANT_ID}</td>
+<td>no</td>
+<td>Loki tenant (X-Scope-OrgID); required for Grafana Cloud and multi-tenant Loki.</td>
+</tr>
+<tr>
+<td><code>auth_token_file</code></td>
+<td><code>Path</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>File path to the Loki auth token.</td>
+</tr>
+<tr>
+<td><code>auth_token</code></td>
+<td><code>SecretStr</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>Loki auth token, inline (alternative to auth_token_file).</td>
+</tr>
+<tr>
+<td><code>encoding</code></td>
+<td><code>Literal['protobuf', 'json']</code></td>
+<td>protobuf</td>
+<td>no</td>
+<td>Wire encoding for the push request.</td>
+</tr>
+<tr>
+<td><code>compression</code></td>
+<td><code>Literal['snappy', 'gzip', 'none']</code></td>
+<td>snappy</td>
+<td>no</td>
+<td>Compression: snappy (protobuf) | gzip (json) | none.</td>
+</tr>
+<tr>
+<td><code>batch</code></td>
+<td><code>LokiBatchConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Push batching settings.</td>
+</tr>
+<tr>
+<td><code>egress</code></td>
+<td><code>EgressConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Egress guardrails: rate caps + daily byte budget (all off by default).</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td><code>dict[str, str]</code></td>
+<td>{environment: prod}</td>
+<td>no</td>
+<td>Static stream labels merged onto every push (job + sf_org_id are added automatically).</td>
+</tr>
+<tr>
+<td><code>structured_metadata_fields</code></td>
+<td><code>list[str]</code></td>
+<td>[replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]</td>
+<td>no</td>
+<td>Event fields promoted to Loki structured metadata (not stream labels).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="lokibatchconfig">LokiBatchConfig<a class="headerlink" href="#lokibatchconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_entries</code></td>
+<td><code>int</code></td>
+<td>1000</td>
+<td>no</td>
+<td>Flush the batch after this many log entries.</td>
+</tr>
+<tr>
+<td><code>max_bytes</code></td>
+<td><code>int</code></td>
+<td>1048576</td>
+<td>no</td>
+<td>Flush the batch after this many bytes.</td>
+</tr>
+<tr>
+<td><code>flush_interval</code></td>
+<td><code>Duration</code></td>
+<td>1s</td>
+<td>no</td>
+<td>Flush the batch after this much time, regardless of size.</td>
+</tr>
+<tr>
+<td><code>max_line_bytes</code></td>
+<td><code>int</code></td>
+<td>262144</td>
+<td>no</td>
+<td>Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side <code>max_line_size</code> default (256 KiB). 0 disables.</td>
+</tr>
+<tr>
+<td><code>queue_maxsize</code></td>
+<td><code>int</code></td>
+<td>10000</td>
+<td>no</td>
+<td>Entry-count bound of each internal source-&gt;sink lane queue. Producers block (structural backpressure) when full. Applied PER LANE (streaming vs bulk), so the worst-case entry count is queue_maxsize x number-of-lanes (&lt;= 2).</td>
+</tr>
+<tr>
+<td><code>queue_max_bytes</code></td>
+<td><code>int</code></td>
+<td>268435456</td>
+<td>no</td>
+<td>Approximate byte budget for queued entries, applied PER LANE (streaming vs bulk). Producers on a lane block when its budget is exceeded, even if the entry-count bound is not reached. Worst-case buffered memory during a sink outage is therefore queue_max_bytes x number-of-lanes (&lt;= 2x). Default 256 MiB; 0 disables accounting.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="egressconfig">EgressConfig<a class="headerlink" href="#egressconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_lines_per_second</code></td>
+<td><code>float</code></td>
+<td>0</td>
+<td>no</td>
+<td>Token-bucket cap on pushed lines/second; 0 disables.</td>
+</tr>
+<tr>
+<td><code>max_bytes_per_second</code></td>
+<td><code>float</code></td>
+<td>0</td>
+<td>no</td>
+<td>Token-bucket cap on pushed (pre-compression) bytes/second; 0 disables.</td>
+</tr>
+<tr>
+<td><code>daily_byte_budget</code></td>
+<td><code>int</code></td>
+<td>0</td>
+<td>no</td>
+<td>Maximum pre-compression bytes pushed per UTC day; 0 disables. The used counter persists in the state store, so restarts don't reset it. WARN at 80%, ERROR + budget_action at 100%.</td>
+</tr>
+<tr>
+<td><code>budget_action</code></td>
+<td><code>Literal['pause', 'drop']</code></td>
+<td>pause</td>
+<td>no</td>
+<td>What to do when the daily budget is exhausted: pause (hold pushes + checkpoints until the next UTC day; data delayed, never lost, readiness reports degraded) | drop (keep running, discard over-budget entries).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="stateconfig">StateConfig<a class="headerlink" href="#stateconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>store</code></td>
+<td><code>Literal['file', 's3', 'gcs']</code></td>
+<td>file</td>
+<td>no</td>
+<td>State backend: file (local JSON, needs a persistent volume) | s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra) | gcs (Google Cloud Storage, for stateless deployments; needs the sf2loki[gcs] extra).</td>
+</tr>
+<tr>
+<td><code>file</code></td>
+<td><code>FileStateConfig</code></td>
+<td></td>
+<td>no</td>
+<td>File-backed state store settings.</td>
+</tr>
+<tr>
+<td><code>s3</code></td>
+<td><code>S3StateConfig</code></td>
+<td></td>
+<td>no</td>
+<td>S3-backed state store settings.</td>
+</tr>
+<tr>
+<td><code>gcs</code></td>
+<td><code>GcsStateConfig</code></td>
+<td></td>
+<td>no</td>
+<td>GCS-backed state store settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="filestateconfig">FileStateConfig<a class="headerlink" href="#filestateconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>path</code></td>
+<td><code>Path</code></td>
+<td>/var/lib/sf2loki/state.json</td>
+<td>no</td>
+<td>Checkpoint file path; persist on a mounted volume for durable resume.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="s3stateconfig">S3StateConfig<a class="headerlink" href="#s3stateconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bucket</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Bucket name (required when state.store is s3).</td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td><code>str</code></td>
+<td>sf2loki/state.json</td>
+<td>no</td>
+<td>Object key holding the checkpoint document.</td>
+</tr>
+<tr>
+<td><code>region</code></td>
+<td><code>str</code></td>
+<td>null</td>
+<td>no</td>
+<td>AWS region; omit to use the default-chain region.</td>
+</tr>
+<tr>
+<td><code>endpoint_url</code></td>
+<td><code>str</code></td>
+<td>http://minio:9000</td>
+<td>no</td>
+<td>Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="gcsstateconfig">GcsStateConfig<a class="headerlink" href="#gcsstateconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bucket</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Bucket name (required when state.store is gcs).</td>
+</tr>
+<tr>
+<td><code>object_name</code></td>
+<td><code>str</code></td>
+<td>sf2loki/state.json</td>
+<td>no</td>
+<td>Object name holding the checkpoint document.</td>
+</tr>
+<tr>
+<td><code>service_file</code></td>
+<td><code>Path</code></td>
+<td>null</td>
+<td>no</td>
+<td>Path to a service-account JSON key; omit to use Application Default Credentials.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="coordinateconfig">CoordinateConfig<a class="headerlink" href="#coordinateconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>Literal['noop', 'file_lease', 'k8s_lease']</code></td>
+<td>noop</td>
+<td>no</td>
+<td>noop (single instance) | file_lease (active-passive via a shared lease file) | k8s_lease (active-passive via a Kubernetes Lease; needs the sf2loki[k8s] extra).</td>
+</tr>
+<tr>
+<td><code>file_lease</code></td>
+<td><code>FileLeaseConfig</code></td>
+<td></td>
+<td>no</td>
+<td>File-lease coordinator settings.</td>
+</tr>
+<tr>
+<td><code>k8s_lease</code></td>
+<td><code>K8sLeaseConfig</code></td>
+<td></td>
+<td>no</td>
+<td>Kubernetes-Lease coordinator settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="fileleaseconfig">FileLeaseConfig<a class="headerlink" href="#fileleaseconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>path</code></td>
+<td><code>Path</code></td>
+<td>/var/lib/sf2loki/leader.lease</td>
+<td>no</td>
+<td>Lease file path on storage shared by all replicas.</td>
+</tr>
+<tr>
+<td><code>ttl</code></td>
+<td><code>Duration</code></td>
+<td>30s</td>
+<td>no</td>
+<td>Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by ttl; must exceed inter-host clock skew.</td>
+</tr>
+<tr>
+<td><code>renew_interval</code></td>
+<td><code>Duration</code></td>
+<td>10s</td>
+<td>no</td>
+<td>How often the leader re-writes the lease (must be &lt; ttl/2).</td>
+</tr>
+<tr>
+<td><code>holder_id</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Stable identity written into the lease; defaults to hostname-pid at startup. Set explicitly when hostnames aren't unique.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="k8sleaseconfig">K8sLeaseConfig<a class="headerlink" href="#k8sleaseconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>namespace</code></td>
+<td><code>str</code></td>
+<td>default</td>
+<td>no</td>
+<td>Namespace holding the Lease object.</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td>sf2loki-leader</td>
+<td>no</td>
+<td>Lease object name (shared by all replicas).</td>
+</tr>
+<tr>
+<td><code>identity</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>holderIdentity written into the Lease; defaults to the pod name ($HOSTNAME) at startup.</td>
+</tr>
+<tr>
+<td><code>lease_duration</code></td>
+<td><code>Duration</code></td>
+<td>30s</td>
+<td>no</td>
+<td>Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by this.</td>
+</tr>
+<tr>
+<td><code>renew_interval</code></td>
+<td><code>Duration</code></td>
+<td>10s</td>
+<td>no</td>
+<td>How often the leader renews the Lease (must be &lt; lease_duration/2).</td>
+</tr>
+<tr>
+<td><code>kubeconfig</code></td>
+<td><code>Path</code></td>
+<td>null</td>
+<td>no</td>
+<td>Path to a kubeconfig for out-of-cluster dev; omit to use in-cluster config.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="serviceconfig">ServiceConfig<a class="headerlink" href="#serviceconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>log_level</code></td>
+<td><code>Literal['debug', 'info', 'warning', 'warn', 'error', 'critical']</code></td>
+<td>info</td>
+<td>no</td>
+<td>Application log level: debug | info | warning | error | critical (case-insensitive).</td>
+</tr>
+<tr>
+<td><code>log_format</code></td>
+<td><code>Literal['json', 'logfmt']</code></td>
+<td>json</td>
+<td>no</td>
+<td>Application log output format.</td>
+</tr>
+<tr>
+<td><code>health_addr</code></td>
+<td><code>str</code></td>
+<td>":8080"</td>
+<td>no</td>
+<td>Address to bind the health-check HTTP server.</td>
+</tr>
+<tr>
+<td><code>shutdown_grace</code></td>
+<td><code>Duration</code></td>
+<td>25s</td>
+<td>no</td>
+<td>Grace period allowed for in-flight work to finish on shutdown.</td>
+</tr>
+<tr>
+<td><code>unready_after_sink_failing</code></td>
+<td><code>Duration</code></td>
+<td>15m</td>
+<td>no</td>
+<td>/readyz reports 503 when Loki pushes have been failing continuously for this long (data is retried and safe, but the instance is degraded and an orchestrator should surface it). 0 disables the readiness degradation.</td>
+</tr>
+<tr>
+<td><code>telemetry</code></td>
+<td><code>TelemetryConfig</code></td>
+<td></td>
+<td>no</td>
+<td>OTLP metrics egress settings.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="telemetryconfig">TelemetryConfig<a class="headerlink" href="#telemetryconfig" title="Anchor link to this section for reference">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td>false</td>
+<td>no</td>
+<td>Push all metrics via OTLP/HTTP.</td>
+</tr>
+<tr>
+<td><code>endpoint</code></td>
+<td><code>str</code></td>
+<td>https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics</td>
+<td>no</td>
+<td>Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics; for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.</td>
+</tr>
+<tr>
+<td><code>auth</code></td>
+<td><code>Literal['basic', 'none']</code></td>
+<td>basic</td>
+<td>no</td>
+<td>Auth for the OTLP endpoint. "basic" sends Authorization: Basic base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic, the credentials default to the Loki sink's tenant_id/auth_token when left blank — Grafana Cloud uses one stack credential for both Loki and OTLP.</td>
+</tr>
+<tr>
+<td><code>basic_auth_user</code></td>
+<td><code>str</code></td>
+<td>""</td>
+<td>no</td>
+<td>Basic-auth username; defaults to the Loki sink's tenant_id when blank.</td>
+</tr>
+<tr>
+<td><code>basic_auth_token</code></td>
+<td><code>SecretStr</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.</td>
+</tr>
+<tr>
+<td><code>basic_auth_token_file</code></td>
+<td><code>Path</code></td>
+<td><em>(secret)</em></td>
+<td>no</td>
+<td>File path to the basic-auth token (alternative to basic_auth_token).</td>
+</tr>
+<tr>
+<td><code>headers</code></td>
+<td><code>dict[str, str]</code></td>
+<td>{}</td>
+<td>no</td>
+<td>Explicit headers, merged on top of any computed Authorization header. Values support ${ENV} interpolation at config load.</td>
+</tr>
+<tr>
+<td><code>export_interval</code></td>
+<td><code>Duration</code></td>
+<td>1m</td>
+<td>no</td>
+<td>How often to export accumulated metrics via OTLP.</td>
+</tr>
+<tr>
+<td><code>resource_attributes</code></td>
+<td><code>dict[str, str]</code></td>
+<td>{}</td>
+<td>no</td>
+<td>Extra OTel resource attributes merged onto the defaults (service.name, etc.).</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../configuration/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Configuration">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Configuration
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../configuration/presets/" class="md-footer__link md-footer__link--next" aria-label="Next: Presets">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Presets
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      <a href="https://m7kni.io" target="_blank" rel="noopener">m7kni.io</a>
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/rknightion/sf2loki" target="_blank" rel="noopener" title="GitHub Repository" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.instant","navigation.instant.prefetch","navigation.instant.progress","navigation.tracking","navigation.tabs","navigation.tabs.sticky","navigation.sections","navigation.expand","navigation.top","navigation.footer","navigation.indexes","navigation.path","search.suggest","search.highlight","search.share","toc.follow","toc.integrate","content.code.copy","content.code.select","content.code.annotate","content.tabs.link","content.tooltips","content.footnote.tooltips","content.action.edit","content.action.view"],"search":"../assets/javascripts/workers/search.e2d2d235.min.js","tags":{"Configuration":"config","Deployment":"deployment","Docker":"docker","Event Monitoring":"event-monitoring","Kubernetes":"kubernetes","Loki":"loki","OpenTelemetry":"opentelemetry","Salesforce":"salesforce","Troubleshooting":"troubleshooting"},"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.5fd3284f.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+        <script src="../javascripts/extra.js"></script>
+      
+    
+  </body>
+</html>
