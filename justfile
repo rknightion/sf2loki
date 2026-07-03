@@ -32,6 +32,19 @@ gate: lint type test
 gen-config:
     uv run python -m sf2loki config example > config.example.yaml
     uv run python -m sf2loki config reference > docs/config-reference.md
+    uv run python scripts/gen_helm_values.py
+
+# regenerate ONLY the Helm chart's generated config block (subset of gen-config)
+gen-helm-values:
+    uv run python scripts/gen_helm_values.py
+
+# lint + render the Helm chart (default values + the HA and extras permutations)
+helm-lint:
+    helm lint deploy/helm
+    helm template sf2loki deploy/helm > /dev/null
+    helm template sf2loki deploy/helm --set ha.enabled=true --set replicaCount=2 \
+        --set networkPolicy.enabled=true --set externalSecrets.enabled=true \
+        --set secrets.create=true > /dev/null
 
 # run the service locally (needs a config file)
 run config="config.yaml":

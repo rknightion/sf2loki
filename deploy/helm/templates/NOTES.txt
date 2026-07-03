@@ -1,0 +1,37 @@
+sf2loki ({{ include "sf2loki.fullname" . }}) installed into namespace {{ .Release.Namespace }}.
+
+The `config:` values are a TEMPLATE (generated from the Pydantic schema) — unless you supplied
+real Salesforce + Loki credentials via your values file, `--set`, or `configOverride`, the pod
+will start and then fail validation or auth. Check it:
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "sf2loki.fullname" . }}
+
+Watch the rollout:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "sf2loki.fullname" . }}
+
+Health endpoints (port 8080, not exposed outside the cluster unless service.enabled):
+  liveness:  /healthz
+  readiness: /readyz  (a standby replica returns 503 here forever, by design)
+
+{{- if .Values.ha.enabled }}
+
+High availability: {{ .Values.replicaCount }} replicas, active-passive via a Kubernetes Lease
+({{ .Values.ha.leaseName }}). Exactly one replica is ever Ready (the current leader); the rest
+report 503 on /readyz and are excluded from the Service. Confirm the leader:
+
+  kubectl -n {{ .Release.Namespace }} get lease {{ .Values.ha.leaseName }} -o jsonpath='{.spec.holderIdentity}'
+
+Remember config.coordinate.type must be k8s_lease and config.state.store must be a SHARED
+backend (s3 | gcs) — the local `file` store is per-pod and breaks failover.
+{{- else if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }} with ha.enabled=false. This combination
+fails the chart's own render guard (the Pub/Sub API has no consumer groups, so >1 replica
+double-ingests) — if you're seeing this, something bypassed that guard (e.g. configOverride).
+Set ha.enabled=true or replicaCount=1.
+{{- else }}
+
+Single instance (replicaCount: 1, ha.enabled: false) — the standard, recommended topology. Set
+ha.enabled=true and replicaCount=2 for active-passive failover.
+{{- end }}

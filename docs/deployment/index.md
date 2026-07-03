@@ -85,9 +85,6 @@ options.
 
 ## Known gaps
 
-- **No Helm chart.** Kubernetes deployments use the plain example manifests in
-  [`deploy/k8s/`](https://github.com/rknightion/sf2loki/tree/main/deploy/k8s) — see
-  [Kubernetes](kubernetes.md).
 - **No Terraform module.** ECS/Fargate task definitions and any supporting
   infrastructure (EFS, secrets provider, log groups) are yours to author; nothing is
   published for either.

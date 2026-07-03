@@ -33,3 +33,7 @@ jobs:
     uses: rknightion/.github/.github/workflows/container-publish.yml@f31690684f4292d1fe8e528618f7c8306fe27d9a # v1.3.1
     with:
       release-tag: ${{ inputs.release-tag }}
+      # Also package + push the Helm chart as an OCI artifact to
+      # ghcr.io/rknightion/charts/sf2loki (cosign-signed, attached to the release on a
+      # tagged build; a time-sortable 0.0.0-main.<ts>.<sha> snapshot on edge builds).
+      helm-chart-path: deploy/helm

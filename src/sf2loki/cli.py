@@ -29,6 +29,7 @@ _CONFIGDOC_RENDERERS = {
     "example": configdoc.example_yaml,
     "reference": configdoc.reference_markdown,
     "schema": configdoc.json_schema,
+    "helm-values": configdoc.helm_values_config,
 }
 
 # Unified exit code for "the config is invalid" across every subcommand that
@@ -71,9 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     config_parser.add_argument(
         "kind",
-        choices=["example", "reference", "schema"],
+        choices=["example", "reference", "schema", "helm-values"],
         help="Which artifact to print: an annotated example YAML, a Markdown "
-        "reference, or the JSON schema.",
+        "reference, the JSON schema, or the Helm values config block.",
     )
 
     doctor_parser = subparsers.add_parser(

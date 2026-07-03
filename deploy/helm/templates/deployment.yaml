@@ -1,0 +1,186 @@
+{{- /*
+Single-instance guard (CLAUDE.md hard rule + sources/overlap.py): the Salesforce Pub/Sub
+API has no consumer-group semantics, so >1 replica subscribing double-delivers every event.
+replicaCount>1 is only safe under active-passive HA (ha.enabled ⇒ a k8s Lease elects one
+active leader; the rest stand by). Fail the render on the unsafe combo. Skipped when a raw
+configOverride is supplied (the operator owns correctness there).
+*/ -}}
+{{- if and (empty .Values.configOverride) (gt (int .Values.replicaCount) 1) (not .Values.ha.enabled) -}}
+{{- fail "replicaCount>1 without ha.enabled: the Pub/Sub API has no consumer groups, so every replica would double-ingest. Set ha.enabled=true (active-passive via a k8s Lease) with config.coordinate.type=k8s_lease and a shared state store, or set replicaCount=1." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sf2loki.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.rollingUpdate.maxSurge }}
+  selector:
+    matchLabels:
+      {{- include "sf2loki.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sf2loki.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.rolloutOnConfigChange }}
+        # Roll the pods when the rendered config ConfigMap changes — the app reads config
+        # only at startup, so without this a `helm upgrade` that changes config leaves pods
+        # on stale config. A roll triggers at most one Lease failover (covered by the drain).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "sf2loki.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.ha.enabled }}
+      # Best-effort: keep the active/standby pair off the same node. "preferred", not
+      # "required", so it never blocks scheduling on a small/single-node cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "sf2loki.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if .Values.ha.enabled }}
+      # Spread the pair across nodes AND zones (ScheduleAnyway — never block startup on a
+      # single-node/single-AZ cluster). On multi-AZ this lands the standby in another zone.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "sf2loki.selectorLabels" . | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "sf2loki.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: sf2loki
+          image: {{ include "sf2loki.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/sf2loki/config.yaml"
+          env:
+            # Downward API. POD_NAMESPACE lets the config reference the pod's own namespace
+            # via ${POD_NAMESPACE} (e.g. coordinate.k8s_lease.namespace); POD_NAME is the
+            # Lease holderIdentity default ($HOSTNAME is already the pod name).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- if or .Values.env .Values.extraEnvFrom }}
+          envFrom:
+            {{- if .Values.env }}
+            - configMapRef:
+                name: {{ include "sf2loki.fullname" . }}-env
+            {{- end }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          # readiness=/readyz, liveness=/healthz — never swap (see values.yaml probes note).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          volumeMounts:
+            # config.yaml via subPath so the sibling secrets/ mount at /etc/sf2loki/secrets
+            # isn't shadowed. subPath files don't hot-update — rolloutOnConfigChange restarts.
+            - name: config
+              mountPath: /etc/sf2loki/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/sf2loki/secrets
+              readOnly: true
+            # Writable paths under readOnlyRootFilesystem: the file checkpoint store + /tmp.
+            - name: state
+              mountPath: {{ .Values.stateDir }}
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "sf2loki.fullname" . }}-config
+        - name: secrets
+          secret:
+            secretName: {{ include "sf2loki.secretName" . }}
+        # emptyDir: per-pod, lost on restart. Fine for a single instance (a restart just
+        # re-reads the durable watermark); HA MUST use a shared store (state.store: s3|gcs).
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}

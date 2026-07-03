@@ -1,0 +1,75 @@
+{{- /*
+ServiceAccount for the sf2loki pod(s). Created by default so the chart doesn't depend on a
+pre-existing "default" SA (which may carry unrelated permissions in a shared namespace);
+disable via serviceAccount.create: false to bind an externally-managed SA instead (e.g. one
+already annotated for IRSA/workload-identity by infra IaC).
+*/ -}}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sf2loki.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+{{- /*
+RBAC for the Kubernetes-native HA coordinator (config.coordinate.type: k8s_lease). These two
+resources exist ONLY for that coordinator — a standalone/single-instance deployment (ha.enabled: false)
+never touches a Lease, so nothing here is needed and nothing is rendered.
+
+The coordinator only ever reads/writes ONE named Lease object (ha.leaseName, which MUST equal
+config.coordinate.k8s_lease.name), so the Role is scoped to this namespace, not cluster-wide —
+a compromised sf2loki pod can't touch Leases (or anything else) outside it.
+
+sf2loki's checkpoint/watermark state lives in an external S3/GCS store (config.state.store),
+NEVER a ConfigMap or any other in-cluster object, so there are deliberately NO configmap (or
+any other resource) rules here — leases are the only thing this Role ever grants.
+*/ -}}
+{{- if .Values.ha.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sf2loki.fullname" . }}-lease
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+rules:
+  # create: the first replica to start up creates the Lease object if it doesn't exist yet.
+  # RBAC resourceNames cannot gate `create` (the object doesn't exist yet to name), so this
+  # rule is deliberately left unscoped — in practice every replica only ever targets the one
+  # ha.leaseName, so this can never be used to create an unrelated Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  # get: read the current holder/renewTime to decide standby-vs-takeover.
+  # update: renew (leader) or take over (standby) via a resourceVersion compare-and-swap — a
+  # lost race comes back as HTTP 409, which the coordinator treats as "someone else won", so
+  # no delete permission is ever needed. Scoped via resourceNames to exactly the one Lease
+  # this deployment uses.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "update"]
+    resourceNames: [{{ .Values.ha.leaseName | quote }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sf2loki.fullname" . }}-lease
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sf2loki.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "sf2loki.fullname" . }}-lease
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

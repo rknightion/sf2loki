@@ -1,0 +1,25 @@
+{{- /*
+PodDisruptionBudget: bounds VOLUNTARY disruption (node drain, cluster-autoscaler/Karpenter
+consolidation) so it can't evict every replica at once. sf2loki is on the event-ingestion
+critical path — losing all replicas simultaneously is a polling/streaming gap until
+reschedule.
+
+maxUnavailable (not minAvailable) is deliberate: at replicaCount>=2 it forces the eviction API
+to serialise drains, keeping a warm standby alive to take the Lease; at replicaCount:1 it's a
+no-op (the single pod stays evictable — using minAvailable there would deadlock a drain
+forever, since it could never satisfy "N still available" against a 1-pod deployment).
+*/ -}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sf2loki.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "sf2loki.selectorLabels" . | nindent 6 }}
+{{- end }}

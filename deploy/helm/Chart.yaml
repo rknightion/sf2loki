@@ -1,0 +1,24 @@
+apiVersion: v2
+name: sf2loki
+description: Stream Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, active-passive HA.
+type: application
+home: https://m7kni.io/sf2loki/
+sources:
+  - https://github.com/rknightion/sf2loki
+keywords:
+  - salesforce
+  - loki
+  - grafana
+  - event-monitoring
+  - observability
+maintainers:
+  - name: rknightion
+    url: https://github.com/rknightion
+# PodDisruptionBudget policy/v1 (stable since 1.21) is the API floor. Validated with Helm 3.x/4.x.
+kubeVersion: ">=1.21.0-0"
+# version (chart) and appVersion both track the release version. release-please bumps the two
+# annotated lines below on each release (see release-please-config.json extra-files); the shared
+# container-publish reusable also derives both from the git tag at publish time, so the registry and
+# the source never drift.
+version: 0.2.0 # x-release-please-version
+appVersion: "0.2.0" # x-release-please-version

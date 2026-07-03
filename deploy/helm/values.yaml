@@ -1,0 +1,692 @@
+# sf2loki Helm values — override per environment. See deploy/helm/README.md and
+# https://m7kni.io/sf2loki/deployment/kubernetes/ for the full walkthrough.
+
+# ── replicas & HA ───────────────────────────────────────────────────────────────
+# sf2loki is SINGLE-INSTANCE by default. The Salesforce Pub/Sub API has no
+# consumer-group semantics, so two replicas both subscribing DOUBLE-DELIVER every
+# event. Running more than one replica therefore REQUIRES ha.enabled=true (active-
+# passive failover via a Kubernetes Lease) — the chart FAILS the render otherwise.
+replicaCount: 1
+
+# Active-passive HA. When enabled the chart:
+#   * renders the lease RBAC (Role/RoleBinding on the coordination.k8s.io Lease),
+#   * adds best-effort pod anti-affinity + host/zone topology spread,
+#   * expects config.coordinate.type: k8s_lease AND a SHARED state store
+#     (config.state.store: s3 | gcs — the local `file` store is per-pod and INVALID
+#     for HA, since each replica would keep its own watermark).
+# Set replicaCount: 2 alongside this (a 3rd replica only adds an idle standby).
+ha:
+  enabled: false
+  # Name of the Lease object all replicas contend for. MUST equal
+  # config.coordinate.k8s_lease.name (default sf2loki-leader). The lease RBAC Role is
+  # resourceName-scoped to exactly this name, so they have to agree.
+  leaseName: sf2loki-leader
+
+# ── image ───────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/rknightion/sf2loki
+  # tag defaults to the chart appVersion when empty. Prefer pinning `digest` in prod.
+  tag: ""
+  # Immutable digest (sha256:...). Wins over tag when set — the recommended prod pin.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Private-registry pull secrets. Each entry is {name: <secret>} for a
+# kubernetes.io/dockerconfigjson Secret that must already exist in the namespace.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── ServiceAccount ──────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  # Name of the SA to create/use. Defaults to the chart fullname when empty.
+  name: ""
+  # Annotations — e.g. an IRSA role-arn (EKS) or iam.gke.io/gcp-service-account (GKE)
+  # so the pod can reach an S3/GCS state store via workload identity.
+  annotations: {}
+  # esoName: a SEPARATE, IRSA/workload-identity-annotated SA used ONLY by the ESO
+  # SecretStore (externalSecrets.enabled) for secrets-manager access. Provisioned
+  # out-of-band (infra IaC), not by this chart. Required when externalSecrets.enabled.
+  esoName: ""
+
+# ── secrets (SF private key / Loki token — mounted as FILES at /etc/sf2loki/secrets) ─
+# sf2loki reads secrets from files, not env vars. Keys here become filenames that must
+# match the *_file paths in `config` (e.g. server.key -> /etc/sf2loki/secrets/server.key,
+# loki-token -> /etc/sf2loki/secrets/loki-token).
+#
+#   create: true   -> the chart creates the Secret from `data` below.
+#   create: false  -> reference a pre-created Secret via existingSecret (default).
+# For production prefer externalSecrets (below), an existingSecret, or `--set-file
+# secrets.data.server\.key=./server.key` over committing plaintext into a values file.
+secrets:
+  create: false
+  existingSecret: ""
+  # Map of filename -> secret contents (rendered as Secret stringData). Empty default.
+  #   data:
+  #     server.key: |
+  #       -----BEGIN PRIVATE KEY----- ...
+  #     loki-token: "glc_..."
+  data: {}
+
+# ── non-secret env (optional ${VAR} interpolation for config) ────────────────────
+# Most deployments set config values directly in `config` below. If you'd rather keep
+# them out of the config map and use ${VAR} interpolation, put the non-secret values
+# here — they're rendered into a ConfigMap and injected via envFrom.
+env: {}
+# Extra envFrom sources (existing ConfigMaps/Secrets) appended verbatim.
+extraEnvFrom: []
+
+# ── resources ───────────────────────────────────────────────────────────────────
+# Bounds worst-case memory like docker-compose's mem_limit: the Loki sink queue
+# (sink.loki.batch.queue_max_bytes, default 256Mi) plus the Pub/Sub bridge queue
+# (sources.pubsub.bridge_max_bytes, default 128Mi) can both fill during a sink outage,
+# plus runtime overhead. Raise limits.memory if you raise either queue's byte budget.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# terminationGracePeriodSeconds must OUTLIVE service.shutdown_grace (config, default
+# 25s) + the app's ~5s closer budget, or kubelet SIGKILLs mid-drain (final flush,
+# checkpoint commit, store close) on every rollout/eviction. 40 = 25 + 5 + margin;
+# raise this if you raise config.service.shutdown_grace.
+terminationGracePeriodSeconds: 40
+
+revisionHistoryLimit: 3
+
+# RollingUpdate bounded to one pod at a time so a healthy standby is always available to
+# take the Lease during an upgrade.
+rollingUpdate:
+  maxUnavailable: 1
+  maxSurge: 1
+
+# Roll the pods when the rendered config ConfigMap changes (config is read only at
+# startup). Adds a checksum/config pod annotation. Leave true unless you want to stage a
+# config change and restart on your own schedule.
+rolloutOnConfigChange: true
+
+# PodDisruptionBudget: bound voluntary disruption (node drain, autoscaler consolidation).
+# maxUnavailable:1 serialises drains at replicaCount>=2 and is a no-op at replicaCount:1.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# ── health probes ───────────────────────────────────────────────────────────────
+# readiness=/readyz, liveness=/healthz — NEVER swap them. An HA standby returns
+# `503 standby` on /readyz FOREVER by design (it is standing by, not becoming ready);
+# that keeps a Service off the standby. A liveness probe on /readyz would restart-loop
+# the standby endlessly and defeat failover. Values mirror the Dockerfile HEALTHCHECK.
+probes:
+  readiness:
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# ── service (optional) ──────────────────────────────────────────────────────────
+# ClusterIP Service over the health port. Selects Ready pods only, so it routes to the
+# current leader (or a standalone instance), never a standby. Not needed for the HA
+# mechanism itself (that's the Lease) or for metrics (OTLP is push, no scrape).
+service:
+  enabled: true
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# ── scheduling ──────────────────────────────────────────────────────────────────
+# All no-op by default. When ha.enabled the chart already adds best-effort host+zone
+# anti-affinity/spread so a node/AZ failure can't take out both replicas; these compose
+# on top (affinity is merged — set it to fully override).
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+podAnnotations: {}
+podLabels: {}
+
+# ── security context ────────────────────────────────────────────────────────────
+# The image runs as uid/gid 10001 (Dockerfile). fsGroup 10001 keeps mounted config +
+# secret files readable by the process. readOnlyRootFilesystem is on — the only writable
+# paths are the two emptyDir mounts below (/tmp and the state dir).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# State-dir mount path. The `file` checkpoint store writes the watermark here; it's a
+# harmless emptyDir with an s3/gcs store (but REQUIRED because readOnlyRootFilesystem
+# forbids any unlisted writable path). NOTE: an emptyDir is per-pod and NOT shared, so
+# it is only valid for a single replica — HA needs config.state.store: s3 | gcs.
+stateDir: /var/lib/sf2loki
+
+# Extra pod volumes / container mounts / sidecars (default: none).
+extraVolumes: []
+extraVolumeMounts: []
+extraContainers: []
+
+# ── NetworkPolicy (opt-in, default OFF) ─────────────────────────────────────────
+# Default-deny ingress+egress, then permit DNS + the sf2loki egress set. IMPORTANT:
+# standard Kubernetes NetworkPolicy is CIDR/label-based and CANNOT match FQDNs like
+# *.my.salesforce.com or api.pubsub.salesforce.com — the CIDRs below are placeholders
+# (0.0.0.0/0 = permissive). Tighten to your provider ranges, or use a CNI with FQDN
+# policy (Cilium toFQDNs — see templates/networkpolicy.yaml). On EKS, enforcement needs
+# the VPC CNI network-policy feature (or Calico) enabled, else these rules are a no-op.
+networkPolicy:
+  enabled: false
+  # Ingress: only the health port (kubelet probes). The pod serves no other listener.
+  ingressPorts:
+    - 8080
+  dnsPort: 53
+  # Kubernetes API server (Lease leader election) — only used/needed when ha.enabled.
+  apiServerCIDR: "0.0.0.0/0"
+  apiServerPort: 443
+  # Salesforce REST/SOAP (login + My Domain, https). The auth + EventLogFile/SOQL paths.
+  salesforceCIDR: "0.0.0.0/0"
+  salesforcePort: 443
+  # Salesforce Pub/Sub API — gRPC over TLS on port 7443 (api.pubsub.salesforce.com:7443),
+  # NOT 443. Only needed when the pubsub source is enabled.
+  pubsubCIDR: "0.0.0.0/0"
+  pubsubPort: 7443
+  # Grafana Loki push endpoint (https).
+  lokiCIDR: "0.0.0.0/0"
+  lokiPort: 443
+  # OTLP metrics endpoint (https). Empty ⇒ reuses the Loki rule (same Grafana Cloud host).
+  otlpCIDR: ""
+  otlpPort: 443
+  # Shared state store egress (S3 / GCS, https). Only needed with state.store: s3 | gcs.
+  stateCIDR: "0.0.0.0/0"
+  statePort: 443
+  # Extra egress rules appended verbatim (list of NetworkPolicyEgressRule).
+  extraEgress: []
+
+# ── External Secrets Operator (opt-in, default OFF) ─────────────────────────────
+# Renders a SecretStore + ExternalSecret that BUILD the mounted secret Secret from a
+# cloud secrets manager instead of requiring it to be hand-created. Requires ESO
+# installed in the cluster. Each *SecretKey names a remoteRef key inside secretStore.
+externalSecrets:
+  enabled: false
+  # SecretStore provider: aws | gcp.
+  provider: aws
+  # AWS SecretsManager region (provider: aws).
+  aws:
+    region: ""
+  # GCP Secret Manager project (provider: gcp).
+  gcp:
+    projectID: ""
+  # How often ESO re-syncs from the manager into the k8s Secret.
+  refreshInterval: 1h
+  # remoteRef entries: k8s file key (mount filename) -> {key, property?} in the manager.
+  # e.g. server.key from secret "sf2loki/server-key", loki-token from "sf2loki/loki-token".
+  data: []
+  #  - secretKey: server.key
+  #    remoteRef:
+  #      key: sf2loki/server-key
+  #  - secretKey: loki-token
+  #    remoteRef:
+  #      key: sf2loki/loki-token
+
+# ── config ──────────────────────────────────────────────────────────────────────
+# Verbatim config.yaml override (raw string). When non-empty this is used as-is and the
+# generated `config:` map below is IGNORED — e.g. supply a fully-resolved config, or
+# `--set-file configOverride=./config.yaml`. Still subject to the app's own validation.
+configOverride: ""
+
+# >>> BEGIN generated config — do not edit by hand; run `just gen-helm-values` <<<
+# The `config:` map below is GENERATED from the Pydantic schema (config.py) by
+# `just gen-helm-values`. Field comments are the model descriptions; values are the
+# schema defaults. Do NOT hand-edit between the markers — the drift gate
+# (tests/test_config_artifacts_drift.py) fails otherwise.
+#
+# This map is serialised verbatim into the sf2loki-config ConfigMap (mounted at
+# /etc/sf2loki/config.yaml). It is a TEMPLATE, not runnable as-is: pick `salesforce`
+# OR `orgs` (the generator renders both for reference) and fill in the empty
+# required values (login URL, client id, username, Loki URL, ...) via your values
+# file or --set config.salesforce.login_url=…. `*_file` secrets point at
+# /etc/sf2loki/secrets/… (the mounted Secret — see `secrets:` below). Set
+# `configOverride` to a raw YAML string to bypass this map entirely.
+config:
+  # Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
+  # key + cert, no shared secret) or ``client_credentials`` (consumer key +
+  # secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
+  # compatibility.
+  salesforce:  # Single-org Salesforce connection and authentication. Set this OR `orgs` (exactly one). Omit when using the multi-org `orgs` list.
+    login_url: ""  # Optional: derived from `environment` when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.
+    environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
+    auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
+    client_id: ${SF_CLIENT_ID}  # External Client App consumer key. (required)
+    # client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
+    client_secret_file: /etc/sf2loki/secrets/client-secret  # File path to the client_credentials secret; required when auth_mode: client_credentials.
+    username: svc@example.com  # Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials.
+    private_key_file: /etc/sf2loki/secrets/server.key  # File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.
+    # private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
+    api_version: "60.0"  # Salesforce REST/SOAP API version to target.
+    org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
+    token_ttl: 1h  # Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence.
+    # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
+    # limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...).
+    # Cheap (one REST call per interval) and useful product telemetry.
+    limits:  # Org-limits metric poller settings.
+      enabled: false  # Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).
+      poll_interval: 5m  # How often to poll the limits endpoint.
+  # ── alternative to the block above (mutually exclusive — set exactly one); uncomment to use ──
+#   orgs:  # Multi-org list: ingest several Salesforce orgs from one process into one shared sink. Set this OR top-level `salesforce` (exactly one). Each entry carries its own salesforce + sources; the sink/state/service stay shared.
+#     - name: prod  # Org identifier: becomes the `org` stream label and the checkpoint key prefix. Letters, digits, underscore, hyphen only; must be unique. (required)
+#       # Two OAuth flows are supported via ``auth_mode``: ``jwt_bearer`` (asymmetric
+#       # key + cert, no shared secret) or ``client_credentials`` (consumer key +
+#       # secret, no keypair/cert/pre-auth). Defaults to ``jwt_bearer`` for backward
+#       # compatibility.
+#       salesforce:  # This org's Salesforce connection and authentication.
+#         login_url: ""  # Optional: derived from `environment` when omitted; set to a custom My Domain URL to override. An explicit value always takes precedence over the environment-derived default.
+#         environment: production  # production | sandbox — derives login_url when login_url is unset; an explicit login_url takes precedence.
+#         auth_mode: jwt_bearer  # jwt_bearer (private key + cert) | client_credentials (consumer key + secret).
+#         client_id: ${SF_CLIENT_ID}  # External Client App consumer key. (required)
+#         # client_secret: /etc/sf2loki/secrets/client-secret  # client_credentials flow secret (injectable from file/env like the key). Required when auth_mode is client_credentials; unused for jwt_bearer.
+#         client_secret_file: /etc/sf2loki/secrets/client-secret  # File path to the client_credentials secret; required when auth_mode: client_credentials.
+#         username: svc@example.com  # Integration user (pre-authorised on the app's Policies tab). Required for jwt_bearer (the JWT `sub` claim); not needed when auth_mode: client_credentials.
+#         private_key_file: /etc/sf2loki/secrets/server.key  # File path to the jwt_bearer private key; not needed when auth_mode: client_credentials.
+#         # private_key: /etc/sf2loki/secrets/private-key  # jwt_bearer private key, inline (alternative to private_key_file).
+#         api_version: "60.0"  # Salesforce REST/SOAP API version to target.
+#         org_id: null  # Set this to keep the app on the `api` scope alone; left null it is auto-resolved via /services/oauth2/userinfo (which then needs the `openid` scope).
+#         token_ttl: 1h  # Assumed access-token lifetime (Salesforce returns no expires_in for these flows; the real lifetime is the org's session timeout, which can be as short as 15m). Refresh is also reactive on 401, so this only tunes proactive re-mint cadence.
+#         # Polls ``/services/data/vXX.0/limits`` and emits a max/remaining gauge per
+#         # limit (DailyApiRequests, DataStorageMB, DailyStreamingApiEvents, ...).
+#         # Cheap (one REST call per interval) and useful product telemetry.
+#         limits:  # Org-limits metric poller settings.
+#           enabled: false  # Poll /services/data/vXX.0/limits for org-limit gauges (API usage, storage, streaming events, ...).
+#           poll_interval: 5m  # How often to poll the limits endpoint.
+#       # Either/or per event category: by default ingest each category (Login, API,
+#       # Report, ...) from exactly ONE source. Streaming ``/event/LoginEventStream``
+#       # AND polling ``LoginEvent`` AND pulling the "Login" EventLogFile are the SAME
+#       # activity via different channels. A fail-fast guard refuses to start on an
+#       # EXPLICIT overlap, and the ELF "*" wildcard auto-excludes categories a
+#       # stream/object source already owns. Set ``allow_overlap: true`` to ingest a
+#       # category via MULTIPLE sources on purpose — e.g. the real-time-but-lean stream
+#       # AND the slower-but-richer EventLogFile rows for the same category (they are
+#       # NOT byte-identical, so both flow — build dashboards on whichever fits).
+#       sources:  # This org's event source selection and settings.
+#         pubsub:  # Pub/Sub API streaming source.
+#           enabled: true  # Enable the Pub/Sub streaming source.
+#           endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.
+#           default_num_requested: 100  # Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked).
+#           replay_preset: CUSTOM  # Replay position; falls back to LATEST when no stored replay_id.
+#           topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
+#           include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
+#           exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
+#           rediscovery_interval: 1h  # How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).
+#           sample: {/event/ApiEventStream: 0.25}  # Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints.
+#           # Rules run on the decoded payload BEFORE field routing, label promotion,
+#           # and timestamp extraction — so redacting the timestamp column triggers the
+#           # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+#           # is rejected at load time (it would silently drop the label).
+#           transforms:  # Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule).
+#             - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+#               fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+#               match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+#               pattern: null  # regex_replace only: the regular expression to replace (must compile).
+#               replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+#               name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+#           bridge_max_bytes: 134217728  # Approximate byte budget for the Pub/Sub source's internal topic->events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge.
+#         # Use for categories you'd rather poll than stream (or that have no stream).
+#         # Do NOT also stream the same category.
+#         eventlog_objects:  # Event-object SOQL polling source.
+#           enabled: false  # Enable the event-object polling source.
+#           objects:  # Event objects to poll.
+#             - name: ""  # The event object API name to poll (e.g. LoginEvent). (required)
+#               timestamp_field: EventDate  # The field used as the per-row event time for polling/checkpointing.
+#               poll_interval: 5m  # How often to poll this object.
+#               lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+#               sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+#               big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
+#               max_catchup_records: 200000  # Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded).
+#           # Rules run on the decoded payload BEFORE field routing, label promotion,
+#           # and timestamp extraction — so redacting the timestamp column triggers the
+#           # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+#           # is rejected at load time (it would silently drop the label).
+#           transforms:  # Redaction/filter rules applied to each polled record before shaping (see TransformRule).
+#             - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+#               fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+#               match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+#               pattern: null  # regex_replace only: the regular expression to replace (must compile).
+#               replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+#               name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+#         # Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
+#         # EventLogFile``, or the EventType picklist, to see which your org actually
+#         # produces); schema is read per-file. This is the workhorse for breadth —
+#         # most activity only surfaces here, not as a streaming event.
+#         #
+#         # Ingest exactly ONE interval (``Hourly`` or ``Daily``); hourly and daily
+#         # files are redundant copies of the same events (Salesforce), so ingesting
+#         # both double-counts. ``Daily`` is settled (~1 day lag) and works for every
+#         # org; ``Hourly`` is fresher but needs the Event Monitoring hourly opt-in in
+#         # Setup, and some orgs generate ONLY Daily files — check before choosing
+#         # Hourly.
+#         #
+#         # Use ``event_types: ["*"]`` to DISCOVER and ingest every EventType the org
+#         # produces for the configured interval (re-checked each poll, so newly
+#         # enabled types appear with no restart), then use ``exclude`` to drop
+#         # categories owned by another source or high-volume types you don't want. Or
+#         # list types explicitly — each item is a bare string (uses the global
+#         # structured_metadata_fields, promotes no labels) or a per-type object (name
+#         # + optional structured_metadata_fields/labels overrides). Explicit entries
+#         # always win over discovered ones.
+#         eventlogfile:  # EventLogFile (CSV) ingestion source.
+#           enabled: false  # Enable the EventLogFile ingestion source.
+#           interval: Hourly  # Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; check before Hourly.
+#           # A bare string in ``eventlogfile.event_types`` coerces to ``{name:
+#           # <string>}`` (backward compatible). ``structured_metadata_fields``
+#           # defaults to ``None``, meaning "fall back to the global
+#           # ``sink.loki.structured_metadata_fields``"; set it to a list (including
+#           # ``[]``) to override per type. ``labels`` lists columns promoted to stream
+#           # labels — keep these LOW cardinality.
+#           event_types:  # ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.
+#             - name: ""  # The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. (required)
+#               structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
+#               labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
+#               sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything.
+#           exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
+#           poll_interval: 1h  # How often to list new files (Daily files land ~once/day).
+#           lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
+#           timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
+#           page_size: 1000  # SOQL LIMIT for the file-listing query.
+#           settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either.
+#           download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
+#           # Rules run on the decoded payload BEFORE field routing, label promotion,
+#           # and timestamp extraction — so redacting the timestamp column triggers the
+#           # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+#           # is rejected at load time (it would silently drop the label).
+#           transforms:  # Redaction/filter rules applied to each CSV row before shaping (see TransformRule).
+#             - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+#               fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+#               match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+#               pattern: null  # regex_replace only: the regular expression to replace (must compile).
+#               replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+#               name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+#           concurrency: 4  # Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.
+#         # Opt-in developer-focused source. ``ApexLog`` rows only exist while a
+#         # ``TraceFlag`` is active for a user (24h retention, TraceFlags expire by
+#         # design) — sf2loki does NOT manage TraceFlags; enable them via ``sf debug``
+#         # or Setup -> Debug Logs. Each log costs one extra API call to download its
+#         # body, so this is disabled by default and excluded from the free-tier path.
+#         apexlog:  # ApexLog (Tooling API debug log) polling source.
+#           enabled: false  # Enable the ApexLog polling source.
+#           poll_interval: 1m  # How often to poll for new ApexLog rows.
+#           lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+#           users: [integration@example.com]  # Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user.
+#           max_body_bytes: 5242880  # Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped.
+#           sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything.
+#           # Rules run on the decoded payload BEFORE field routing, label promotion,
+#           # and timestamp extraction — so redacting the timestamp column triggers the
+#           # timestamp-fallback path, and a ``drop_field`` of a label-promoted column
+#           # is rejected at load time (it would silently drop the label).
+#           transforms:  # Redaction/filter rules applied to each log's metadata before shaping.
+#             - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+#               fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+#               match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+#               pattern: null  # regex_replace only: the regular expression to replace (must compile).
+#               replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+#               name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+#         allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
+#         # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
+#         transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
+  # Either/or per event category: by default ingest each category (Login, API,
+  # Report, ...) from exactly ONE source. Streaming ``/event/LoginEventStream``
+  # AND polling ``LoginEvent`` AND pulling the "Login" EventLogFile are the
+  # SAME activity via different channels. A fail-fast guard refuses to start on
+  # an EXPLICIT overlap, and the ELF "*" wildcard auto-excludes categories a
+  # stream/object source already owns. Set ``allow_overlap: true`` to ingest a
+  # category via MULTIPLE sources on purpose — e.g. the real-time-but-lean
+  # stream AND the slower-but-richer EventLogFile rows for the same category
+  # (they are NOT byte-identical, so both flow — build dashboards on whichever
+  # fits).
+  sources:  # Single-org event source selection and settings. Ignored (and rejected if customized) when `orgs` is used — put per-org sources under each org.
+    pubsub:  # Pub/Sub API streaming source.
+      enabled: true  # Enable the Pub/Sub streaming source.
+      endpoint: api.pubsub.salesforce.com:7443  # Pub/Sub API gRPC endpoint.
+      default_num_requested: 100  # Flow-control batch size (1-100; Salesforce clamps at 100 and returns INVALID_ARGUMENT when over-asked).
+      replay_preset: CUSTOM  # Replay position; falls back to LATEST when no stored replay_id.
+      topics: [/event/LoginEventStream, /event/ApiAnomalyEvent]  # Explicit topics, or "*" to DISCOVER and subscribe to every RTEM stream the org exposes (the *EventStream channels), re-filtered by include/exclude.
+      include: ["*"]  # Operator inclusion globs applied to discovered/explicit topics.
+      exclude: []  # Operator exclusion globs applied to discovered/explicit topics.
+      rediscovery_interval: 1h  # How often to re-run wildcard ("*") topic discovery while running, so channels enabled after startup are picked up without a restart. 0 disables (discovery then runs only at startup).
+      sample: {/event/ApiEventStream: 0.25}  # Opt-in lossy volume control: topic glob -> keep fraction (0-1], first matching glob wins. Sampling is deterministic by replay_id hash, so a replay keeps exactly the same rows (Loki dedup stays intact). Sampled-out events still advance checkpoints.
+      # Rules run on the decoded payload BEFORE field routing, label promotion,
+      # and timestamp extraction — so redacting the timestamp column triggers
+      # the timestamp-fallback path, and a ``drop_field`` of a label-promoted
+      # column is rejected at load time (it would silently drop the label).
+      transforms:  # Redaction/filter rules applied to each decoded event payload before shaping (see TransformRule).
+        - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+          fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+          match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+          pattern: null  # regex_replace only: the regular expression to replace (must compile).
+          replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+          name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+      bridge_max_bytes: 134217728  # Approximate byte budget for the Pub/Sub source's internal topic->events bridge queue, which sits UPSTREAM of the pipeline's sink.loki.batch.queue_max_bytes. Topic tasks block (structural backpressure, propagated to flow-control credits) once the bridged-but-undrained bytes exceed this, so a sink outage can't balloon per-org buffering past the count bound. Default 128 MiB; 0 disables byte accounting on the bridge.
+    # Use for categories you'd rather poll than stream (or that have no
+    # stream). Do NOT also stream the same category.
+    eventlog_objects:  # Event-object SOQL polling source.
+      enabled: false  # Enable the event-object polling source.
+      objects:  # Event objects to poll.
+        - name: ""  # The event object API name to poll (e.g. LoginEvent). (required)
+          timestamp_field: EventDate  # The field used as the per-row event time for polling/checkpointing.
+          poll_interval: 5m  # How often to poll this object.
+          lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+          sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of rows, deterministic by record Id hash (replay-stable). 1.0 keeps everything.
+          big_object: false  # Set true for Salesforce Big Objects (the stored RTEM event family: LoginEvent, ApiEvent, FileEventStore, *EventStore, ...). Big Objects reject ORDER BY ASC, so the source drains them newest-first (ORDER BY timestamp_field DESC) with a ratcheting upper bound and re-sorts each cycle's window ascending before emitting. Leave false for standard and custom objects (LoginHistory, MyAudit__c), which use the ASC path.
+          max_catchup_records: 200000  # Cap on records collected into memory per big_object DESC drain cycle. The drain buffers a cycle's window in memory to re-sort it ascending; a post-outage catch-up over a large gap would otherwise be unbounded and can OOM. When the cap is hit the drain emits that (internally sorted) segment and ratchets its upper bound down so catch-up proceeds in bounded chunks across cycles. 0 = unbounded (pre-cap behaviour). Ignored on the ASC path (streamed page-by-page, already bounded).
+      # Rules run on the decoded payload BEFORE field routing, label promotion,
+      # and timestamp extraction — so redacting the timestamp column triggers
+      # the timestamp-fallback path, and a ``drop_field`` of a label-promoted
+      # column is rejected at load time (it would silently drop the label).
+      transforms:  # Redaction/filter rules applied to each polled record before shaping (see TransformRule).
+        - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+          fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+          match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+          pattern: null  # regex_replace only: the regular expression to replace (must compile).
+          replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+          name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+    # Salesforce exposes ~70 EventType values (query ``SELECT EventType FROM
+    # EventLogFile``, or the EventType picklist, to see which your org actually
+    # produces); schema is read per-file. This is the workhorse for breadth —
+    # most activity only surfaces here, not as a streaming event.
+    #
+    # Ingest exactly ONE interval (``Hourly`` or ``Daily``); hourly and daily
+    # files are redundant copies of the same events (Salesforce), so ingesting
+    # both double-counts. ``Daily`` is settled (~1 day lag) and works for every
+    # org; ``Hourly`` is fresher but needs the Event Monitoring hourly opt-in
+    # in Setup, and some orgs generate ONLY Daily files — check before choosing
+    # Hourly.
+    #
+    # Use ``event_types: ["*"]`` to DISCOVER and ingest every EventType the org
+    # produces for the configured interval (re-checked each poll, so newly
+    # enabled types appear with no restart), then use ``exclude`` to drop
+    # categories owned by another source or high-volume types you don't want.
+    # Or list types explicitly — each item is a bare string (uses the global
+    # structured_metadata_fields, promotes no labels) or a per-type object
+    # (name + optional structured_metadata_fields/labels overrides). Explicit
+    # entries always win over discovered ones.
+    eventlogfile:  # EventLogFile (CSV) ingestion source.
+      enabled: false  # Enable the EventLogFile ingestion source.
+      interval: Hourly  # Daily (settled, ~1d lag) | Hourly (fresher, needs the Event Monitoring hourly opt-in in Setup) — pick ONE. Many orgs generate ONLY Daily files; check before Hourly.
+      # A bare string in ``eventlogfile.event_types`` coerces to ``{name:
+      # <string>}`` (backward compatible). ``structured_metadata_fields``
+      # defaults to ``None``, meaning "fall back to the global
+      # ``sink.loki.structured_metadata_fields``"; set it to a list (including
+      # ``[]``) to override per type. ``labels`` lists columns promoted to
+      # stream labels — keep these LOW cardinality.
+      event_types:  # ELF EventTypes to ingest (required when enabled — there is no sensible "all" default given ~70 types and the either/or-per-category model). Each item is a bare string (e.g. "Login") or a per-type object (name + optional structured_metadata_fields/labels). Use "*" to discover and ingest every EventType the org produces for this interval.
+        - name: ""  # The ELF EventType this override applies to (e.g. ReportExport), or "*" to discover all types. (required)
+          structured_metadata_fields: [REPORT_ID, OWNER_ID]  # Per-type override of the global sink.loki.structured_metadata_fields; omit (None) to inherit the global list, or set to [] to suppress it.
+          labels: [DELEGATED_USER]  # Columns promoted to Loki stream labels for this event type. Keep these LOW cardinality — each distinct value is a new Loki stream.
+          sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of this type's rows, deterministic by row key hash (replay-stable, Loki-dedup-safe). 1.0 keeps everything.
+      exclude: []  # EventTypes to skip when the wildcard "*" is used (e.g. a category served by another source, or a high-volume type you don't want). Ignored otherwise.
+      poll_interval: 1h  # How often to list new files (Daily files land ~once/day).
+      lookback: 1d  # Initial window on first run (no checkpoint); reach back far enough to catch the last few settled Daily files.
+      timestamp_column: TIMESTAMP_DERIVED  # Per-row event time column.
+      page_size: 1000  # SOQL LIMIT for the file-listing query.
+      settle_window: 0s  # Skip files whose CreatedDate is newer than now-settle_window, so we don't pull a half-written hourly CSV whose tail rows would then be skipped when the watermark passes it. Left unset it defaults to 5m for interval: Hourly (Hourly blobs can be listed while server-side incomplete) and 0 for Daily (files land long after the day closes). Set explicitly to override either.
+      download_max_age: 1d  # A file whose body keeps failing to download and is older than this is abandoned (checkpoint advances past it) so a permanently-missing file can't wedge the watermark forever. Files younger than this are retried.
+      # Rules run on the decoded payload BEFORE field routing, label promotion,
+      # and timestamp extraction — so redacting the timestamp column triggers
+      # the timestamp-fallback path, and a ``drop_field`` of a label-promoted
+      # column is rejected at load time (it would silently drop the label).
+      transforms:  # Redaction/filter rules applied to each CSV row before shaping (see TransformRule).
+        - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+          fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+          match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+          pattern: null  # regex_replace only: the regular expression to replace (must compile).
+          replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+          name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+      concurrency: 4  # Event types processed concurrently per poll cycle (per-type ordering and checkpoints are unaffected — types are independent). Peak memory is roughly concurrency x 8 MiB of download spool.
+    # Opt-in developer-focused source. ``ApexLog`` rows only exist while a
+    # ``TraceFlag`` is active for a user (24h retention, TraceFlags expire by
+    # design) — sf2loki does NOT manage TraceFlags; enable them via ``sf
+    # debug`` or Setup -> Debug Logs. Each log costs one extra API call to
+    # download its body, so this is disabled by default and excluded from the
+    # free-tier path.
+    apexlog:  # ApexLog (Tooling API debug log) polling source.
+      enabled: false  # Enable the ApexLog polling source.
+      poll_interval: 1m  # How often to poll for new ApexLog rows.
+      lookback: 1h  # Initial window to fetch on first run (no checkpoint).
+      users: [integration@example.com]  # Salesforce usernames whose logs to ingest (matched via LogUser.Username). Empty = every ApexLog visible to the integration user.
+      max_body_bytes: 5242880  # Skip the body download for logs whose LogLength exceeds this (the metadata line is still shipped, flagged body_skipped); the per-line cap (sink.loki.batch.max_line_bytes) truncates whatever is shipped.
+      sample: 1.0  # Opt-in lossy volume control: keep fraction (0-1] of logs, deterministic by log Id hash (replay-stable). 1.0 keeps everything.
+      # Rules run on the decoded payload BEFORE field routing, label promotion,
+      # and timestamp extraction — so redacting the timestamp column triggers
+      # the timestamp-fallback path, and a ``drop_field`` of a label-promoted
+      # column is rejected at load time (it would silently drop the label).
+      transforms:  # Redaction/filter rules applied to each log's metadata before shaping.
+        - action: null  # hash (salted SHA-256 -> stable pseudonym) | mask (format-aware: emails keep the domain, IPv4 truncates to /24, else '***') | drop_field | drop_row (row filter via `match`) | regex_replace (pattern -> replacement). (required)
+          fields: [SOURCE_IP, CLIENT_IP]  # Payload field names the action applies to (required for hash/mask/drop_field/regex_replace; not used by drop_row).
+          match: {}  # drop_row only: drop rows where EVERY field equals (or glob-matches) its value, e.g. {EVENT_TYPE: Sites}.
+          pattern: null  # regex_replace only: the regular expression to replace (must compile).
+          replacement: ""  # regex_replace only: the replacement text (backrefs allowed).
+          name: ""  # Optional stable rule name used as the `rule` metric label for drop_row counts; defaults to "<action>-<index>".
+    allow_overlap: false  # Bypass the fail-fast overlap guard that refuses to start when one event category is enabled on more than one source.
+    # transform_salt: /etc/sf2loki/secrets/transform-salt  # Deployment-wide salt for `hash` transform rules (stable pseudonyms that still correlate within this deployment). Strongly recommended whenever a hash rule is configured — unsalted hashes of low-entropy values (IPs, usernames) are trivially reversible by table lookup.
+    transform_salt_file: /etc/sf2loki/secrets/transform-salt  # File path to the transform hash salt (alternative to transform_salt).
+  sink:  # Log sink settings.
+    # Grafana Cloud: https://logs-prod-xx.grafana.net/loki/api/v1/push (+
+    # tenant_id + auth_token). Self-hosted: http://loki:3100/loki/api/v1/push
+    # (+ tenant_id -> X-Scope-OrgID). Local Alloy:
+    # http://alloy:3100/loki/api/v1/push (no auth).
+    loki:  # Loki sink settings.
+      url: ${GC_LOKI}  # Loki push API URL. (required)
+      tenant_id: ${GC_TENANT_ID}  # Loki tenant (X-Scope-OrgID); required for Grafana Cloud and multi-tenant Loki.
+      auth_token_file: /etc/sf2loki/secrets/loki-token  # File path to the Loki auth token.
+      # auth_token: /etc/sf2loki/secrets/auth-token  # Loki auth token, inline (alternative to auth_token_file).
+      encoding: protobuf  # Wire encoding for the push request.
+      compression: snappy  # Compression: snappy (protobuf) | gzip (json) | none.
+      batch:  # Push batching settings.
+        max_entries: 1000  # Flush the batch after this many log entries.
+        max_bytes: 1048576  # Flush the batch after this many bytes.
+        flush_interval: 1s  # Flush the batch after this much time, regardless of size.
+        max_line_bytes: 262144  # Per-line UTF-8 byte cap; lines longer than this are truncated (with a marker) before push so one oversized row can't 400 its whole batch. Mirrors Loki's server-side `max_line_size` default (256 KiB). 0 disables.
+        queue_maxsize: 10000  # Entry-count bound of each internal source->sink lane queue. Producers block (structural backpressure) when full. Applied PER LANE (streaming vs bulk), so the worst-case entry count is queue_maxsize x number-of-lanes (<= 2).
+        queue_max_bytes: 268435456  # Approximate byte budget for queued entries, applied PER LANE (streaming vs bulk). Producers on a lane block when its budget is exceeded, even if the entry-count bound is not reached. Worst-case buffered memory during a sink outage is therefore queue_max_bytes x number-of-lanes (<= 2x). Default 256 MiB; 0 disables accounting.
+      # Bytes are counted pre-compression (sum of pushed line bytes) — the
+      # closest approximation of what Loki-based platforms meter and bill. The
+      # rate caps delay pushes (lossless backpressure, propagated upstream to
+      # polling/stream flow control); the budget either pauses pushes until the
+      # next UTC day (lossless, delayed — bounded by Salesforce-side retention)
+      # or drops (lossy, counted in loki_entries_dropped{reason="budget"}).
+      egress:  # Egress guardrails: rate caps + daily byte budget (all off by default).
+        max_lines_per_second: 0  # Token-bucket cap on pushed lines/second; 0 disables.
+        max_bytes_per_second: 0  # Token-bucket cap on pushed (pre-compression) bytes/second; 0 disables.
+        daily_byte_budget: 0  # Maximum pre-compression bytes pushed per UTC day; 0 disables. The used counter persists in the state store, so restarts don't reset it. WARN at 80%, ERROR + budget_action at 100%.
+        budget_action: pause  # What to do when the daily budget is exhausted: pause (hold pushes + checkpoints until the next UTC day; data delayed, never lost, readiness reports degraded) | drop (keep running, discard over-budget entries).
+      labels: {environment: prod}  # Static stream labels merged onto every push (job + sf_org_id are added automatically).
+      structured_metadata_fields: [replay_id, schema_id, event_uuid, user_id, username, source_ip, session_key]  # Event fields promoted to Loki structured metadata (not stream labels).
+  state:  # Checkpoint/state store settings.
+    store: file  # State backend: file (local JSON, needs a persistent volume) | s3 (S3-compatible object storage, for stateless deployments; needs the sf2loki[s3] extra) | gcs (Google Cloud Storage, for stateless deployments; needs the sf2loki[gcs] extra).
+    file:  # File-backed state store settings.
+      path: /var/lib/sf2loki/state.json  # Checkpoint file path; persist on a mounted volume for durable resume.
+    # The whole checkpoint document lives at one key; commits use conditional
+    # writes (ETag If-Match) so two instances against the same key fail fast
+    # instead of clobbering each other. Requires the ``s3`` extra (``pip
+    # install sf2loki[s3]``). Credentials come from the standard AWS default
+    # chain (env vars, instance/task role, shared config).
+    s3:  # S3-backed state store settings.
+      bucket: ""  # Bucket name (required when state.store is s3).
+      key: sf2loki/state.json  # Object key holding the checkpoint document.
+      region: null  # AWS region; omit to use the default-chain region.
+      endpoint_url: http://minio:9000  # Custom S3 endpoint for MinIO/R2/Ceph; omit for AWS S3.
+    # The whole checkpoint document lives at one object; commits use GCS
+    # generation preconditions (ifGenerationMatch) so two instances against the
+    # same object fail fast instead of clobbering each other. Requires the
+    # ``gcs`` extra (``pip install sf2loki[gcs]``). Auth via Application
+    # Default Credentials (ADC); set ``service_file`` only for an explicit key
+    # file.
+    gcs:  # GCS-backed state store settings.
+      bucket: ""  # Bucket name (required when state.store is gcs).
+      object_name: sf2loki/state.json  # Object name holding the checkpoint document.
+      service_file: null  # Path to a service-account JSON key; omit to use Application Default Credentials.
+  # ``noop`` (default) = single instance, always leader. ``file_lease`` lets
+  # two replicas share a lease file on common storage; ``k8s_lease`` uses a
+  # Kubernetes Lease object instead. Either way the standby takes over within
+  # one ttl/lease_duration when the leader dies, resuming from committed
+  # checkpoints (at-least-once — brief double-ingest during a takeover window
+  # is possible, loss is not).
+  coordinate:  # Leadership coordination for active-passive HA.
+    type: noop  # noop (single instance) | file_lease (active-passive via a shared lease file) | k8s_lease (active-passive via a Kubernetes Lease; needs the sf2loki[k8s] extra).
+    # Lease-expiry semantics rather than flock (advisory locks are unreliable
+    # over NFS): the leader renews a holder+expiry document via atomic
+    # tmp+rename; a standby takes over once the lease has expired. Expiry uses
+    # wall-clock time, so keep the hosts NTP-synced — the ttl must comfortably
+    # exceed worst-case clock skew between replicas.
+    file_lease:  # File-lease coordinator settings.
+      path: /var/lib/sf2loki/leader.lease  # Lease file path on storage shared by all replicas.
+      ttl: 30s  # Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by ttl; must exceed inter-host clock skew.
+      renew_interval: 10s  # How often the leader re-writes the lease (must be < ttl/2).
+      holder_id: ""  # Stable identity written into the lease; defaults to hostname-pid at startup. Set explicitly when hostnames aren't unique.
+    # The leader renews a Lease object (holderIdentity + renewTime); a standby
+    # watches and takes over once the lease is stale (renewTime + duration in
+    # the past). Optimistic concurrency uses the Lease's resourceVersion.
+    # Requires the ``k8s`` extra (``pip install sf2loki[k8s]``). In-cluster
+    # config by default; set ``kubeconfig`` for out-of-cluster dev.
+    k8s_lease:  # Kubernetes-Lease coordinator settings.
+      namespace: default  # Namespace holding the Lease object.
+      name: sf2loki-leader  # Lease object name (shared by all replicas).
+      identity: ""  # holderIdentity written into the Lease; defaults to the pod name ($HOSTNAME) at startup.
+      lease_duration: 30s  # Lease lifetime: a standby takes over once the lease is this stale. Failover time is bounded by this.
+      renew_interval: 10s  # How often the leader renews the Lease (must be < lease_duration/2).
+      kubeconfig: null  # Path to a kubeconfig for out-of-cluster dev; omit to use in-cluster config.
+  service:  # Application-level service settings.
+    log_level: info  # Application log level: debug | info | warning | error | critical (case-insensitive).
+    log_format: json  # Application log output format.
+    health_addr: ":8080"  # Address to bind the health-check HTTP server.
+    shutdown_grace: 25s  # Grace period allowed for in-flight work to finish on shutdown.
+    unready_after_sink_failing: 15m  # /readyz reports 503 when Loki pushes have been failing continuously for this long (data is retried and safe, but the instance is degraded and an orchestrator should surface it). 0 disables the readiness degradation.
+    # When ``enabled`` is false, metrics are still recorded in-process (cheap,
+    # used by tests via the in-memory reader) but exported nowhere — there is
+    # no Prometheus scrape endpoint; sf2loki is OTLP-push-native.
+    telemetry:  # OTLP metrics egress settings.
+      enabled: false  # Push all metrics via OTLP/HTTP.
+      endpoint: https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics  # Full OTLP/HTTP metrics URL. For Grafana Cloud this is the stack OTLP gateway, e.g. https://otlp-gateway-<zone>.grafana.net/otlp/v1/metrics; for a local Alloy otelcol.receiver.otlp, e.g. http://alloy:4318/v1/metrics.
+      auth: basic  # Auth for the OTLP endpoint. "basic" sends Authorization: Basic base64(user:token); "none" sends none (e.g. in-cluster Alloy). For basic, the credentials default to the Loki sink's tenant_id/auth_token when left blank — Grafana Cloud uses one stack credential for both Loki and OTLP.
+      basic_auth_user: ""  # Basic-auth username; defaults to the Loki sink's tenant_id when blank.
+      # basic_auth_token: /etc/sf2loki/secrets/basic-auth-token  # Basic-auth token, inline; defaults to the Loki sink's auth_token when blank.
+      basic_auth_token_file: /etc/sf2loki/secrets/otlp-token  # File path to the basic-auth token (alternative to basic_auth_token).
+      headers: {}  # Explicit headers, merged on top of any computed Authorization header. Values support ${ENV} interpolation at config load.
+      export_interval: 1m  # How often to export accumulated metrics via OTLP.
+      resource_attributes: {}  # Extra OTel resource attributes merged onto the defaults (service.name, etc.).
+# >>> END generated config <<<

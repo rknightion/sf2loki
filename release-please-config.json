@@ -4,7 +4,10 @@
   "packages": {
     ".": {
       "package-name": "sf2loki",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "generic", "path": "deploy/helm/Chart.yaml" }
+      ]
     }
   },
   "include-component-in-tag": false,

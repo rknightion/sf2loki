@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sf2loki.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+data:
+  # config.yaml is either the verbatim configOverride string, or the generated `config:`
+  # map serialised back to YAML. ${VAR} refs are scalar strings and survive toYaml intact;
+  # they're interpolated from the pod env (downward API + the -env ConfigMap) at load time.
+  config.yaml: |
+{{- if .Values.configOverride }}
+{{ .Values.configOverride | indent 4 }}
+{{- else }}
+{{ .Values.config | toYaml | indent 4 }}
+{{- end }}
+{{- if .Values.env }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sf2loki.fullname" . }}-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.env }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}

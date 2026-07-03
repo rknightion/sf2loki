@@ -1,0 +1,33 @@
+{{- /*
+Optional: only needed if something in-cluster wants to reach the CURRENT leader's health
+endpoints (e.g. a synthetic check, or another controller). A ClusterIP Service selects Ready
+pods only, so it always routes to the leader (or a standalone instance) and never to a
+standing-by replica — that's what the readinessProbe split in deployment.yaml is for.
+
+Not required for the HA mechanism itself (that's entirely the Lease in rbac.yaml /
+config.coordinate.k8s_lease) and not for metrics (OTLP is push, not scrape — there is nothing
+to expose here for that). Disable entirely via service.enabled: false if nothing in-cluster
+needs to reach these pods.
+*/ -}}
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sf2loki.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "sf2loki.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: health
+      port: {{ .Values.service.port }}
+      targetPort: health
+      protocol: TCP
+{{- end }}

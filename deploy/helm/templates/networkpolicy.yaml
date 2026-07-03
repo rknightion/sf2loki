@@ -1,0 +1,167 @@
+{{- /*
+NetworkPolicy: default-deny ingress+egress, then permit the health port + DNS +
+sf2loki's fixed egress set (Salesforce REST/SOAP, Salesforce Pub/Sub gRPC, Loki push,
+OTLP metrics, the shared state store, and — only under ha.enabled — the k8s API server
+for Lease leader election). Opt-in (networkPolicy.enabled, default OFF): most clusters
+already run a default-deny baseline or a service mesh, and getting the CIDRs wrong here
+can silently wedge egress with no useful error (a blocked SF Pub/Sub connection just
+looks like a hung stream).
+
+IMPORTANT — standard Kubernetes NetworkPolicy is CIDR/label-based and CANNOT match FQDNs
+like *.my.salesforce.com or api.pubsub.salesforce.com (the My Domain host is per-org and
+DNS-resolved, not a stable IP). Every ipBlock below is therefore a PLACEHOLDER
+(0.0.0.0/0 = permissive, i.e. "no real restriction") until you either:
+
+  1. Tighten each CIDR to your provider's published egress ranges (Salesforce publishes
+     IP ranges per instance/pod; Grafana Cloud publishes per-region ranges), or
+  2. Use a CNI with FQDN-aware policy. Cilium's CiliumNetworkPolicy supports `toFQDNs`,
+     which resolves the hostname and follows CNAME chains:
+
+       apiVersion: cilium.io/v2
+       kind: CiliumNetworkPolicy
+       metadata:
+         name: sf2loki-egress
+         namespace: <namespace>
+       spec:
+         endpointSelector:
+           matchLabels:
+             app.kubernetes.io/name: sf2loki
+         egress:
+           - toFQDNs:
+               - matchPattern: "*.my.salesforce.com"
+               - matchName: "api.pubsub.salesforce.com"
+               - matchPattern: "*.grafana.net"
+             toPorts:
+               - ports:
+                   - port: "443"
+                     protocol: TCP
+                   - port: "7443"    # Pub/Sub API gRPC — NOT 443
+                     protocol: TCP
+           - toEndpoints:
+               - matchLabels:
+                   k8s:io.kubernetes.pod.namespace: kube-system
+                   k8s-app: kube-dns
+             toPorts:
+               - ports:
+                   - port: "53"
+                     protocol: UDP
+                   - port: "53"
+                     protocol: TCP
+
+     Without a CNI like Cilium, enforce FQDN egress at the mesh or cluster egress layer
+     (e.g. Istio AuthorizationPolicy, AWS Security Group, GCP VPC firewall rules) instead.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sf2loki.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sf2loki.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sf2loki.selectorLabels" . | nindent 6 }}
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress: allow only the health port(s), from ANY source (empty `from:`). The pod
+  # serves no other listener (metrics are PUSHED via OTLP, nothing scrapes it), so the
+  # only legitimate inbound is the kubelet's readiness/liveness probe on 8080. kubelet
+  # probes originate from the node's host netns, and whether a default-deny ingress rule
+  # blocks them is CNI-dependent (a documented footgun on some CNIs) — there is no
+  # portable selector for "the node", so we allow the port from anywhere instead of
+  # trying to scope `from:`. This is the same don't-rely-on-fragile-matching approach as
+  # the DNS rule below.
+  ingress:
+    - ports:
+      {{- range .Values.networkPolicy.ingressPorts }}
+        - protocol: TCP
+          port: {{ . }}
+      {{- end }}
+
+  egress:
+    # DNS: select the cluster DNS pods (CoreDNS/kube-dns) in kube-system by LABEL, not
+    # CIDR. Some CNIs evaluate egress on the POST-DNAT CoreDNS *pod* IP (in the pod
+    # CIDR), not the kube-dns Service IP, so a Service-CIDR rule can silently block DNS.
+    # A namespace+pod selector is portable across CNIs.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: {{ .Values.networkPolicy.dnsPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.dnsPort }}
+
+    {{- if .Values.ha.enabled }}
+
+    # Kubernetes API server egress — ONLY needed under active-passive HA, for the
+    # k8s_lease coordinator's Lease leader election (coordinate.type: k8s_lease). Omitted
+    # entirely when ha.enabled is false so a non-HA deployment doesn't need control-plane
+    # reachability at all.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.apiServerCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServerPort }}
+    {{- end }}
+
+    # Salesforce REST/SOAP egress (login + My Domain, https) — auth, SOQL polling, and
+    # EventLogFile/ApexLog body downloads all go over this.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.salesforceCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.salesforcePort }}
+
+    # Salesforce Pub/Sub API egress — gRPC over TLS on a DISTINCT port (7443, NOT 443:
+    # api.pubsub.salesforce.com:7443). Only needed while sources.pubsub is enabled.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.pubsubCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.pubsubPort }}
+
+    # Grafana Loki push endpoint egress (https).
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.lokiCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.lokiPort }}
+    {{- with .Values.networkPolicy.otlpCIDR }}
+
+    # OTLP metrics egress. Rendered only when otlpCIDR is set — an empty value means
+    # OTLP rides the same host as the Loki rule above (e.g. one Grafana Cloud stack), so
+    # a separate rule would be redundant.
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.networkPolicy.otlpPort }}
+    {{- end }}
+
+    # Shared state store egress (S3/GCS, https). Only relevant with config.state.store:
+    # s3 | gcs — harmless but unused when state.store is the local `file` backend.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.stateCIDR }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.statePort }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

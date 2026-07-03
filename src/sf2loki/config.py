@@ -1343,6 +1343,12 @@ class Config(BaseSettings):
             "shared sink. Set this OR top-level `salesforce` (exactly one). Each entry "
             "carries its own salesforce + sources; the sink/state/service stay shared."
         ),
+        # Generated docs (config.example.yaml / Helm values) render this block
+        # COMMENTED OUT: it is the multi-org alternative to the single-org
+        # `salesforce` block above, and the two are mutually exclusive (exactly
+        # one), so the generated default is a valid single-org shape rather than
+        # an invalid both-set one. See configdoc._is_doc_commented.
+        json_schema_extra={"doc_commented": True},
     )
     sources: SourcesConfig = Field(
         default_factory=SourcesConfig,

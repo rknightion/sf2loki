@@ -30,6 +30,18 @@ def test_reference_md_matches_generator():
     assert (ROOT / "docs/config-reference.md").read_text() == configdoc.reference_markdown()
 
 
+def test_helm_values_config_matches_generator():
+    # The generated `config:` region in the Helm values.yaml (the inclusive
+    # [BEGIN..END] marker block) must match the generator — run `just gen-helm-values`.
+    values = (ROOT / "deploy/helm/values.yaml").read_text()
+    begin = configdoc._HELM_VALUES_BEGIN
+    end = configdoc._HELM_VALUES_END
+    assert begin in values and end in values, "generated-config markers missing from values.yaml"
+    start = values.index(begin)
+    stop = values.index(end) + len(end) + 1  # include the marker's trailing newline
+    assert values[start:stop] == configdoc.helm_values_config()
+
+
 def _known_keys(model: type[Any]) -> set[str]:
     return set(model.model_fields)
 

@@ -198,7 +198,35 @@ def _render_narrative_comment(model: type[BaseModel], indent: str, lines: list[s
             lines.append(f"{indent}# {wrapped}")
 
 
+def _is_doc_commented(field: FieldInfo) -> bool:
+    """True for a field flagged ``json_schema_extra={"doc_commented": True}``.
+
+    Such a field is a mutually-exclusive ALTERNATIVE to the sibling above it (the
+    only case today is ``Config.orgs`` vs ``Config.salesforce``), so the generated
+    docs render its whole block COMMENTED OUT — the generated default stays a valid
+    single shape (single-org) instead of an invalid both-set one, while still
+    documenting the alternative inline for whoever wants it.
+    """
+    extra = field.json_schema_extra
+    return isinstance(extra, dict) and bool(extra.get("doc_commented"))
+
+
 def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) -> None:
+    if _is_doc_commented(field):
+        block: list[str] = []
+        _render_field_block(name, field, indent, block, with_narrative=False)
+        lines.append(
+            f"{indent}# ── alternative to the block above (mutually exclusive — set exactly one); "
+            "uncomment to use ──"
+        )
+        lines.extend("# " + line for line in block)
+        return
+    _render_field_block(name, field, indent, lines)
+
+
+def _render_field_block(
+    name: str, field: FieldInfo, indent: str, lines: list[str], with_narrative: bool = True
+) -> None:
     annotation = field.annotation
     comment = _first_line(field.description)
     is_required = field.is_required()
@@ -206,7 +234,8 @@ def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) ->
     if _is_model_type(annotation):
         inner_type = _unwrap_optional(annotation)
         assert isinstance(inner_type, type) and issubclass(inner_type, BaseModel)
-        _render_narrative_comment(inner_type, indent, lines)
+        if with_narrative:
+            _render_narrative_comment(inner_type, indent, lines)
         if comment:
             lines.append(f"{indent}{name}:  # {comment}")
         else:
@@ -216,7 +245,8 @@ def _render_field(name: str, field: FieldInfo, indent: str, lines: list[str]) ->
 
     item_model = _list_item_model_type(annotation)
     if item_model is not None:
-        _render_narrative_comment(item_model, indent, lines)
+        if with_narrative:
+            _render_narrative_comment(item_model, indent, lines)
         if comment:
             lines.append(f"{indent}{name}:  # {comment}")
         else:
@@ -368,6 +398,58 @@ def example_yaml() -> str:
     _render_model(Config, "", lines)
     body = "\n".join(lines)
     return _HEADER + "\n" + body + "\n"
+
+
+# Sentinel lines bounding the generated region in deploy/helm/values.yaml. The
+# BEGIN marker is the region's FIRST line and END its LAST, so the splice script
+# (scripts/gen_helm_values.py) and the drift gate can replace/compare the
+# inclusive [BEGIN..END] range without any other anchor.
+_HELM_VALUES_BEGIN = (
+    "# >>> BEGIN generated config — do not edit by hand; run `just gen-helm-values` <<<"
+)
+_HELM_VALUES_END = "# >>> END generated config <<<"
+
+_HELM_VALUES_HEADER = """\
+# The `config:` map below is GENERATED from the Pydantic schema (config.py) by
+# `just gen-helm-values`. Field comments are the model descriptions; values are the
+# schema defaults. Do NOT hand-edit between the markers — the drift gate
+# (tests/test_config_artifacts_drift.py) fails otherwise.
+#
+# This map is serialised verbatim into the sf2loki-config ConfigMap (mounted at
+# /etc/sf2loki/config.yaml). It is a TEMPLATE, not runnable as-is: pick `salesforce`
+# OR `orgs` (the generator renders both for reference) and fill in the empty
+# required values (login URL, client id, username, Loki URL, ...) via your values
+# file or --set config.salesforce.login_url=…. `*_file` secrets point at
+# /etc/sf2loki/secrets/… (the mounted Secret — see `secrets:` below). Set
+# `configOverride` to a raw YAML string to bypass this map entirely."""
+
+
+def helm_values_config() -> str:
+    """Render the Helm ``values.yaml`` ``config:`` block from the ``Config`` schema.
+
+    Returns the inclusive ``[BEGIN..END]`` region that lives in
+    ``deploy/helm/values.yaml``: the BEGIN marker, a header comment, the
+    ``config:`` map (body indented two spaces), then the END marker.
+    ``scripts/gen_helm_values.py`` splices this in place; the drift gate asserts
+    the committed region matches this output.
+
+    Same recursive walk as :func:`example_yaml` (schema defaults, Go-style
+    durations, ``*_file`` secrets as ``/etc/sf2loki/secrets/…`` paths, inline
+    ``SecretStr`` fields commented out) — only the wrapper differs.
+    """
+    lines: list[str] = []
+    _render_model(Config, "  ", lines)
+    body = "\n".join(lines)
+    return (
+        _HELM_VALUES_BEGIN
+        + "\n"
+        + _HELM_VALUES_HEADER
+        + "\nconfig:\n"
+        + body
+        + "\n"
+        + _HELM_VALUES_END
+        + "\n"
+    )
 
 
 def reference_markdown() -> str:
