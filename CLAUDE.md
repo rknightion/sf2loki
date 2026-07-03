@@ -54,6 +54,11 @@ just run config=config.yaml
   `_total`/`_bucket`/`_count`/`_sum` suffixes (keep `add_metric_suffixes` on).
 
 ## Git & commits (this repo)
+- **GitHub issues are the source of truth for what work has happened on this repo.**
+  Every substantial piece of work should have a tracking issue, and the commit that
+  completes it closes it (see the closing-keyword rule below). If you do a chunk of work
+  that has no issue yet, **file one describing it** (`gh issue create`) so the tracker
+  stays a complete record — then close it from the completing commit.
 - **Commit straight to `main`; push only when asked.** No PR flow for our own work.
 - **Conventional commits, always** — `feat:` / `fix:` / `docs:` / `chore:` / `perf:`
   etc. (`feat!:` or a `BREAKING CHANGE:` footer for majors). release-please cuts
