@@ -59,7 +59,8 @@ just run config=config.yaml
   completes it closes it (see the closing-keyword rule below). If you do a chunk of work
   that has no issue yet, **file one describing it** (`gh issue create`) so the tracker
   stays a complete record — then close it from the completing commit.
-- **Commit straight to `main`; push only when asked.** No PR flow for our own work.
+- **Commit straight to `main` and push immediately — unprompted.** No PR flow for our own work;
+  the push is what closes the tracking issue (bypass-on-push is expected).
 - **Conventional commits, always** — `feat:` / `fix:` / `docs:` / `chore:` / `perf:`
   etc. (`feat!:` or a `BREAKING CHANGE:` footer for majors). release-please cuts
   releases + the changelog from these, so the type/scope matters.
