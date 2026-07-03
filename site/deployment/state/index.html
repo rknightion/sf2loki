@@ -1921,9 +1921,9 @@ ruled out and a checkpoint genuinely needs to be moved past a poison record — 
 <code>sf2loki no recent Loki push</code> are the ones most likely to point you here) that a
 checkpoint is stuck.</p>
 <h2 id="command-surface">Command surface<a class="headerlink" href="#command-surface" title="Anchor link to this section for reference">&para;</a></h2>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>sf2loki state show   [--key GLOB] --config config.yaml   # pretty-print checkpoints
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>sf2loki state set    KEY VALUE     --config config.yaml   # CAS-safe write of one key
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>sf2loki state delete  KEY          --config config.yaml   # remove a key
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>sf2loki<span class="w"> </span>state<span class="w"> </span>show<span class="w">   </span><span class="o">[</span>--key<span class="w"> </span>GLOB<span class="o">]</span><span class="w"> </span>--config<span class="w"> </span>config.yaml<span class="w">   </span><span class="c1"># pretty-print checkpoints</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>sf2loki<span class="w"> </span>state<span class="w"> </span><span class="nb">set</span><span class="w">    </span>KEY<span class="w"> </span>VALUE<span class="w">     </span>--config<span class="w"> </span>config.yaml<span class="w">   </span><span class="c1"># CAS-safe write of one key</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>sf2loki<span class="w"> </span>state<span class="w"> </span>delete<span class="w">  </span>KEY<span class="w">          </span>--config<span class="w"> </span>config.yaml<span class="w">   </span><span class="c1"># remove a key</span>
 </span></code></pre></div>
 <p>All three operate through the same <code>build_store</code> factory the daemon itself uses, so
 they work identically against every backend. <code>--key</code> on <code>show</code> is an <code>fnmatch</code> glob

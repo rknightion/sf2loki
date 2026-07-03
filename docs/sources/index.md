@@ -73,7 +73,7 @@ Whichever source you use, only a fixed set of labels is ever promoted to a Loki 
 a startup allowlist guard rejects any other static label
 (`src/sf2loki/sinks/loki/labels.py:ALLOWED_LABELS`):
 
-```
+```text
 job, service_name, source, event_type, sf_org_id, environment, org
 ```
 

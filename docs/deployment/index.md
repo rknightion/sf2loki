@@ -43,7 +43,7 @@ The container runs on ECS the same way: mount the config and secrets the same wa
 (EFS or a secrets provider in place of bind mounts), and set the task definition's
 `healthCheck` to poll `/readyz`:
 
-```
+```bash
 CMD-SHELL curl -f http://localhost:8080/readyz || exit 1
 ```
 

@@ -243,7 +243,7 @@ pre-multi-org. See [Configuration](configuration/index.md) for the `orgs:` schem
 Only a fixed allowlist of Loki stream labels is ever permitted
 (`src/sf2loki/sinks/loki/labels.py:ALLOWED_LABELS`):
 
-```
+```text
 job, service_name, source, event_type, sf_org_id, environment, org
 ```
 

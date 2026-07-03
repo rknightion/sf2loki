@@ -16,7 +16,7 @@ checkpoint is stuck.
 
 ## Command surface
 
-```
+```bash
 sf2loki state show   [--key GLOB] --config config.yaml   # pretty-print checkpoints
 sf2loki state set    KEY VALUE     --config config.yaml   # CAS-safe write of one key
 sf2loki state delete  KEY          --config config.yaml   # remove a key

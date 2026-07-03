@@ -1836,7 +1836,7 @@ from an env file named exactly <code>.env.dev</code> — that's the filename the
 <p>The container runs on ECS the same way: mount the config and secrets the same way
 (EFS or a secrets provider in place of bind mounts), and set the task definition's
 <code>healthCheck</code> to poll <code>/readyz</code>:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>CMD-SHELL curl -f http://localhost:8080/readyz || exit 1
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>CMD-SHELL<span class="w"> </span>curl<span class="w"> </span>-f<span class="w"> </span>http://localhost:8080/readyz<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
 </span></code></pre></div>
 <p>with a <code>startPeriod</code> of ~20s covering normal startup, and the container marked
 <code>essential: true</code> so a fast-fail (e.g. bad Salesforce credentials) restarts the task.
