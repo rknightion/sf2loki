@@ -1,0 +1,62 @@
+# Managed by sf2loki. Apply the whole pack with:
+#   gcx resources push -p deploy/grafana/rules/
+# gcx reads ONE resource per file, so each rule is its own file.
+# Datasource UIDs (grafanacloud-logs / grafanacloud-prom) are the Grafana Cloud
+# defaults; on self-hosted Grafana, replace them with your Loki/Prometheus UIDs.
+apiVersion: rules.alerting.grafana.app/v0alpha1
+kind: AlertRule
+metadata:
+  name: sf2loki-leader-anomaly
+  annotations:
+    grafana.app/folder: sf2loki
+spec:
+  title: sf2loki leader count anomaly
+  trigger:
+    interval: 60s
+  for: 5m
+  noDataState: Ok
+  execErrState: Error
+  labels:
+    severity: critical
+    service: sf2loki
+  annotations:
+    summary: sf2loki active-leader count is not exactly 1
+    description: sf2loki reports {{ $values.A.Value }} active leader(s) (expected exactly 1) — 0 is a leaderless ingestion gap, 2+ is split-brain (double ingestion).
+  expressions:
+    A:
+      source: true
+      datasourceUID: grafanacloud-prom
+      relativeTimeRange:
+        from: 5m
+        to: 0s
+      model:
+        refId: A
+        expr: sum(sf2loki_leader{job="sf2loki"})
+        instant: true
+        range: false
+        datasource:
+          type: prometheus
+          uid: grafanacloud-prom
+    B:
+      datasourceUID: __expr__
+      model:
+        refId: B
+        type: math
+        expression: abs($A - 1)
+        datasource:
+          type: __expr__
+          uid: __expr__
+    C:
+      datasourceUID: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource:
+          type: __expr__
+          uid: __expr__
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0

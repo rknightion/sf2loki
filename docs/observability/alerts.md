@@ -32,9 +32,10 @@ dashboards and alerts can read a cheap metric instead of re-scanning logs.
 | `sf2loki-ingest-lag-high` | warning | p95 ingest lag above 15m (900s), sustained 10m (`sf2loki_ingest_lag_seconds_bucket`) | Prometheus/OTLP (`grafanacloud-prom`) |
 | `sf2loki-loki-push-failing` | critical | Loki push failure rate above 5% over 5m (`sf2loki_loki_push_total`) | Prometheus/OTLP (`grafanacloud-prom`) |
 | `sf2loki-no-recent-push` | critical | No successful Loki push in the last 10m (`sf2loki_last_push_success_timestamp_seconds`) | Prometheus/OTLP (`grafanacloud-prom`) |
+| `sf2loki-leader-anomaly` | critical | Active-leader count `sum(sf2loki_leader)` not exactly 1 — 0 = leaderless gap, 2+ = split-brain (`sf2loki_leader`) | Prometheus/OTLP (`grafanacloud-prom`) |
 
 `sf2loki-login-failure-spike` and `sf2loki-apex-callout-error-rate` query
-Loki directly; the other four connector-health alerts read the metrics
+Loki directly; the other connector-health alerts read the metrics
 documented in [Metrics](metrics.md), via the companion
 [`sf2loki-connector-health.json`](dashboards.md#the-dashboard-suite)
 dashboard.
