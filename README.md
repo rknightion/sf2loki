@@ -1,5 +1,7 @@
 # sf2loki
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/rknightion/sf2loki/badge)](https://scorecard.dev/viewer/?uri=github.com/rknightion/sf2loki)
+
 Ship Salesforce Event Monitoring data into Grafana Loki.
 
 `sf2loki` is a long-running Python/asyncio service that ingests Salesforce **Real-Time Event
