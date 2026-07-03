@@ -20,5 +20,5 @@ kubeVersion: ">=1.21.0-0"
 # annotated lines below on each release (see release-please-config.json extra-files); the shared
 # container-publish reusable also derives both from the git tag at publish time, so the registry and
 # the source never drift.
-version: 0.2.0 # x-release-please-version
-appVersion: "0.2.0" # x-release-please-version
+version: 1.0.0 # x-release-please-version
+appVersion: "1.0.0" # x-release-please-version
