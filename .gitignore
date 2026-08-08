@@ -41,3 +41,7 @@ ko.md
 *.swp
 .idea/
 .vscode/
+
+# Zensical build output. The m7kni.io hub builds this repo's docs from
+# docs/ plus docs.toml; nothing here ever needs a built site committed.
+/site
