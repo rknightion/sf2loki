@@ -93,7 +93,6 @@ Development = [
 ]
 
 [assets]
-logo_icon = "material/upload-network-outline"
 social_image = "assets/social-card.png"
 social_image_alt = "sf2loki social preview card"
 extra_css = [
