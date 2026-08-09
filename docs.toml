@@ -50,6 +50,9 @@ Sources = [
 Architecture = "architecture.md"
 
 [[site.nav]]
+"Why This Shipper" = "comparison.md"
+
+[[site.nav]]
 "Deployment & Operations" = [
     "deployment/index.md",
     { Kubernetes = "deployment/kubernetes.md" },
