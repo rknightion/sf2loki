@@ -71,6 +71,9 @@ Observability = [
 "CLI Reference" = "reference/cli.md"
 
 [[site.nav]]
+FAQ = "faq.md"
+
+[[site.nav]]
 Troubleshooting = "troubleshooting.md"
 
 [[site.nav]]
