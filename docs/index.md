@@ -21,21 +21,21 @@ crashed leader fails over without a second instance double-delivering events.
 
 ## Quickstart
 
-`uvx` runs it without installing anything, which is useful while you are still
-setting the Salesforce side up:
+sf2loki ships as a container image. The `uvx` / `pipx` / `pip` paths mentioned
+elsewhere in this repo do not work yet — the package is not published to PyPI.
 
 ```sh
-uvx sf2loki --help
-uvx sf2loki --version
+docker pull ghcr.io/rknightion/sf2loki:latest
+docker run --rm ghcr.io/rknightion/sf2loki:latest --version
 ```
 
-Beyond that you need a `config.yaml` before anything will validate — `--check`
-verifies config and wiring with no network calls, and `doctor` does a live
-preflight of auth, entitlements and the Loki write path:
+You need a `config.yaml` before anything else will validate. `--check` verifies
+config and wiring with no network calls; `doctor` does a live preflight of auth,
+entitlements and the Loki write path:
 
 ```sh
-uvx sf2loki --check --config config.yaml
-uvx sf2loki doctor --config config.yaml
+docker run --rm -v "$(pwd)/config.yaml:/etc/sf2loki/config.yaml:ro" \
+  ghcr.io/rknightion/sf2loki:latest --check --config /etc/sf2loki/config.yaml
 ```
 
 ## Features
