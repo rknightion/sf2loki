@@ -19,6 +19,25 @@ from exactly one source so the same activity can't double-count; and an active-p
 model (file lease or Kubernetes `Lease`) for the single Pub/Sub subscriber the API allows, so a
 crashed leader fails over without a second instance double-delivering events.
 
+## Quickstart
+
+`uvx` runs it without installing anything, which is useful while you are still
+setting the Salesforce side up:
+
+```sh
+uvx sf2loki --help
+uvx sf2loki --version
+```
+
+Beyond that you need a `config.yaml` before anything will validate — `--check`
+verifies config and wiring with no network calls, and `doctor` does a live
+preflight of auth, entitlements and the Loki write path:
+
+```sh
+uvx sf2loki --check --config config.yaml
+uvx sf2loki doctor --config config.yaml
+```
+
 ## Features
 
 - **Four pluggable sources** — Pub/Sub streaming for RTEM channels and your own custom platform
