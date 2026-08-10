@@ -3,6 +3,7 @@ name: sf2loki
 description: Stream Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, active-passive HA.
 type: application
 home: https://m7kni.io/sf2loki/
+icon: https://m7kni.io/sf2loki/assets/project-icon-solid.svg
 sources:
   - https://github.com/rknightion/sf2loki
 keywords:
@@ -22,3 +23,19 @@ kubeVersion: ">=1.21.0-0"
 # the source never drift.
 version: 1.0.0 # x-release-please-version
 appVersion: "1.0.0" # x-release-please-version
+annotations:
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: AGPL-3.0
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://m7kni.io/sf2loki/
+    - name: Getting started
+      url: https://m7kni.io/sf2loki/getting-started/
+    - name: Configuration reference
+      url: https://m7kni.io/sf2loki/configuration/
+    - name: source
+      url: https://github.com/rknightion/sf2loki
+  artifacthub.io/maintainers: |
+    - name: rknightion
+      email: rob@rob-knight.com
