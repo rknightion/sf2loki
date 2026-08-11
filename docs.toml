@@ -5,7 +5,7 @@
 [site]
 name = "sf2loki"
 description = "Streams Salesforce Event Monitoring data (Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki — cardinality-disciplined, HA-capable."
-author = "Rob Knighton"
+author = "Rob Knight"
 keywords = [
     "salesforce",
     "grafana loki",
