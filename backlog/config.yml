@@ -1,0 +1,20 @@
+project_name: "sf2loki"
+default_status: "To Do"
+statuses: ["To Do", "In Progress", "Parked", "Done"]
+definition_of_done:
+  - "just gate is green (ruff check + ruff format --check + mypy src + pytest) — run it, don't assert it"
+  - "just gen-config run and its output committed, if config.py changed (CI drift gate fails otherwise)"
+  - "committed straight to main with a conventional-commit message, and pushed"
+labels: []
+date_format: yyyy-mm-dd
+max_column_width: 20
+auto_open_browser: true
+default_port: 6420
+remote_operations: false
+auto_commit: false
+filesystem_only: false
+zero_padded_ids: 4
+bypass_git_hooks: false
+check_active_branches: false
+active_branch_days: 30
+task_prefix: "sfl"

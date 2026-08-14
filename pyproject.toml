@@ -73,7 +73,10 @@ packages = ["src/sf2loki"]
 [tool.ruff]
 line-length = 100
 target-version = "py314"
-extend-exclude = ["**/_generated/**"]
+# .claude/hooks/ holds agent-harness scripts copied byte-for-byte from a shared
+# reference implementation used across repos; reformatting them here would break
+# that parity, and they are not shipped project source.
+extend-exclude = ["**/_generated/**", ".claude/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
