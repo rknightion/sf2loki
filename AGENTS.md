@@ -72,8 +72,8 @@ operating model** doc for this project's own rules, defect classes and contentio
 in `backlog/docs/`.
 
 Three rules the tooling cannot be trusted to enforce on its own — the first two are backed by a
-`PreToolUse` hook (`.claude/hooks/backlog-guard.py`, tested by `backlog-guard_test.py`) that denies
-the call rather than trusting anyone to remember:
+global `PreToolUse` hook in the agent config, which denies the call rather than trusting anyone to
+remember:
 
 - **Never `--notes` or `--plan` bare.** They *silently replace* the whole section, destroying another
   session's writes with no warning and exit 0. Use `--append-notes` / `--append-plan`. Open upstream
