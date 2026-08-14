@@ -43,3 +43,9 @@ just gen-config  # regenerate config.example.yaml + docs/config-reference.md
 
 Use GitHub issues for bugs/features. For security problems use the private
 process in [SECURITY.md](SECURITY.md) instead.
+
+The tracker looks empty because maintainer work is tracked in-repo with
+[Backlog.md](https://github.com/MrLesk/Backlog.md) under `backlog/` — run
+`backlog task list --plain` to see what is planned, or read the task files
+directly. Bug reports and feature requests from outside are still very welcome
+as GitHub issues.
