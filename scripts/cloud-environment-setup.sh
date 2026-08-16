@@ -9,8 +9,10 @@ readonly UV_VERSION="0.12.5"
 readonly JUST_VERSION="1.58.0"
 readonly BACKLOG_VERSION="1.50.1"
 readonly LOCAL_BIN="${HOME}/.local/bin"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT
 
 export PATH="${LOCAL_BIN}:${PATH}"
 mkdir -p "${LOCAL_BIN}"

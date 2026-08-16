@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-08-16 10:26'
-updated_date: '2026-08-16 11:30'
+updated_date: '2026-08-16 18:04'
 labels: []
 dependencies: []
 references:
@@ -35,7 +35,7 @@ Provide a repository-owned manual setup script for Codex cloud tasks so agents r
 <!-- DOD:BEGIN -->
 - [x] #1 just gate is green (ruff check + ruff format --check + mypy src + pytest) — run it, don't assert it
 - [x] #2 just gen-config run and its output committed, if config.py changed (CI drift gate fails otherwise)
-- [ ] #3 committed straight to main with a conventional-commit message, and pushed
+- [x] #3 committed straight to main with a conventional-commit message, and pushed
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -64,6 +64,10 @@ Claude Code cloud follow-up: replaced downloads from astral.sh and an unattached
 Renamed the setup entry point to `scripts/cloud-environment-setup.sh` as requested and added a top-of-file warning that local agents must not execute it.
 
 Final naming validation passed without executing the cloud-only script locally: `bash -n scripts/cloud-environment-setup.sh`, `git diff --check`, reference search, and the full non-root `just gate` (1045 passed, 1 skipped).
+
+DoD #3 status update: the work was committed (dfc923bc1de3d2befa9908135944cf2013dadb3c and 2bd65a979f050809458eeef4081398c56ce16d46) and pushed to main. The final rename commit 37a2e21 also reached main. The original inability to push was a transient local environment issue; the commits are present in the remote repository history.
+
+Path correction: the validation evidence above references 'scripts/codex-cloud-setup.sh' (the original path). The script was subsequently renamed to 'scripts/cloud-environment-setup.sh' in commit 37a2e21. Current path is scripts/cloud-environment-setup.sh.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
