@@ -22,6 +22,24 @@ just proto       # regenerate gRPC/protobuf stubs (only when proto/ changes)
 just gen-config  # regenerate config.example.yaml + docs/config-reference.md
 ```
 
+### Codex and Claude Code cloud setup
+
+In either the [Codex cloud environment](https://learn.chatgpt.com/docs/environments/cloud-environment#manual-setup)
+or [Claude Code cloud environment](https://code.claude.com/docs/en/cloud-environments#setup-scripts),
+set the environment's setup script to:
+
+```bash
+bash scripts/cloud-environment-setup.sh
+```
+
+The script installs `uv`, `just`, and the repository-compatible Backlog.md CLI
+from package registries available under both providers' default network policies.
+It then installs the pinned Python version and locked development dependencies, and
+persists `~/.local/bin` in `~/.bashrc`, because Codex runs setup and agent work in
+separate Bash sessions. The script is idempotent and normally completes within
+Claude Code's five-minute setup limit, so it is safe when either provider builds
+or refreshes a cached environment.
+
 ## Ground rules
 
 - **Tests first.** Bug fixes and features come with tests; the repo is built
