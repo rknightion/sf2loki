@@ -1,9 +1,9 @@
 ---
 id: doc-0003
-title: Closed GitHub issues (2026-07-01 to 2026-07-03)
+title: Closed GitHub issues (pre-Backlog history index)
 type: other
 created_date: '2026-08-14 17:01'
-updated_date: '2026-08-14 17:02'
+updated_date: '2026-08-17 09:03'
 ---
 > **The closed history of this repo's GitHub issue tracker: 63 issues, all closed as completed,
 > spanning 2026-07-01 to 2026-07-03.** These issues no longer exist on GitHub — they were deleted
