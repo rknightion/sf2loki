@@ -60,9 +60,9 @@ jobs:
       security-events: write
     # Local trusted same-repo reusable; forwards the release tag so the shared
     # container-publish pipeline emits semver + latest image tags.
-    uses: ./.github/workflows/docker.yml
+    uses: ./.github/workflows/publish.yml
     with:
-      release-tag: ${{ needs.release-please.outputs.tag_name }}
+      release_tag: ${{ needs.release-please.outputs.tag_name }}
 
   pypi-release:
     needs: release-please

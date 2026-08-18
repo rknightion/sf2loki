@@ -41,6 +41,6 @@ jobs:
       id-token: write        # cosign keyless signing
       attestations: write    # SLSA build provenance
       security-events: write # Trivy SARIF upload
-    uses: ./.github/workflows/docker.yml
+    uses: ./.github/workflows/publish.yml
     with:
-      release-tag: ${{ needs.rc.outputs.tag }}
+      release_tag: ${{ needs.rc.outputs.tag }}

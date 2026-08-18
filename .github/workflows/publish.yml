@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: publish
 
 # Thin caller over the shared container-publish reusable: ONE pipeline for both
 # edge (push to main) and release (release-please -> workflow_call with a tag).
@@ -14,7 +14,7 @@ on:
     types: [checks_requested]
   workflow_call:
     inputs:
-      release-tag:
+      release_tag:
         description: "Release tag (vX.Y.Z) to publish semver + latest tags for; empty for edge builds."
         type: string
         required: false
@@ -32,7 +32,7 @@ jobs:
       security-events: write # Trivy SARIF upload
     uses: rknightion/.github/.github/workflows/container-publish.yml@f31690684f4292d1fe8e528618f7c8306fe27d9a # v1.3.1
     with:
-      release-tag: ${{ inputs.release-tag }}
+      release-tag: ${{ inputs.release_tag }}
       # Also package + push the Helm chart as an OCI artifact to
       # ghcr.io/rknightion/charts/sf2loki (cosign-signed, attached to the release on a
       # tagged build; a time-sortable 0.0.0-main.<ts>.<sha> snapshot on edge builds).
