@@ -17,7 +17,7 @@ bump or tag step.
 4. Two follow-on jobs are gated on `release_created` so only one publish path runs per push:
    - **`docker-release`** (release only) — builds, signs, and publishes the multi-arch container
      image to `ghcr.io/rknightion/sf2loki` with the new semver tag plus `:latest`, via the local
-     reusable `docker.yml` workflow.
+     reusable `publish.yml` workflow.
    - **`pypi-release`** (release only) — builds an sdist + wheel with `uv build`, verifies dist
      contents, and publishes to PyPI via **Trusted Publishing (OIDC)** — no stored token; the
      publisher is registered on PyPI for this repo, the `release-please.yml` workflow, and the
@@ -25,6 +25,18 @@ bump or tag step.
    - An ordinary push to `main` that doesn't trigger a release instead publishes a rolling `:main`
      edge image (see [Installation](../installation.md#docker-docker-compose)) — no PyPI publish
      happens for edge pushes.
+
+5. **Release candidates are automatic.** Every push to `main` that passes `ci-success` also cuts a
+   `vX.Y.Z-rc.N` prerelease via `auto-rc.yml`, where `X.Y.Z` is the version release-please is
+   already staging in its open release PR. It publishes the same image and chart as a stable
+   release, tagged with the RC version. It never writes to the changelog and never touches the
+   release PR — release-please stays the single owner of both.
+
+   RC images never take `:latest`; `container-publish` suppresses it for any tag containing `-`.
+   `helm` only offers an RC under `--devel`.
+
+6. **`release: ready`** on the release PR arms GitHub auto-merge, so it merges itself once
+   `ci-success` goes green rather than sitting red unnoticed.
 
 ## Conventional commit types → changelog sections
 
