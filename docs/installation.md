@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Docker image, docker-compose, uv/pipx, and config loading rules
+description: Install sf2loki with its container image, Docker Compose, uv or pipx, and understand how configuration is loaded.
 ---
 
 # Installation

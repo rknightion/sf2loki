@@ -1,6 +1,6 @@
 ---
 title: Getting Started
-description: Zero to first log lines in Loki in about 5 minutes
+description: Connect sf2loki to Salesforce Event Monitoring and send your first structured event logs to Grafana Loki.
 ---
 
 # Getting Started
