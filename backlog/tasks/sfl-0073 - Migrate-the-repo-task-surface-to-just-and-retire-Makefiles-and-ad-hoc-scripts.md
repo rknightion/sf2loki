@@ -4,7 +4,9 @@ title: Migrate the repo task surface to just and retire Makefiles and ad-hoc scr
 status: To Do
 assignee: []
 created_date: '2026-08-28 19:33'
-labels: []
+updated_date: '2026-08-29 09:18'
+labels:
+  - 'wave:0-pilot'
 dependencies: []
 priority: medium
 type: chore
@@ -589,3 +591,28 @@ Do not touch any of the following in this task:
 - [ ] #2 just gen-config run and its output committed, if config.py changed (CI drift gate fails otherwise)
 - [ ] #3 committed straight to main with a conventional-commit message, and pushed
 <!-- DOD:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: campaign-ordering
+created: 2026-08-29 09:18
+---
+## Fleet ordering — WAVE 0, the pilot. Do this repo FIRST.
+
+Nothing else in the 42-repo campaign starts until this one lands. It is the pilot because it already carries the fleet's only pre-existing `justfile`, so it is the smallest delta while still exercising the whole standard: `just --fmt --check`, `[group(...)]` on every public recipe, the `gen` / `gen-check` drift pair, and CI wiring.
+
+**Your extra obligation as the pilot:** the other 41 tasks were written against a frozen seam. Anything you find wrong, missing or ambiguous in the standard is cheap to fix here and 41x more expensive later. When you finish, report every deviation you had to make and why, so the standard is amended before Wave 1 begins. Do not silently work around a defect in the standard.
+
+**Provisioning `just` in CI.** Which mechanism depends on the runner, and the two must not be mixed:
+
+| Runner | Mechanism |
+| --- | --- |
+| `arc-arm64` (m7kni self-hosted) | `just` is **baked into the runner image** by `m7kni/ci-tools` (`runner-image/Dockerfile`, `ARG JUST_VERSION`). Do **not** add `extractions/setup-just`, and delete the step if this repo already has one — it installs a second `just` earlier on `PATH` and turns the image pin into a lie. |
+| GitHub-hosted (all `rknightion` repos) | `extractions/setup-just`, SHA-pinned, with an explicit `just-version:`. |
+
+Both sides currently sit on **1.58.0** and are Renovate-managed. `ci-tools`' `Tool version drift` workflow fails if the Dockerfile `ARG` and the published image ever disagree, and lists any repo still carrying a second pin.
+
+**While you are in the workflow files, check the hub pin.** On 2026-08-29 Renovate was unfrozen for `rknightion/.github` in `m7kni/renovate-config` — it had been `enabled: false` on the mistaken belief that callers tracked `@main`, which froze the fleet across 19 different hub SHAs (v1.3.1 June → v1.9.7 August) so that no hub fix ever propagated. Bumps now arrive as one grouped, CI-gated, automerged PR per repo. **A `uses:` whose comment is not a real `# vX.Y.Z` still cannot be bumped** (it resolves to a digest-only update, which the fleet rules disable) — if you find one, repair the comment as part of this task.
+---
+<!-- COMMENTS:END -->
