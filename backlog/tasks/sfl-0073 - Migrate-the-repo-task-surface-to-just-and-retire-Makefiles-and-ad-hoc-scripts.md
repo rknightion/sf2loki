@@ -4,7 +4,7 @@ title: Migrate the repo task surface to just and retire Makefiles and ad-hoc scr
 status: To Do
 assignee: []
 created_date: '2026-08-28 19:33'
-updated_date: '2026-08-29 10:43'
+updated_date: '2026-08-29 11:03'
 labels:
   - 'wave:0-pilot'
 dependencies: []
@@ -633,5 +633,17 @@ This supersedes the frozen wording *"`check` is the complete local gate and repr
 Eleven of the 42 lanes arrived at this shape independently before it was ratified, which is why it won.
 
 **If this repo has no such legs, it has no `ci` recipe at all** and `check` is the whole gate. Do not add an empty one.
+---
+
+author: campaign-ordering
+created: 2026-08-29 11:03
+---
+## Correction to the WAVE 0 comment above
+
+That comment says this repo carries **"the fleet's only pre-existing `justfile`"**. That is **wrong**. Six repos already have one: `backlog.md-iOS`, `dmarc-reporties`, `sf2loki`, `tailscale2otel`, `brewmdm-control-plane` and `brewmdm-macos-agent`.
+
+The pilot choice still stands — this repo's justfile is the closest to the frozen standard and it exercises `--fmt --check`, groups and the `gen`/`gen-check` drift pair — but do **not** assume the other 41 repos are all greenfield. Six are partial migrations, and `tailscale2otel` and `brewmdm-control-plane` already run `extractions/setup-just` in CI.
+
+Check for an existing `justfile` before planning a repo's migration; several tasks were written on the assumption there wasn't one.
 ---
 <!-- COMMENTS:END -->
