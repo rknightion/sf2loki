@@ -1,10 +1,10 @@
 ---
 id: SFL-0073
 title: Migrate the repo task surface to just and retire Makefiles and ad-hoc scripts
-status: Parked
+status: Done
 assignee: []
 created_date: '2026-08-28 19:33'
-updated_date: '2026-08-29 14:53'
+updated_date: '2026-08-29 18:18'
 labels:
   - 'wave:0-pilot'
 dependencies: []
@@ -613,6 +613,8 @@ Local Docker image proof is blocked in this environment: the pinned public base 
 Parked before commit because the required CodeRabbit review could not start: three attempts returned the service rate-limit response and no findings were produced. No retry will be made without changed review capacity.
 
 Resume boundary: leave the named staged task-surface diff intact; once review capacity is available, run `coderabbit review --agent`, address any actionable findings, re-run the affected checks, commit the exact staged paths with a conventional SFL-0073 subject, push main, then wait for the final-SHA CI run. Local evidence already available: Just format/list/dump, two consecutive `just check` runs plus a final re-run (1,045 passed, 1 skipped; Helm schemas 5/8/8 valid and 0 skipped), actionlint, and targeted Zizmor for ci.yml. Local Docker image/smoke remains unproven because the public base image registry denied an OAuth token.
+
+Unparked and completed 2026-08-29. CodeRabbit returned zero findings. Also cleared seven open Dependabot advisories in the same pass (aiohttp, pyasn1, setuptools). Migration at 7b61661; exact-head CI green.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
