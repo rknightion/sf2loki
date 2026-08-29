@@ -144,7 +144,7 @@ jobs:
       kubernetes-versions: "1.29.0"
       # Blank first line renders the bare default; then the HA topology and the
       # all-extras permutation.
-      permutations: |
+      permutations: |-
 
         --set ha.enabled=true --set replicaCount=2 --set networkPolicy.enabled=true
         --set externalSecrets.enabled=true --set externalSecrets.aws.region=eu-west-1 --set serviceAccount.esoName=sf2loki-eso --set secrets.create=true
