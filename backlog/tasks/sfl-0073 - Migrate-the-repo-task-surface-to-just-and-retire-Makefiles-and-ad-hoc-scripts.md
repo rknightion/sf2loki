@@ -1,10 +1,10 @@
 ---
 id: SFL-0073
 title: Migrate the repo task surface to just and retire Makefiles and ad-hoc scripts
-status: To Do
+status: Parked
 assignee: []
 created_date: '2026-08-28 19:33'
-updated_date: '2026-08-29 11:03'
+updated_date: '2026-08-29 14:53'
 labels:
   - 'wave:0-pilot'
 dependencies: []
@@ -575,12 +575,12 @@ Do not touch any of the following in this task:
 - [ ] #1 Top-level justfile defines the seven mandatory recipes (default, setup, fmt, fmt-check, lint, test, check) plus typecheck, gen, gen-check, ci, and alias gate := check, with the header set shell := ["bash", "-euo", "pipefail", "-c"]
 - [ ] #2 just check runs fmt-check, lint, typecheck, test, gen-check, helm-lint and dist-check; it is green on a clean checkout and a second consecutive run is still green and leaves git status clean
 - [ ] #3 just --fmt --check exits 0 (the {{config}} and {{tag}} interpolation spacing at the current justfile:51 and justfile:55 is fixed) and fmt-check includes just --fmt --check
-- [ ] #4 just --list exits 0 and shows a # doc comment and one of the six fleet groups (check/build/dev/gen/infra/release) for every public recipe; just --dump --dump-format json exits 0, proving no unstable feature is used
+- [ ] #4 just --list exits 0 and shows a # doc comment for every public recipe, and exactly one fleet group (check/build/dev/gen/infra/release) for every public recipe other than the mandated ungrouped default and setup; just --dump --dump-format json exits 0, proving no unstable feature is used
 - [ ] #5 No Makefile or GNUmakefile exists or is created; the repo has none today and none is added
 - [ ] #6 scripts/gen_proto.sh is deleted and its body (including the portable sed -i.bak rewrite and the .bak cleanup) lives in the proto recipe; nothing in the tree references gen_proto.sh outside CHANGELOG.md and archive/
 - [ ] #7 The KEEP scripts survive as files and are each reachable through a recipe: scripts/check_dist.py via just dist-check, scripts/gen_helm_values.py via just gen-helm-values and just gen-config, scripts/generate_activity.py via just activity; scripts/cloud-environment-setup.sh is left completely untouched
-- [ ] #8 In .github/workflows/ci.yml the gate, package, helm-chart and docker-build-test jobs each carry a SHA-pinned extractions/setup-just step with just-version: '1.58.0' and their shell steps collapse to just setup / just lint / just fmt-check / just typecheck / just test / just gen-check / just dist-check / just helm-lint / just smoke sf2loki:test; the docker/build-push-action and azure/setup-helm and kubeconform-checksum steps stay as they are
-- [ ] #9 ci-success keeps its exact name, its if: always() and its needs: [gate, docker-build-test, package, helm-chart] list, and no workflow file other than ci.yml is edited
+- [ ] #8 In .github/workflows/ci.yml the local gate, package, docker-build-test, and helm-render-guard jobs each carry a SHA-pinned extractions/setup-just step with just-version: 1.58.0; their shell steps collapse to just setup / just lint / just fmt-check / just typecheck / just test / just gen-check / just dist-check / just smoke sf2loki:test / just helm-render-guard. The pinned shared helm-chart reusable remains unchanged, continues chart lint/render/kubeconform validation, and no duplicate Helm job is introduced; docker/build-push-action and azure/setup-helm stay as they are
+- [ ] #9 ci-success keeps its exact current name, its if: always(), and its current needs: [gate, docker-build-test, package, helm-chart, helm-render-guard] list, and no workflow file other than ci.yml is edited
 - [ ] #10 AGENTS.md carries a Task interface section naming just check as the gate with no pasted recipe list, and CONTRIBUTING.md, README.md, docs/installation.md, docs/development/contributing.md and docs/development/generate-activity.md no longer tell anyone to run just gate or python scripts/generate_activity.py
 - [ ] #11 backlog/config.yml definition_of_done names just check and just gen instead of just gate and just gen-config
 <!-- AC:END -->
@@ -591,6 +591,29 @@ Do not touch any of the following in this task:
 - [ ] #2 just gen-config run and its output committed, if config.py changed (CI drift gate fails otherwise)
 - [ ] #3 committed straight to main with a conventional-commit message, and pushed
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reconcile the current workflow rather than the stale task snapshot: preserve the pinned shared Helm reusable and current ci-success dependency contract; route the local Helm render guard through a recipe.
+2. Replace the existing justfile with the fleet task surface, adapted to the ratified check/ci split and the current CRD-schema validation; retain only the approved real scripts.
+3. Collapse eligible local CI shell steps to recipes behind a SHA-pinned setup-just action, without changing hooks, pins, permissions, concurrency, or shared reusable calls.
+4. Update the specified contributor/agent docs and Backlog definition of done, then prove formatting, the task surface, targeted gates, Actions validation, CodeRabbit review, final CI, and commit/push.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reconciled live-state drift before implementation: the current Helm lint/render/schema validation is a SHA-pinned shared reusable and the single-instance assertion is a separate local job. Preserved both contracts, added setup-just only to local GitHub-hosted jobs, and routed the local guard through `just helm-render-guard`; no duplicate Helm job was introduced.
+
+The task snapshot used `-ignore-missing-schemas`, but the current workflow supplies CRD schemas. The local `helm-lint` matches the current validation (three renders, strict kubeconform, CRD catalog URL, zero skipped resources) instead of restoring the unsafe flag.
+
+Local Docker image proof is blocked in this environment: the pinned public base image was denied an OAuth token before the build. No retry was made without changed credentials; the pushed GitHub-hosted docker-build-test job is the remaining proof boundary.
+
+Parked before commit because the required CodeRabbit review could not start: three attempts returned the service rate-limit response and no findings were produced. No retry will be made without changed review capacity.
+
+Resume boundary: leave the named staged task-surface diff intact; once review capacity is available, run `coderabbit review --agent`, address any actionable findings, re-run the affected checks, commit the exact staged paths with a conventional SFL-0073 subject, push main, then wait for the final-SHA CI run. Local evidence already available: Just format/list/dump, two consecutive `just check` runs plus a final re-run (1,045 passed, 1 skipped; Helm schemas 5/8/8 valid and 0 skipped), actionlint, and targeted Zizmor for ci.yml. Local Docker image/smoke remains unproven because the public base image registry denied an OAuth token.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
