@@ -83,13 +83,14 @@ independently per subscriber connection, so a second concurrently-active instanc
 ```bash
 git clone https://github.com/rknightion/sf2loki.git
 cd sf2loki
-just setup         # uv sync — create the venv from the lockfile
-just gate          # ruff + mypy --strict + pytest — the green bar
+just setup         # uv sync --locked — create the venv from the lockfile
+just check         # full daemon-free gate
 uv run python -m sf2loki --config config.example.yaml --check
 ```
 
-`just setup` is a thin wrapper over `uv sync`; use `uv sync` directly if you don't have `just`
-installed. See [Development](development/contributing.md) for the full contribution workflow.
+`just setup` is a thin wrapper over `uv sync --locked`; use `uv sync --locked` directly if you don't
+have `just` installed. See [Development](development/contributing.md) for the full contribution
+workflow.
 
 ## Configuration loading
 

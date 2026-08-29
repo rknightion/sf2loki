@@ -66,15 +66,19 @@ these.
 
 ## Usage
 
+`just activity` is confirmation-guarded because it writes to the live development org (and
+`--cleanup` deletes the records it created). Read the prompt and confirm only when that write is
+intended.
+
 ```bash
 # continuous low-level noise (~6 ops/min) until Ctrl-C
-python scripts/generate_activity.py --env-file .env.dev
+just activity --env-file .env.dev
 
 # heavier burst for an hour
-python scripts/generate_activity.py --env-file .env.dev --ops-per-min 30 --duration 3600
+just activity --env-file .env.dev --ops-per-min 30 --duration 3600
 
 # delete everything this tool ever created
-python scripts/generate_activity.py --env-file .env.dev --cleanup
+just activity --env-file .env.dev --cleanup
 ```
 
 ### Flags

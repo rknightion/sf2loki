@@ -4,19 +4,21 @@ sf2loki is a small project with a strict green bar — the workflow below keeps 
 
 ## Dev setup
 
-Requirements: Python 3.14, [uv](https://docs.astral.sh/uv/), and
-[just](https://github.com/casey/just).
+Requirements: Python 3.14, [uv](https://docs.astral.sh/uv/),
+[just](https://github.com/casey/just), Helm, and kubeconform.
 
 ```bash
-just setup   # uv sync — create the venv from the lockfile
-just gate    # ruff + mypy --strict + pytest (the green bar; CI runs the same)
+just setup   # uv sync --locked — create the venv from the lockfile
+just check   # full daemon-free gate; CI enforces the same checks
 ```
 
 Useful extras:
 
 ```bash
+just fmt         # format Python sources and the justfile in place
+just fmt-check   # check Python and justfile formatting
 just test        # pytest only
-just lint        # ruff check + format check
+just lint        # ruff lint only (just fmt-check covers formatting)
 just proto       # regenerate gRPC/protobuf stubs (only when proto/ changes)
 just gen-config  # regenerate config.example.yaml + docs/config-reference.md
 ```
@@ -26,12 +28,13 @@ just gen-config  # regenerate config.example.yaml + docs/config-reference.md
 - **Tests first.** Bug fixes and features come with tests, strict TDD: write a failing test, watch
   it fail for the right reason, write the minimal code to pass, then refactor. The repo is
   test-driven and CI fails on any red.
-- **`just gate` must be green before a commit** — `ruff check`, `ruff format --check`,
-  `mypy src` (strict), and `pytest`. Run it, don't assert it; CI runs the identical gate.
+- **`just check` must be green before a commit** — formatting, `ruff check`, `mypy src` (strict),
+  `pytest`, generated-artifact drift, Helm validation, and distribution contents. Run it, don't
+  assert it; CI runs the identical checks.
 - **Generated files are generated.** `config.example.yaml`, `docs/config-reference.md`, and the
-  proto stubs under `src/sf2loki/**/_generated/` are produced from source (`just gen-config` /
-  `just proto`) — never hand-edit them. CI has drift gates that fail the build if a generated file
-  is out of sync with its source (the Pydantic config model, or `proto/`).
+  proto stubs under `src/sf2loki/**/_generated/` are produced from source (`just gen`) — never
+  hand-edit them. CI has drift gates that fail the build if a generated file is out of sync with its
+  source (the Pydantic config model, or `proto/`).
 - **Conventional commits.** Releases are cut by
   [release-please](https://github.com/googleapis/release-please) from commit messages, so use
   `feat:`, `fix:`, `docs:`, `chore:`, `perf:`, etc. (`feat!:` or a `BREAKING CHANGE:` footer for

@@ -30,14 +30,17 @@ LightningInteraction ELF types require a real browser UI session.
 
 Usage
 -----
+  Run these through `just activity`, which asks for confirmation before the
+  script writes to the development org (or deletes synthetic records).
+
   # continuous low-level noise (~6 ops/min) until Ctrl-C:
-  python scripts/generate_activity.py --env-file .env.dev
+  just activity --env-file .env.dev
 
   # heavier burst for an hour:
-  python scripts/generate_activity.py --env-file .env.dev --ops-per-min 30 --duration 3600
+  just activity --env-file .env.dev --ops-per-min 30 --duration 3600
 
   # delete everything this tool ever created:
-  python scripts/generate_activity.py --env-file .env.dev --cleanup
+  just activity --env-file .env.dev --cleanup
 
 This is a dev/test utility. It only ever touches the org named by SF_LOGIN_URL.
 """

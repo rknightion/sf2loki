@@ -20,28 +20,31 @@ live in nested `CLAUDE.md` files under `src/sf2loki/{sources,salesforce,sinks,
 auth,coordinate,state}/` — Claude Code loads them automatically when you work
 in those directories.
 
-## Quick commands
-```bash
-just setup       # uv sync — create the venv from the lockfile
-just gate        # ruff + mypy --strict + pytest — the green bar, must be green before commit
-just test        # pytest only
-just lint        # ruff check + format check
-just proto       # regen gRPC/protobuf stubs (only when proto/ changes)
-just gen-config  # regen config.example.yaml + docs/config-reference.md (only when config.py changes)
-just run config=config.yaml
-```
+## Task interface
 
-## The green bar
-- `just gate` (= `ruff check` + `ruff format --check` + `mypy src` + `pytest`) must
-  be green before any commit — run it, don't assert it. CI runs the same.
+This repo's task surface is a `justfile`. Discover it, don't guess it:
+
+    just --list                        # human-readable
+    just --dump --dump-format json     # machine-readable
+    just --show <recipe>               # what a recipe actually runs
+
+- `just check` is the full daemon-free pre-commit gate and is exactly what CI enforces. It must
+  pass before you commit. It needs `helm`, `kubeconform`, `uv` and `git` on PATH; `just ci`
+  additionally needs a Docker daemon.
+- Prefer `just <recipe>` over the underlying tool. If you are typing `pytest`, you want `just test`.
+- Run `just` with stdin from `/dev/null`. Recipes marked `[confirm]` are destructive — stop and ask
+  before running one; never pass `--yes` or `JUST_YES=1`.
+- If a task you need does not exist, add a recipe with a `#` doc comment and a `[group(...)]` rather
+  than running a bare command.
 - Strict TDD: failing test → watch it fail → minimal code → green.
 
 ## Generated files — never hand-edit
 - `config.example.yaml` and `docs/config-reference.md` are generated from the
-  Pydantic config model: run `just gen-config` after any `config.py` change (a CI
-  drift gate fails otherwise, enforced via `tests/test_config_artifacts_drift.py`).
-- proto stubs (`src/sf2loki/**/_generated/`) come from `just proto` (only when
-  `proto/` changes).
+  Pydantic config model. `just gen` regenerates every committed artifact, and `just gen-check`
+  inside `just check` proves they are current (also enforced by
+  `tests/test_config_artifacts_drift.py`).
+- Proto stubs (`src/sf2loki/**/_generated/`) are part of that `just gen` run; `just proto` remains
+  available when only `proto/` changed.
 
 ## Grafana dashboards & rules — hand-authored, NOT generated
 - `deploy/grafana/dashboards/*.json` are hand-authored **dashboard-schema-v2**

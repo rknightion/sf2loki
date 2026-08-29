@@ -260,9 +260,9 @@ annotated example, and [`docs/config-reference.md`](docs/config-reference.md) fo
 generated reference (every key, type, default, and description).
 
 Both `config.example.yaml` and `docs/config-reference.md` are **generated from the Pydantic config
-schema** — do not hand-edit them. Regenerate after changing config models with `just gen-config`
-(or `sf2loki config example` / `sf2loki config reference` directly). CI fails the build if either
-file drifts from the schema.
+schema** — do not hand-edit them. Regenerate after changing config models with `just gen-config`, or
+run `just gen` for every committed generated artifact (or `sf2loki config example` / `sf2loki config
+reference` directly). CI fails the build if either file drifts from the schema.
 
 ```bash
 # run locally against a config file
@@ -717,14 +717,15 @@ see [`deploy/helm/README.md`](deploy/helm/README.md) and the
 ## Development
 
 ```bash
-uv sync            # create the venv from the lockfile
-just gate          # ruff + mypy --strict + pytest (the green bar)
-just proto         # regenerate gRPC/protobuf stubs (only when proto/ changes)
-just image         # build the container image
+just setup         # create the venv from the locked lockfile
+just check         # full daemon-free gate (ruff, mypy --strict, pytest, drift, Helm, dist)
+just gen           # regenerate every committed generated artifact
+just image         # build the container image (requires a Docker daemon)
 ```
 
 Python 3.14, `uv`-managed. Generated proto stubs are committed; CI fails on drift. Tooling: `uv`,
-`ruff`, `mypy --strict`, `pytest` + `pytest-asyncio`, `just`.
+`ruff`, `mypy --strict`, `pytest` + `pytest-asyncio`, `just`, Helm, kubeconform, and Docker for
+`just ci`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities (privately, please).
