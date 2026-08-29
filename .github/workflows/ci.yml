@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           python-version: "3.14"
           activate-environment: true
@@ -103,7 +103,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           python-version: "3.14"
           activate-environment: true
@@ -115,56 +115,50 @@ jobs:
       - name: Check dist contents (stubs present; tests/deploy/docs/scratch absent)
         run: uv run --no-project python scripts/check_dist.py dist
 
+  # Lint + render + schema-validate via the shared reusable. kubeconform is now
+  # verified against the release's own CHECKSUMS file: the hand-written sha256
+  # this job used to carry was correct for its first 42 hex characters and
+  # confabulated after, and failed every run for six days before anyone traced a
+  # red release train back to it.
+  #
+  # NOTE: Chart.yaml claims kubeVersion ">=1.21.0-0" but this validates only
+  # against 1.29.0, as the hand-rolled job did. Validating at the claimed floor
+  # is the correct thing to do and is deliberately NOT changed here, so this port
+  # is behaviour-preserving; closing that gap is its own change.
   helm-chart:
-    name: helm lint · template · validate
+    permissions:
+      contents: read
+    uses: rknightion/.github/.github/workflows/helm-validate.yml@97f4a7ad0cd1ddd83562a30b9061ef8295242405 # v1.14.0
+    with:
+      chart-path: deploy/helm
+      release-name: sf2loki
+      kubernetes-versions: "1.29.0"
+      # Blank first line renders the bare default; then the HA topology and the
+      # all-extras permutation.
+      permutations: |
+
+        --set ha.enabled=true --set replicaCount=2 --set networkPolicy.enabled=true
+        --set externalSecrets.enabled=true --set externalSecrets.aws.region=eu-west-1 --set serviceAccount.esoName=sf2loki-eso --set secrets.create=true
+
+  # Chart-specific, so it stays here rather than moving into the shared reusable:
+  # the single-instance guard MUST fail the render for replicaCount>1 without
+  # ha.enabled. A reusable has no business encoding one chart's semantics.
+  helm-render-guard:
+    name: helm render guard
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-
-      - name: Install kubeconform
-        env:
-          KUBECONFORM_VERSION: v0.6.7
-          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
-        run: |
-          curl -fsSL -o kubeconform.tar.gz \
-            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
-          tar -xzf kubeconform.tar.gz kubeconform
-          sudo install kubeconform /usr/local/bin/
-
-      - name: Helm lint
-        run: helm lint deploy/helm
-
-      # Render the default install, the HA topology, and the all-extras permutation, then
-      # schema-validate each against upstream Kubernetes (skipping CRDs the chart ships for
-      # optional operators — ExternalSecret/SecretStore, and any CNI-specific policy).
-      - name: Helm template + kubeconform validate
-        run: |
-          set -euo pipefail
-          validate() {
-            echo "::group::helm template $*"
-            helm template sf2loki deploy/helm "$@" \
-              | kubeconform -strict -summary -ignore-missing-schemas \
-                  -kubernetes-version 1.29.0 \
-                  -schema-location default
-            echo "::endgroup::"
-          }
-          validate
-          validate --set ha.enabled=true --set replicaCount=2 --set networkPolicy.enabled=true
-          validate --set externalSecrets.enabled=true --set externalSecrets.aws.region=eu-west-1 \
-            --set serviceAccount.esoName=sf2loki-eso --set secrets.create=true
-
-      # The single-instance guard MUST fail the render for replicaCount>1 without ha.enabled.
       - name: Assert single-instance render guard fires
         run: |
           if helm template sf2loki deploy/helm --set replicaCount=2 >/dev/null 2>&1; then
@@ -173,14 +167,11 @@ jobs:
           fi
           echo "render guard fired as expected"
 
-  # Single required status check for the branch ruleset (only this need be required).
-  # if: always() + an explicit failure check so a failed/cancelled leg fails the gate.
-  # Renovate automerge waits for this to go green.
   ci-success:
     name: ci-success
     runs-on: ubuntu-latest
     if: always()
-    needs: [gate, docker-build-test, package, helm-chart]
+    needs: [gate, docker-build-test, package, helm-chart, helm-render-guard]
     steps:
       - name: Fail if any required job did not pass
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
