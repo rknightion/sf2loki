@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
       packages: write # delete package versions
-    uses: rknightion/.github/.github/workflows/ghcr-cleanup.yml@0e56520d848f5fda8cbfa0bda17797ef41f2a5a7 # v1.9.8
+    uses: rknightion/.github/.github/workflows/ghcr-cleanup.yml@27b0bd31dbe7bf238b89773d00d60ed5dfe187bb # v1.20.0
     with:
       packages: "sf2loki,charts/sf2loki"
       # Scheduled runs prune for real; a manual dispatch defaults to dry-run.
