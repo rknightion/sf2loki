@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.1.0](https://github.com/rknightion/sf2loki/compare/v1.0.0...v1.1.0) (2026-09-05)
+
+
+### Features
+
+* **chart:** add Artifact Hub metadata and point home at the docs site ([ac550b8](https://github.com/rknightion/sf2loki/commit/ac550b84b9008765d6a85642144341939b27605d))
+* **docs:** take the fleet project icon for the site logo and favicon ([5b77603](https://github.com/rknightion/sf2loki/commit/5b7760343993ff0778b7a1d05829473f12eec8c1))
+* **docs:** take the fleet-generated social card ([1bd7748](https://github.com/rknightion/sf2loki/commit/1bd7748b774ce90c8ac9b37ac31d0275ae0d13cd))
+* mint release-please token from the OpenBao broker ([42599e5](https://github.com/rknightion/sf2loki/commit/42599e5e7d44b6fa690103cae2451a52d1ec4950))
+* mint the docs-sync token from the OpenBao broker ([a8e766d](https://github.com/rknightion/sf2loki/commit/a8e766d07835c0ad887a3771acfe1ef65f437927))
+* **tracker:** migrate from GitHub Issues to an in-repo Backlog.md board ([5f0bfeb](https://github.com/rknightion/sf2loki/commit/5f0bfebfc7da9bb1b948b4ac093513da211a08ba))
+
+
+### Bug Fixes
+
+* apply CodeRabbit auto-fixes ([063f66e](https://github.com/rknightion/sf2loki/commit/063f66e8171897e2904ee7a82321f4e150d737d3))
+* author is Rob Knight, not Rob Knighton ([9884375](https://github.com/rknightion/sf2loki/commit/98843754299c3bca86af83f54aebe032f63b12c0))
+* **auto-rc:** restore checks:read — reusable permissions validate at startup ([4345372](https://github.com/rknightion/sf2loki/commit/4345372bcc3444df2cb7f0de5507e0254a8c4925))
+* **ci:** correct the kubeconform v0.6.7 sha256 pin ([79ff43b](https://github.com/rknightion/sf2loki/commit/79ff43bc8cdf85be6a16f7d56dacc610fc43b450))
+* **deps:** clear seven open Dependabot advisories ([7b61661](https://github.com/rknightion/sf2loki/commit/7b616618f4720a3f9d6b0b6d13496b6e5b413053))
+* **docs:** the quickstart pointed at a PyPI package that does not exist ([5ed3b2e](https://github.com/rknightion/sf2loki/commit/5ed3b2ed38d157c678b7ca526dbcc7bc6c60ccc5))
+* **helm:** chomp the permutations block scalar ([7cdf313](https://github.com/rknightion/sf2loki/commit/7cdf3137b502db8db827e1ed079146dd184b8044))
+* **helm:** give kubeconform the CRD schemas for ExternalSecret + SecretStore ([93c3cd7](https://github.com/rknightion/sf2loki/commit/93c3cd76eb66bd1b55b44865ad43b9162c962d0e))
+* **helm:** render externalSecrets data as [] rather than null ([f4099b0](https://github.com/rknightion/sf2loki/commit/f4099b0e424dcd2c708269f99e991ae7a261e40f))
+* **helm:** restore the doubled braces in the CRD schema URL ([420e039](https://github.com/rknightion/sf2loki/commit/420e03927f76160a71aa6218d290ccb7f7961414))
+* pass the JWT role explicitly for docs-sync ([33a53e0](https://github.com/rknightion/sf2loki/commit/33a53e0070e43b26cadeabcee99e0e98a571428b))
+* rename cloud environment setup script (SFL-0072) ([af998e1](https://github.com/rknightion/sf2loki/commit/af998e1c77b1c13fedad02d6ae034c8848c5cff0))
+
+
+### Code Refactoring
+
+* **ci:** align the publish workflow with the fleet convention ([22326a8](https://github.com/rknightion/sf2loki/commit/22326a83fb1e334cf74cd8c758d4f8af7e783182))
+
+
+### Documentation
+
+* add a "Why This Shipper" positioning page ([1d111d6](https://github.com/rknightion/sf2loki/commit/1d111d6d73004d9d1d1802aeb2cb5f75b3a5e954))
+* add an FAQ ([52872f1](https://github.com/rknightion/sf2loki/commit/52872f171e6e375176eb095eb3a8802a41c3d1dc))
+* adopt the m7kni.io inverted docs model ([e55255a](https://github.com/rknightion/sf2loki/commit/e55255a34193cf6351a00adac4dd998e81df9a92))
+* **backlog:** sync fan-out protocol — CodeRabbit review gate ([cf620f4](https://github.com/rknightion/sf2loki/commit/cf620f44bfee20065a5064fc0faeec0c663bbad9))
+* **backlog:** sync fan-out protocol — success criteria vs write authority ([6233b0d](https://github.com/rknightion/sf2loki/commit/6233b0dd317691ad9d72b2386241d8d91527a4c9))
+* drop unused CDN scripts and the dead sitemap priority ([3f40fa0](https://github.com/rknightion/sf2loki/commit/3f40fa0fbeed6d1163f41cf6b301e49e7aed2346))
+* improve search result descriptions ([64f03c4](https://github.com/rknightion/sf2loki/commit/64f03c4d71e29538382cbe2d490d4ffb927f02b7))
+* put a copy-paste quickstart on the landing page ([e4d6f13](https://github.com/rknightion/sf2loki/commit/e4d6f133a83997c0fd03e363c4dcc92dc8845a4f))
+* re-import fan-out protocol (context-cost rules) ([1bddfd1](https://github.com/rknightion/sf2loki/commit/1bddfd144b5a660130d6f55251b21d1bf9783e23))
+* re-import the fan-out protocol at c1e6cb0 ([c7cc180](https://github.com/rknightion/sf2loki/commit/c7cc180a6efcca6d914755c6a1d55f7936e23c64))
+* re-render the fan-out protocol from agent-docs ([56b5077](https://github.com/rknightion/sf2loki/commit/56b5077c116f5c31b4bff549b423e4e20ff26e48))
+* re-render the fan-out protocol from agent-docs 711db6c ([7d4fe23](https://github.com/rknightion/sf2loki/commit/7d4fe23c30f25316853703760246e25cf5e0549f))
+* re-render the fan-out protocol from agent-docs b0d76d8 ([f211e51](https://github.com/rknightion/sf2loki/commit/f211e5187683d0e372058cadb0a3a56c9671bf57))
+* rename docker.yml to publish.yml and document the RC channel ([24a6afa](https://github.com/rknightion/sf2loki/commit/24a6afa765efd0f6333730931fb33d6c817ff312))
+* say where the work is tracked now that the issue tracker is empty ([ae30750](https://github.com/rknightion/sf2loki/commit/ae30750d80c5e68af78c859279578a06911f78ba))
+* sync agent-docs, a wave's launch message is a file not a chat block ([6885085](https://github.com/rknightion/sf2loki/commit/68850852c0ee73059154909c0a990d1494a7a10f))
+* sync Astra routing and default wave reports to files ([8f7f61a](https://github.com/rknightion/sf2loki/commit/8f7f61a682e6cab59de8ccd41b07495ee4495a63))
+* sync nineteen-worker Codex fan-out guidance ([88a9327](https://github.com/rknightion/sf2loki/commit/88a93274774f9ba10c9d9bd24734f017604f3b04))
+* sync wave-root stage authority and lab-Mac GUI gate ([d70e566](https://github.com/rknightion/sf2loki/commit/d70e566b811f55059a54b1736f8bf0c0c73ad50b))
+* **tracker:** align canonical fan-out protocol ([21758a9](https://github.com/rknightion/sf2loki/commit/21758a9f7065bd34f84027e73a2b26364fe18d2f))
+* **tracker:** correct the canonical owner in the rendered header ([6d23fea](https://github.com/rknightion/sf2loki/commit/6d23fea5e743fea0972ffb8dea6716ad10951f6a))
+* **tracker:** normalise the closed-issues doc title ([0102769](https://github.com/rknightion/sf2loki/commit/0102769172f4f57ce2286bdfa6cbb192ab869a0f))
+* **tracker:** re-import the fan-out protocol from canonical ([59d826e](https://github.com/rknightion/sf2loki/commit/59d826efa01869c8958529e19a375eec23f7bdf2))
+* **tracker:** render agent documents from the canonical source ([4b476d1](https://github.com/rknightion/sf2loki/commit/4b476d14b666fb5e1c3495d973e21edbee1b03b8))
+
 ## [1.0.0](https://github.com/rknightion/sf2loki/compare/v0.2.0...v1.0.0) (2026-07-03)
 
 
