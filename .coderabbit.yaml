@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Product-specific additions to the central CodeRabbit defaults.
+# Keep inheritance enabled; shared review policy lives in the owner/coderabbit repository.
+inheritance: true
+reviews:
+  path_filters:
+  - '!src/sf2loki/salesforce/_generated/**'
+  - '!src/sf2loki/sinks/loki/_generated/**'
+  - '!config.example.yaml'
+  - '!docs/config-reference.md'
+  - '!deploy/helm/values.yaml'
+  path_instructions:
+  - path: src/sf2loki/**/*.py
+    instructions: >-
+      Preserve the Source/Sink/CheckpointStore/Coordinator seams and checkpoint ordering. A Salesforce
+      event category must come from exactly one of Pub/Sub, SOQL polling or EventLogFile; flag changes
+      that enable duplicate ingestion. Keep Loki stream labels within the fixed allowlist and route all
+      other fields to structured metadata or the JSON line.
+  - path: deploy/grafana/**/*.{json,yaml}
+    instructions: >-
+      These dashboards and rules are hand-authored. In LogQL use scoped field extraction rather than bare
+      | json, which expands labels. For connector-health PromQL use the backend-normalized OTLP metric
+      names including _total, _bucket, _count and _sum suffixes, and verify query windows against the
+      timestamps the source actually emits.
