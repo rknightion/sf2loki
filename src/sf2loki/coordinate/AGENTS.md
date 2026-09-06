@@ -7,9 +7,10 @@ default), `FileLeaseCoordinator` (a lease document on shared storage) and `K8sLe
 
 ## Deliberate, do not "fix"
 
-- The file lease does not use `flock`: unreliable over NFS, and it does not survive a holder that
-  dies without releasing. Expiry is wall-clock compared across hosts, so replicas must be NTP-synced
-  and the ttl needs headroom above worst-case clock skew.
+- The file lease (`file_lease.py`) does not use `flock`: unreliable over NFS, and it does not
+  survive a holder that dies without releasing. It writes atomically tmp-then-rename instead, the
+  same durability pattern as `state/file_store.py`. Expiry is wall-clock compared across hosts, so
+  replicas must be NTP-synced and the ttl needs headroom above worst-case clock skew.
 - The file lease pauses and re-reads after a contested rename, to detect losing a takeover race. The
   Kubernetes lease deliberately has no equivalent step: a lost `resourceVersion` compare-and-swap
   comes back as HTTP 409, which is itself the race signal.
