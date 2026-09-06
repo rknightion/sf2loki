@@ -5,8 +5,10 @@ per-source design.
 
 ## Category normalisation lives in `overlap.py`
 
-An identifier normalises to its canonical category by stripping the channel suffix (`EventStream` /
-`EventStore` / `Event`, longest first) and lowercasing. `_CATEGORY_ALIASES` holds the exceptions
+Salesforce exposes one category through up to three channel names (`/event/LoginEventStream`,
+`LoginEvent`, EventLogFile `Login`). An identifier normalises to its canonical category by stripping
+the channel suffix (`EventStream` / `EventStore` / `Event`, longest first) and lowercasing, and
+`_basename` takes the last path segment first. `_CATEGORY_ALIASES` holds the exceptions
 where the stem does not already match (`LoginHistory` -> `login`). A new object or topic that does
 not auto-normalise gets an alias there, never a special case elsewhere: an identifier that
 normalises to a category of its own silently bypasses the guard and double-ingests.
@@ -32,7 +34,8 @@ visible by working the category out by hand.
 ## Multi-org wrapping (`org_adapter.py`)
 
 Under `orgs:`, each inner source is wrapped in `OrgSource`, which merges the `org` label plus that
-org's `sf_org_id` and `environment` into every entry and rewrites checkpoint keys through
-`state/org_view.py`. Two parts are deliberate: the inner source's `name` stays unprefixed so
-`source` and `org` remain orthogonal label dimensions for dashboards, and a single-org config never
-constructs an `OrgSource` at all, keeping that path bit-identical to pre-multi-org behaviour.
+org's `sf_org_id` and `environment` into every entry and rewrites checkpoint keys to
+`org=<name>:<key>` through `state/org_view.py`. Two parts are deliberate: the inner source's `name`
+stays unprefixed so `source` and `org` remain orthogonal label dimensions for dashboards, and a
+single-org config never constructs an `OrgSource` at all, keeping that path bit-identical to the
+single-org behaviour.
