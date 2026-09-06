@@ -2,11 +2,13 @@
 
 `Sink` protocol and both error types in `base.py`; `loki/` is the only implementation.
 
-## Encoding: protobuf+snappy is the default, JSON is for debugging
+## Encoding: protobuf+snappy is the default, JSON+gzip is for debugging
 
 `push.py` carries both `encode_protobuf` (canonical `logproto.PushRequest`) and `encode_json`
 (`/loki/api/v1/push` body). Production runs protobuf; JSON exists for human-inspectable payloads.
 Do not assume JSON is the normal path when reading a sink log line or writing a new sink test.
+`sink.loki.compression` (`snappy` / `gzip` / `none`) only applies on the JSON path: protobuf is
+snappy-block-compressed inside `encode_protobuf` whatever that setting says.
 
 ## Three HTTP status buckets in `sink.py`, not two
 
