@@ -3,7 +3,7 @@ id: doc-0001
 title: Agent fan-out protocol (canonical)
 type: specification
 created_date: '2026-08-14 16:59'
-updated_date: '2026-09-07 22:08'
+updated_date: '2026-09-07 22:21'
 ---
 > **Generated file — do not edit this copy.** Rendered from `sources/fan-out-protocol.md` in
 > `m7kni/agent-docs` at commit `efd1e7a`. This copy is authoritative for `sf2loki`, so an agent
