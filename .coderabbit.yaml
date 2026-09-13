@@ -22,3 +22,10 @@ reviews:
       | json, which expands labels. For connector-health PromQL use the backend-normalized OTLP metric
       names including _total, _bucket, _count and _sum suffixes, and verify query windows against the
       timestamps the source actually emits.
+knowledge_base:
+  linked_repositories:
+  - repository: m7kni/m7kni-net-site
+    instructions: >-
+      Documentation hub. This repository dispatches documentation changes to the hub, which clones the
+      docs source and builds it. Check docs_path, config_file and the dispatch payload against this
+      repository's entry in the hub's docs-repos.json manifest.
