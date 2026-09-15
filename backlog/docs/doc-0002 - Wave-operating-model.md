@@ -3,7 +3,7 @@ id: doc-0002
 title: Wave operating model
 type: guide
 created_date: '2026-08-14 17:01'
-updated_date: '2026-08-14 17:01'
+updated_date: '2026-09-15 12:10'
 ---
 > This document carries **only what is specific to sf2loki**. The campaign model itself — run
 > contract and run modes, the routing contract, authority and the thread pool, child lane briefs,
@@ -142,10 +142,12 @@ own: the frozen seams, the label allowlist, a breaking default, or anything outs
 acceptance criteria.
 
 **The escape hatch: a lane that hits a decision its task does not cover STOPS and returns the
-question rather than inventing an answer.** One round-trip is cheaper than the rewrite. A boundary
-with no escape hatch is a stop condition wearing a safety label — so this one is explicit: returning
-a question is a successful lane outcome, not a failure, and the task goes to `Parked` with the
-question as its resume boundary.
+question rather than inventing an answer.** Returning the question is a valid worker handoff,
+not an automatic terminal park. The root applies the canonical blocker-resolution rule: investigate,
+resolve within authority or dispatch an appropriately routed resolution lane, preserving ownership,
+mandatory review and shared attempt limits. Park only when authorised feasible routes are exhausted,
+required authority or evidence remains unavailable, or an explicit stop limit is reached. Record the
+unresolved question as the resume boundary and continue independent work.
 
 **Sub-agents never commit.** Only the orchestrating session commits, and it commits straight to
 `main` and pushes immediately, with a conventional-commit type that release-please can read
