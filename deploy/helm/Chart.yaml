@@ -14,6 +14,7 @@ keywords:
   - observability
 maintainers:
   - name: rknightion
+    email: rob@m7kni.io
     url: https://github.com/rknightion
 # PodDisruptionBudget policy/v1 (stable since 1.21) is the API floor. Validated with Helm 3.x/4.x.
 kubeVersion: ">=1.21.0-0"
@@ -38,4 +39,4 @@ annotations:
       url: https://github.com/rknightion/sf2loki
   artifacthub.io/maintainers: |
     - name: rknightion
-      email: rob@rob-knight.com
+      email: rob@m7kni.io
