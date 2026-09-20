@@ -704,7 +704,7 @@ async def _check_coordinator_k8s_lease(
                 "coordinator",
                 "FAIL",
                 "coordinate.type is 'k8s_lease' but the k8s dependencies are not "
-                "installed; install the extra: pip install 'sf2loki[k8s]'",
+                "installed; install the extra: uv sync --extra k8s",
             )
         api_factory = _default_k8s_api_factory(cfg)
 

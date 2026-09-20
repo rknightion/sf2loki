@@ -390,7 +390,7 @@ def test_build_k8s_lease_without_extra_raises_actionable_error() -> None:
     from sf2loki.config import ConfigError
 
     cfg = _cfg(coordinate={"type": "k8s_lease", "k8s_lease": {"name": "l", "namespace": "ns"}})
-    with pytest.raises(ConfigError, match=r"sf2loki\[k8s\]"):
+    with pytest.raises(ConfigError, match=r"uv sync --extra k8s"):
         App.build(cfg)
 
 

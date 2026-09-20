@@ -25,9 +25,9 @@ only. See [Troubleshooting](troubleshooting.md#sf2loki-doctor-reports-a-short-ev
 
 ### Which Python version does it need?
 
-3.14+. You don't need to provision that yourself for the container (nothing runs on the host) or
-for `uvx`/`pipx` (they fetch a matching interpreter automatically) - see
-[Installation](installation.md).
+3.14+, and only for a source checkout. The container needs no Python on the host at all, so the
+version only matters if you are installing from source; `uv` provisions a matching interpreter for
+you. See [Installation](installation.md).
 
 ## Configuration
 

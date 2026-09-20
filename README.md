@@ -72,25 +72,33 @@ Full documentation is published at **[m7kni.io/sf2loki](https://m7kni.io/sf2loki
 
 ## Install
 
-**Requires Python 3.14+** (the package uses 3.14 language features). `pipx`/`uvx` provision a matching
-interpreter automatically; for a container you don't need Python on the host at all.
+sf2loki ships as a **container image** and as a **source checkout**. It is deliberately not
+published to PyPI, so there is no `pip`, `pipx` or `uvx` route: the container needs no Python on
+the host at all, and a source checkout needs **Python 3.14+** because the package uses 3.14
+language features.
 
 | Use case | Install | Notes |
 | --- | --- | --- |
-| **Run the daemon** (recommended) | `docker pull ghcr.io/rknightion/sf2loki:latest` | The long-running service. Multi-arch image, non-root, slim — see [Run with Docker](#run-with-docker--docker-compose). |
-| **CLI / setup tooling** | `uvx sf2loki --help` | Zero-install run of `--check`, `doctor`, `backfill`, `config` — handy during Salesforce app setup before any infra exists. |
-| **CLI, persistent** | `pipx install sf2loki` | Same CLI on a VM / air-gapped host where a container isn't wanted. |
-| **As a library / from source** | `uv sync` (repo) or `pip install sf2loki` | Optional `sf2loki[s3]` extra for the S3 checkpoint store. |
+| **Run the daemon** (recommended) | `docker pull ghcr.io/rknightion/sf2loki:latest` | The long-running service. Multi-arch image, non-root, slim - see [Run with Docker](#run-with-docker--docker-compose). |
+| **CLI / setup tooling** | `docker run --rm ghcr.io/rknightion/sf2loki:latest --help` | The image entrypoint *is* the CLI, so `--check`, `doctor`, `backfill` and `config` run straight out of it - handy during Salesforce app setup before any infra exists. |
+| **As a library / from source** | `git clone` then `uv sync --locked` | See [Development](#development). Optional `s3`, `gcs` and `k8s` extras install with `uv sync --extra <name>`. |
 
 ```bash
-uvx sf2loki --version
-uvx sf2loki --check --config config.yaml     # validate config + wiring, no network calls
-uvx sf2loki doctor --config config.yaml       # live preflight (auth, entitlements, Loki write)
+docker run --rm ghcr.io/rknightion/sf2loki:latest --version
+
+# validate config + wiring, no network calls
+docker run --rm -v "$PWD/config.yaml:/etc/sf2loki/config.yaml:ro" \
+  ghcr.io/rknightion/sf2loki:latest --check --config /etc/sf2loki/config.yaml
+
+# live preflight (auth, entitlements, Loki write)
+docker run --rm -v "$PWD/config.yaml:/etc/sf2loki/config.yaml:ro" \
+  ghcr.io/rknightion/sf2loki:latest doctor --config /etc/sf2loki/config.yaml
 ```
 
-The container is the right target for the always-on ingestion daemon; `pipx`/`uvx` shine for the
-one-shot CLI surfaces (`doctor`, `--check`, `backfill`) that you run by hand around setup and
-troubleshooting.
+The container is the right target for the always-on ingestion daemon and for the one-shot CLI
+surfaces (`doctor`, `--check`, `backfill`) you run by hand around setup and troubleshooting. Reach
+for the source checkout when you want the package as a library, or when you need one of the
+optional extras, which the published image does not carry.
 
 ## Salesforce setup (OAuth)
 
@@ -446,7 +454,9 @@ state:
     # endpoint_url: http://minio:9000   # any S3-compatible provider (MinIO/R2/Ceph)
 ```
 
-Requires the `s3` extra (`pip install 'sf2loki[s3]'`); credentials come from the standard AWS
+Requires the `s3` extra, which the **published image does not carry** (its build runs a plain
+`uv sync`, so no optional dependency is installed): get it from a source checkout with
+`uv sync --extra s3`, or build a derived image that adds it. Credentials come from the standard AWS
 default chain (env vars, task role, shared config). Commits are **conditional writes** (ETag
 compare-and-swap): if a second instance is pointed at the same bucket/key and races a commit, it
 fails fast with a conflict error instead of silently clobbering the other's checkpoints — the
@@ -456,7 +466,7 @@ leader writes. Write rate is one full-object GET+conditional-PUT per checkpoint 
 rate, not event rate).
 
 **Google Cloud Storage** works the same way (Cloud Run with no volume) — set `state.store: gcs` and
-the `gcs` extra (`pip install 'sf2loki[gcs]'`):
+the `gcs` extra (`uv sync --extra gcs` from a source checkout; not in the published image):
 
 ```yaml
 state:
@@ -655,7 +665,8 @@ fires on anything else (leaderless gap or split-brain). The standby reports `503
 ### Kubernetes-native (Lease coordinator)
 
 On Kubernetes, use a `coordination.k8s.io/v1` **Lease** instead of a shared file — no shared volume
-needed. Set `coordinate.type: k8s_lease` and the `k8s` extra (`pip install 'sf2loki[k8s]'`):
+needed. Set `coordinate.type: k8s_lease` and the `k8s` extra (`uv sync --extra k8s` from a source
+checkout; not in the published image):
 
 ```yaml
 coordinate:

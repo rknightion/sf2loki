@@ -622,9 +622,9 @@ config:
       path: /var/lib/sf2loki/state.json  # Checkpoint file path; persist on a mounted volume for durable resume.
     # The whole checkpoint document lives at one key; commits use conditional
     # writes (ETag If-Match) so two instances against the same key fail fast
-    # instead of clobbering each other. Requires the ``s3`` extra (``pip
-    # install sf2loki[s3]``). Credentials come from the standard AWS default
-    # chain (env vars, instance/task role, shared config).
+    # instead of clobbering each other. Requires the ``s3`` extra (``uv sync
+    # --extra s3``). Credentials come from the standard AWS default chain (env
+    # vars, instance/task role, shared config).
     s3:  # S3-backed state store settings.
       bucket: ""  # Bucket name (required when state.store is s3).
       key: sf2loki/state.json  # Object key holding the checkpoint document.
@@ -633,9 +633,8 @@ config:
     # The whole checkpoint document lives at one object; commits use GCS
     # generation preconditions (ifGenerationMatch) so two instances against the
     # same object fail fast instead of clobbering each other. Requires the
-    # ``gcs`` extra (``pip install sf2loki[gcs]``). Auth via Application
-    # Default Credentials (ADC); set ``service_file`` only for an explicit key
-    # file.
+    # ``gcs`` extra (``uv sync --extra gcs``). Auth via Application Default
+    # Credentials (ADC); set ``service_file`` only for an explicit key file.
     gcs:  # GCS-backed state store settings.
       bucket: ""  # Bucket name (required when state.store is gcs).
       object_name: sf2loki/state.json  # Object name holding the checkpoint document.
@@ -661,8 +660,8 @@ config:
     # The leader renews a Lease object (holderIdentity + renewTime); a standby
     # watches and takes over once the lease is stale (renewTime + duration in
     # the past). Optimistic concurrency uses the Lease's resourceVersion.
-    # Requires the ``k8s`` extra (``pip install sf2loki[k8s]``). In-cluster
-    # config by default; set ``kubeconfig`` for out-of-cluster dev.
+    # Requires the ``k8s`` extra (``uv sync --extra k8s``). In-cluster config
+    # by default; set ``kubeconfig`` for out-of-cluster dev.
     k8s_lease:  # Kubernetes-Lease coordinator settings.
       namespace: default  # Namespace holding the Lease object.
       name: sf2loki-leader  # Lease object name (shared by all replicas).

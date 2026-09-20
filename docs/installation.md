@@ -1,29 +1,41 @@
 ---
 title: Installation
-description: Install sf2loki with its container image, Docker Compose, uv or pipx, and understand how configuration is loaded.
+description: Install sf2loki with its container image, Docker Compose or a uv source checkout, and understand how configuration is loaded.
 ---
 
 # Installation
 
-sf2loki requires **Python 3.14+** (it uses 3.14 language features). `pipx`/`uvx` provision a
-matching interpreter automatically; the container needs no Python on the host at all.
+sf2loki ships as a **container image** and as a **source checkout**. It is deliberately not
+published to PyPI, so there is no `pip`, `pipx` or `uvx` route. The container needs no Python on
+the host at all; a source checkout requires **Python 3.14+**, because the package uses 3.14
+language features.
 
 | Use case | Install | Notes |
 | --- | --- | --- |
 | **Run the daemon** (recommended) | `docker pull ghcr.io/rknightion/sf2loki:latest` | The long-running service. Multi-arch image, non-root, slim. |
-| **CLI / setup tooling** | `uvx sf2loki --help` | Zero-install run of `--check`, `doctor`, `backfill`, `config` — handy during Salesforce app setup before any infra exists. |
-| **CLI, persistent** | `pipx install sf2loki` | Same CLI on a VM or air-gapped host where a container isn't wanted. |
-| **As a library / from source** | `uv sync` (repo checkout) or `pip install sf2loki` | Optional `sf2loki[s3]` / `sf2loki[gcs]` / `sf2loki[k8s]` extras for the non-default checkpoint stores and Kubernetes-Lease coordinator. |
+| **CLI / setup tooling** | `docker run --rm ghcr.io/rknightion/sf2loki:latest --help` | The image entrypoint *is* the CLI, so `--check`, `doctor`, `backfill` and `config` run straight out of it - handy during Salesforce app setup before any infra exists. |
+| **As a library / from source** | `git clone` then `uv sync --locked` | See [From source (uv)](#from-source-uv). Optional `s3`, `gcs` and `k8s` extras for the non-default checkpoint stores and the Kubernetes-Lease coordinator, installed with `uv sync --extra <name>`. |
 
 ```bash
-uvx sf2loki --version
-uvx sf2loki --check --config config.yaml    # validate config + wiring, no network calls
-uvx sf2loki doctor --config config.yaml     # live preflight (auth, entitlements, Loki write)
+docker run --rm ghcr.io/rknightion/sf2loki:latest --version
+
+# validate config + wiring, no network calls
+docker run --rm -v "$PWD/config.yaml:/etc/sf2loki/config.yaml:ro" \
+  ghcr.io/rknightion/sf2loki:latest --check --config /etc/sf2loki/config.yaml
+
+# live preflight (auth, entitlements, Loki write)
+docker run --rm -v "$PWD/config.yaml:/etc/sf2loki/config.yaml:ro" \
+  ghcr.io/rknightion/sf2loki:latest doctor --config /etc/sf2loki/config.yaml
 ```
 
-The container is the right target for the always-on ingestion daemon; `pipx`/`uvx` are for the
-one-shot CLI surfaces (`doctor`, `--check`, `backfill`) you run by hand around setup and
-troubleshooting.
+The container is the right target for the always-on ingestion daemon and for the one-shot CLI
+surfaces (`doctor`, `--check`, `backfill`) you run by hand around setup and troubleshooting.
+
+!!! warning "The published image carries no optional extras"
+    The image build runs a plain `uv sync`, which installs no optional dependency, so the S3 and
+    GCS checkpoint stores and the Kubernetes-Lease coordinator are **not** usable from
+    `ghcr.io/rknightion/sf2loki` as published. Use a source checkout with `uv sync --extra s3`
+    (or `gcs`, `k8s`), or build a derived image that adds the extra you need.
 
 ## Docker / docker-compose
 

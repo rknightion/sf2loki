@@ -26,7 +26,7 @@ def build_store(cfg: StateConfig, *, exclusive_lock: bool = True) -> CheckpointS
         if importlib.util.find_spec("aiobotocore") is None:
             raise ConfigError(
                 "state.store is 's3' but the S3 dependencies are not installed; "
-                "install the extra: pip install 'sf2loki[s3]'"
+                "install the extra: uv sync --extra s3"
             )
         from sf2loki.state.s3_store import S3CheckpointStore
 
@@ -39,7 +39,7 @@ def build_store(cfg: StateConfig, *, exclusive_lock: bool = True) -> CheckpointS
         if importlib.util.find_spec("gcloud") is None:
             raise ConfigError(
                 "state.store is 'gcs' but the GCS dependencies are not installed; "
-                "install the extra: pip install 'sf2loki[gcs]'"
+                "install the extra: uv sync --extra gcs"
             )
         from sf2loki.state.gcs_store import GcsCheckpointStore
 

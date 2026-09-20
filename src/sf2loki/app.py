@@ -950,7 +950,7 @@ class App:
             if importlib.util.find_spec("kubernetes_asyncio") is None:
                 raise ConfigError(
                     "coordinate.type is 'k8s_lease' but the Kubernetes dependencies are "
-                    "not installed; install the extra: pip install 'sf2loki[k8s]'"
+                    "not installed; install the extra: uv sync --extra k8s"
                 )
             from sf2loki.coordinate.k8s_lease import K8sLeaseCoordinator
 

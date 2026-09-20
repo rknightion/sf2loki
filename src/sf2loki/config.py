@@ -997,7 +997,7 @@ class S3StateConfig(StrictModel):
     The whole checkpoint document lives at one key; commits use conditional
     writes (ETag If-Match) so two instances against the same key fail fast
     instead of clobbering each other. Requires the ``s3`` extra
-    (``pip install sf2loki[s3]``). Credentials come from the standard AWS
+    (``uv sync --extra s3``). Credentials come from the standard AWS
     default chain (env vars, instance/task role, shared config).
     """
 
@@ -1026,7 +1026,7 @@ class GcsStateConfig(StrictModel):
     The whole checkpoint document lives at one object; commits use GCS
     generation preconditions (ifGenerationMatch) so two instances against the
     same object fail fast instead of clobbering each other. Requires the ``gcs``
-    extra (``pip install sf2loki[gcs]``). Auth via Application Default
+    extra (``uv sync --extra gcs``). Auth via Application Default
     Credentials (ADC); set ``service_file`` only for an explicit key file.
     """
 
@@ -1126,7 +1126,7 @@ class K8sLeaseConfig(StrictModel):
     The leader renews a Lease object (holderIdentity + renewTime); a standby
     watches and takes over once the lease is stale (renewTime + duration in the
     past). Optimistic concurrency uses the Lease's resourceVersion. Requires the
-    ``k8s`` extra (``pip install sf2loki[k8s]``). In-cluster config by default;
+    ``k8s`` extra (``uv sync --extra k8s``). In-cluster config by default;
     set ``kubeconfig`` for out-of-cluster dev.
     """
 

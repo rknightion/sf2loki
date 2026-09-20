@@ -693,14 +693,14 @@ async def test_check_state_object_missing_extra_fails(monkeypatch: pytest.Monkey
     state = StateConfig(store="s3", s3=S3StateConfig(bucket="b"))
 
     def fake_build_store(cfg: StateConfig) -> Any:
-        raise ConfigError("state.store is 's3' ... install the extra: pip install 'sf2loki[s3]'")
+        raise ConfigError("state.store is 's3' ... install the extra: uv sync --extra s3")
 
     monkeypatch.setattr(doctor_module, "build_store", fake_build_store)
 
     result = await doctor_module._check_state_object(state)
 
     assert result.status == "FAIL"
-    assert "sf2loki[s3]" in result.detail
+    assert "uv sync --extra s3" in result.detail
 
 
 @pytest.mark.asyncio
@@ -1010,7 +1010,7 @@ async def test_coordinator_k8s_lease_missing_extra_fails(monkeypatch: pytest.Mon
     result = await doctor_module._check_coordinator_k8s_lease(cfg)
 
     assert result.status == "FAIL"
-    assert "sf2loki[k8s]" in result.detail
+    assert "uv sync --extra k8s" in result.detail
 
 
 @pytest.mark.asyncio

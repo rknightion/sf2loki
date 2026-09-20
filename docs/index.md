@@ -21,8 +21,8 @@ crashed leader fails over without a second instance double-delivering events.
 
 ## Quickstart
 
-sf2loki ships as a container image. The `uvx` / `pipx` / `pip` paths mentioned
-elsewhere in this repo do not work yet — the package is not published to PyPI.
+sf2loki ships as a container image and as a source checkout. It is not published
+to PyPI, so there is no `pip`, `pipx` or `uvx` route.
 
 ```sh
 docker pull ghcr.io/rknightion/sf2loki:latest
@@ -63,7 +63,7 @@ docker run --rm -v "$(pwd)/config.yaml:/etc/sf2loki/config.yaml:ro" \
 | | |
 |---|---|
 | [Getting Started](getting-started.md) | Zero to first log lines in Loki |
-| [Installation](installation.md) | Docker, docker-compose, uv/pipx |
+| [Installation](installation.md) | Docker, docker-compose, uv source checkout |
 | [Configuration](configuration/index.md) | Every config key, default, and env var |
 | [Architecture](architecture.md) | Sources, sinks, checkpointing, HA |
 | [Sources](sources/index.md) | Pub/Sub, SOQL-polled objects, EventLogFile, ApexLog |

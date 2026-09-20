@@ -21,7 +21,7 @@ def test_build_store_defaults_to_file() -> None:
     importlib.util.find_spec("aiobotocore") is not None, reason="s3 extra installed"
 )
 def test_build_store_s3_without_extra_raises_actionable_error() -> None:
-    with pytest.raises(ConfigError, match=r"sf2loki\[s3\]"):
+    with pytest.raises(ConfigError, match=r"uv sync --extra s3"):
         build_store(StateConfig(store="s3", s3={"bucket": "b"}))
 
 
@@ -29,5 +29,5 @@ def test_build_store_s3_without_extra_raises_actionable_error() -> None:
 def test_build_store_gcs_without_extra_raises_actionable_error() -> None:
     # Must surface the friendly ConfigError, NOT a raw ModuleNotFoundError — the
     # "gcloud" top-level name is checked (find_spec on the dotted path would raise).
-    with pytest.raises(ConfigError, match=r"sf2loki\[gcs\]"):
+    with pytest.raises(ConfigError, match=r"uv sync --extra gcs"):
         build_store(StateConfig(store="gcs", gcs={"bucket": "b"}))
