@@ -10,7 +10,7 @@ FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc4243
 # Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv versioning=docker
-COPY --from=ghcr.io/astral-sh/uv:0.12@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12@sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
