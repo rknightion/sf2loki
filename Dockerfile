@@ -5,7 +5,7 @@
 # Renovate proposes bumps to the digest as new 3.14-slim images publish
 # (":latest" or a bare tag defeats both).
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS builder
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS builder
 
 # Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- Runtime: slim, non-root --------------------------------------------------
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS runtime
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
 
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev
