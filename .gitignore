@@ -61,3 +61,6 @@ docs/fonts/
 
 # Track only the Claude Code settings and the hooks, which exist to mechanically
 .claude/
+
+# Machine-local agent artefacts, never committed
+codex/
