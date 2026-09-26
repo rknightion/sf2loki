@@ -87,7 +87,7 @@ jobs:
           load: true
           tags: sf2loki:test
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
       - name: Smoke-test image
         run: just smoke sf2loki:test
