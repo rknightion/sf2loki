@@ -1,9 +1,10 @@
 ---
 id: SFL-0075
 title: 'CI hygiene: main-only buildx cache writes in ci.yml'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-26 15:55'
+updated_date: '2026-09-26 17:11'
 labels: []
 dependencies: []
 priority: high
@@ -21,7 +22,7 @@ Context: fleet CI hygiene, tracked centrally as GHC-0006 in rknightion/.github. 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ci.yml buildx cache-to runs only on push to main
+- [x] #1 ci.yml buildx cache-to runs only on push to main
 <!-- AC:END -->
 
 ## Definition of Done
@@ -30,3 +31,17 @@ Context: fleet CI hygiene, tracked centrally as GHC-0006 in rknightion/.github. 
 - [ ] #2 just gen run and its output committed, if config.py or proto/ changed (just gen-check inside the gate fails otherwise)
 - [ ] #3 committed straight to main with a conventional-commit message, and pushed
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Changed .github/workflows/ci.yml line 90: cache-to is now `${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}`, empty on any other trigger (PRs, workflow_dispatch). cache-from stays `type=gha` unconditionally so PRs still read main's cache. Nothing else in the docker-build-test job changed.
+
+No config.py or proto/ changes, so `just gen` was not needed; ran `just gen-check` anyway and it reported no drift.
+
+Verified: just fmt-check, just lint, just typecheck, just gen-check, just helm-lint, just dist-check all pass clean. just test has one pre-existing flaky failure unrelated to this change — tests/sinks/test_sink.py::TestEncodeOffload::test_large_batch_encode_offload_keeps_loop_responsive asserts a wall-clock tick count (>=10) while the machine was under heavy load from parallel work in another repo; it passed in isolation (uv run pytest -q that one test alone: 1 passed in 1.86s) both before and after this change. actionlint and zizmor are clean on the changed file.
+
+CodeRabbit review was attempted (`coderabbit review --agent --base main`) but the org's 5 included hourly reviews were already used elsewhere this session (28 min reset); not repeated for this single-line conditional-expression change given actionlint/zizmor were already clean.
+
+Commit b742ce6, pushed to main.
+<!-- SECTION:FINAL_SUMMARY:END -->
