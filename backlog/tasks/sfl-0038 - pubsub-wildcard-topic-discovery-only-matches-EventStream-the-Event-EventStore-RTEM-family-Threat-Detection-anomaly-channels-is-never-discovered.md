@@ -29,7 +29,7 @@ ordinal: 38000
 names = [
     str(s["name"])
     for s in response.json().get("sobjects", [])
-    if str(s.get("name", "")).endswith("EventStream")   # metadata_client.py:48
+    if str(s.get("name", "")).endswith("EventStream")  # metadata_client.py:48
 ]
 return sorted(f"/event/{name}" for name in names)
 ```

@@ -53,8 +53,11 @@ Add a small class next to `promote_labels`:
 ```python
 class LabelCardinalityGuard:
     """Bounds distinct values per (event_type, label); demotes a column that blows the cap."""
+
     def __init__(self, limit: int) -> None: ...
-    def filter(self, event_type: str, labels: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    def filter(
+        self, event_type: str, labels: dict[str, str]
+    ) -> tuple[dict[str, str], dict[str, str]]:
         """Return (kept_labels, demoted) — demoted go to structured metadata."""
 ```
 

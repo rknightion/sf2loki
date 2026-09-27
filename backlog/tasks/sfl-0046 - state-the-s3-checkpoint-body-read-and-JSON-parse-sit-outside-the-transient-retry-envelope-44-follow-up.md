@@ -28,20 +28,19 @@ ordinal: 46000
 ```python
 async def _do_get() -> dict[str, Any] | None:
     try:
-        result: dict[str, Any] = await client.get_object(
-            Bucket=self._cfg.bucket, Key=self._cfg.key
-        )
+        result: dict[str, Any] = await client.get_object(Bucket=self._cfg.bucket, Key=self._cfg.key)
         return result
     except Exception as exc:
         if _error_code(exc) in _NOT_FOUND_CODES:
             return None
         raise
 
-resp = await _retry_transient(_do_get)      # s3_store.py:241 - retried
+
+resp = await _retry_transient(_do_get)  # s3_store.py:241 - retried
 if resp is None:
     ...
-body = await resp["Body"].read()            # s3_store.py:246 - NOT retried
-data = json.loads(body)                     # s3_store.py:247 - NOT translated
+body = await resp["Body"].read()  # s3_store.py:246 - NOT retried
+data = json.loads(body)  # s3_store.py:247 - NOT translated
 ```
 
 aiobotocore's `get_object` resolves once the response *headers* arrive; `resp["Body"]` is an unread `StreamingBody`. The byte transfer at `s3_store.py:246` is therefore a separate network operation sitting outside the bounded retry that issue #44 added, and the parse at `s3_store.py:247` has no corrupt-object translation.

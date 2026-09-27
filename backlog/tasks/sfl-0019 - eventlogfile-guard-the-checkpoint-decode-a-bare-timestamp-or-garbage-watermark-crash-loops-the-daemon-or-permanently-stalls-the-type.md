@@ -30,7 +30,7 @@ if raw is None:
     since = default_since
     ids: list[_CarriedId] = []
 else:
-    parsed: dict[str, object] = json.loads(raw)          # :516 - no try/except, no isinstance
+    parsed: dict[str, object] = json.loads(raw)  # :516 - no try/except, no isinstance
     since = str(parsed.get("last_created") or default_since)  # :517 - no watermark validation
     ids = _parse_carried_ids(parsed.get("ids", []))
 ```
