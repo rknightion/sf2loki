@@ -29,10 +29,10 @@ while not stop.is_set():
     timeout = _seconds_until_next_utc_midnight(now)
     try:
         await asyncio.wait_for(stop.wait(), timeout=timeout)
-        return                      # stop fired during the pause
+        return  # stop fired during the pause
     except TimeoutError:
         pass
-    if self._utcnow().date() != self._date:      # egress.py:224
+    if self._utcnow().date() != self._date:  # egress.py:224
         self._rollover_to(self._utcnow().date())
         self._paused = False
         self._metrics.egress_paused.set(0)
@@ -76,7 +76,7 @@ Make rollover detection per-waiter, check it at the top of the loop before compu
    while not stop.is_set():
        now = self._utcnow()
        if now.date() != paused_date:
-           self._maybe_rollover()   # guarded: no-op if another waiter already rolled
+           self._maybe_rollover()  # guarded: no-op if another waiter already rolled
            return
        try:
            await asyncio.wait_for(stop.wait(), timeout=_seconds_until_next_utc_midnight(now))

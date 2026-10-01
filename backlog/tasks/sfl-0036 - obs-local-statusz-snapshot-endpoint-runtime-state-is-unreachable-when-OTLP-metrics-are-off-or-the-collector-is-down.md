@@ -68,7 +68,7 @@ Add `GET /statusz` to the existing hand-rolled server, in the same zero-dependen
 **2. Compose in `App` and install a provider on `Health`**, mirroring the `set_degraded_check` wiring at `app.py:1058-1059`:
 
 ```python
-health.set_status_provider(lambda: {...})   # returns a JSON-serialisable dict
+health.set_status_provider(lambda: {...})  # returns a JSON-serialisable dict
 ```
 
 `Health` renders it with `json.dumps` and serves `200` with `Content-Type: application/json`. Keep `decide()` pure: give it a new keyword (e.g. `status_body: str | None`) so `None` → the existing `404, "not found"` and a string → `200, body`. The provider must be synchronous and I/O-free; it runs inside the request handler on the event loop (`health.py:118-160`).

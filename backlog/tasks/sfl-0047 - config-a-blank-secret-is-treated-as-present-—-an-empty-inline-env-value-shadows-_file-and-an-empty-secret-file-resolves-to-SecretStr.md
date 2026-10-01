@@ -86,13 +86,13 @@ def _resolve_secret_file(
 2. After reading the file, raise `ConfigError` when the stripped content is empty, naming the path and the fact that a blank secret is never valid:
 
 ```python
-    value = file.read_text().strip()   # inside the existing try/except
-    if not value:
-        raise ConfigError(
-            f"{what} file {file} is empty — a blank secret is never valid "
-            "(check the mounted Secret key / the file was fully written)"
-        )
-    return SecretStr(value)
+value = file.read_text().strip()  # inside the existing try/except
+if not value:
+    raise ConfigError(
+        f"{what} file {file} is empty — a blank secret is never valid "
+        "(check the mounted Secret key / the file was fully written)"
+    )
+return SecretStr(value)
 ```
 
 Keep the `PermissionError`/`OSError` messages exactly as they are (`config.py:1486-1495`) — the uid-10001 guidance is pinned by `tests/test_config.py:676`.
