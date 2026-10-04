@@ -5,8 +5,7 @@ SOQL-polled objects, EventLogFile, ApexLog) into Grafana Loki. Composition root 
 the `Source` / `Sink` / `CheckpointStore` / `Coordinator` protocols in `src/sf2loki/*/base.py`.
 
 `docs/architecture.md` is canonical for the design and `README.md` for operator-facing config. The
-docs site under `docs/` is published at https://m7kni.io/sf2loki/. Trust `docs/`, `README.md` and
-the code over anything else.
+docs site under `docs/` is published at https://m7kni.io/sf2loki/.
 
 Per-module traps live in `AGENTS.md` under `src/sf2loki/{auth,coordinate,salesforce,sinks,sources,
 state}/`. Read the one for the module you are changing.
@@ -49,18 +48,6 @@ and type errors there are invisible.
 **Agent fan-out protocol (canonical)** doc before designing a wave, and the **Wave operating model**
 doc for this project's own defect classes and contention points (`backlog doc list --plain`).
 
-- `backlog task list --plain -m "<milestone>"` scopes the queue to one wave; `backlog task view
-  SFL-0007 --plain` is a task's own contract.
-- Never `--notes` or `--plan` bare. They silently replace the whole section, destroying another
-  session's writes, and exit 0. Use `--append-notes` / `--append-plan`. A global `PreToolUse` hook
-  denies the bare form rather than trusting anyone to remember.
-- Finalize in one call, so an interrupted session cannot leave finished work looking unfinished:
-  `backlog task edit SFL-0007 --check-ac 1 --check-ac 2 -s Done`.
-- Section boundaries in task, draft, doc, decision and milestone markdown are HTML-comment markers.
-  Break one by hand-editing and the section is silently dropped at exit 0, invisible to the CLI
-  until the next write destroys it for real. There is no repair command. `backlog/config.yml` is
-  the one backlog file to edit by hand - list-valued keys cannot be set through
-  `backlog config set`.
 - `backlog/` is committed, so tasks and docs carry no real account identifiers or personal data: no
   org IDs, instance URLs, tenant IDs, email addresses or tokens. Write the shape, not the instance.
   Aggregate counts, timings and structural findings are fine.
