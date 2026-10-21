@@ -2,10 +2,10 @@
 
 # --- Builder: resolve deps + install the project with uv ----------------------
 # Digest-pinned (tag kept alongside for readability): reproducible builds +
-# Renovate proposes bumps to the digest as new 3.14-slim images publish
+# Renovate proposes bumps to the digest as new 3.15-slim images publish
 # (":latest" or a bare tag defeats both).
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.14-slim@sha256:fbecd461fc72d21b2143c6eaba25143738079154a6d0ea3da3aec724f50eed4a AS builder
+FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS builder
 
 # Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
@@ -30,10 +30,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- Runtime: slim, non-root --------------------------------------------------
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.14-slim@sha256:fbecd461fc72d21b2143c6eaba25143738079154a6d0ea3da3aec724f50eed4a AS runtime
+FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS runtime
 
-# Upgrade the bundled Python installer trust store as well as application certifi.
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
+# Runtime dependencies are installed by uv in the builder; omit the unused
+# installer and its independently vendored dependency copies from the image.
+RUN python -m pip uninstall --yes pip
 
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev
