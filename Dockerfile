@@ -10,7 +10,7 @@ FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66
 # Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv versioning=docker
-COPY --from=ghcr.io/astral-sh/uv:0.13@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -31,6 +31,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --- Runtime: slim, non-root --------------------------------------------------
 # renovate: datasource=docker depName=python versioning=docker
 FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS runtime
+
+# Upgrade the bundled Python installer trust store as well as application certifi.
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev
