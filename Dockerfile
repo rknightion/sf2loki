@@ -32,8 +32,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # renovate: datasource=docker depName=python versioning=docker
 FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS runtime
 
-# Upgrade the bundled Python installer trust store as well as application certifi.
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
+# Runtime dependencies are installed by uv in the builder; omit the unused
+# installer and its independently vendored dependency copies from the image.
+RUN python -m pip uninstall --yes pip
 
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev
