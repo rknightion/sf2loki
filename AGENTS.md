@@ -15,6 +15,10 @@ state}/`. Read the one for the module you are changing.
 `just check` is the gate. It needs `helm`, `kubeconform`, `uv` and `git` on PATH. `just ci` adds
 the image and smoke legs, which need a Docker daemon.
 
+The runtime image uses the uv-built application virtual environment and deliberately omits pip.
+Keep installer tooling in the builder: unused pip vendors independent dependency copies that can
+block the container security gate even when the application lockfile is patched.
+
 Two recipes are `[confirm]`-guarded because they act outside the tree: `activity` writes to (and
 with `--cleanup` deletes from) a live Salesforce org, and `clean` deletes `dist/`, `.venv/` and the
 tool caches. Ask before running either; never pass `--yes` or `JUST_YES=1`. Run `just` with stdin
