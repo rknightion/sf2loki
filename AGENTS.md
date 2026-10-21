@@ -44,9 +44,9 @@ and type errors there are invisible.
 
 ## Task tracking
 
-`backlog/` is the source of truth for what work is left; it replaced GitHub Issues. Read the
-**Agent fan-out protocol (canonical)** doc before designing a wave, and the **Wave operating model**
-doc for this project's own defect classes and contention points (`backlog doc list --plain`).
+`backlog/` is the source of truth for what work is left; it replaced GitHub Issues.
+
+Loops: the protocol lives in `~/repos/agent-docs/sources/loop/` (this board's "Loop protocol pointer" doc points there); this repository's loop facts are in `LOOP.md`.
 
 - `backlog/` is committed, so tasks and docs carry no real account identifiers or personal data: no
   org IDs, instance URLs, tenant IDs, email addresses or tokens. Write the shape, not the instance.
