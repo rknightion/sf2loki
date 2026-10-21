@@ -27,12 +27,12 @@ ordinal: 54000
 
 ```python
 def _is_transient(exc: BaseException) -> bool:
-    if not isinstance(exc, Exception):          # 120  -> 121 UNCOVERED
+    if not isinstance(exc, Exception):  # 120  -> 121 UNCOVERED
         return False
-    if _error_code(exc) in _TRANSIENT_CODES:    # 122  -> 123 covered
+    if _error_code(exc) in _TRANSIENT_CODES:  # 122  -> 123 covered
         return True
     status = _status_code(exc)
-    if status is not None and status >= 500:    # 125  -> 126 UNCOVERED
+    if status is not None and status >= 500:  # 125  -> 126 UNCOVERED
         return True
     # TCP resets / connection drops surface as bare OSError-family exceptions
     # with no botocore response shape at all.

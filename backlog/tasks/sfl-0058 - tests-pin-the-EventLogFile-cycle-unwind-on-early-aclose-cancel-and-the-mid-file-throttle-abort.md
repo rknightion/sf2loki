@@ -69,8 +69,8 @@ Both tests go in `tests/sources/test_eventlogfile_source.py` and reuse `FakeEven
 
 ```python
 agen = source.events(store, asyncio.Event())
-first = await anext(agen)          # one entry drained from the bridge queue
-await agen.aclose()                # GeneratorExit -> the 378-385 unwind
+first = await anext(agen)  # one entry drained from the bridge queue
+await agen.aclose()  # GeneratorExit -> the 378-385 unwind
 ```
 
 Assert: `download_cancelled == ["<gated id>"]` (the in-flight worker observed cancellation), `agen.aclose()` returned without raising, no `download_calls` were added after the `aclose()` (drive the loop with `await asyncio.sleep(0)` a couple of times first), and no pending task remains whose coroutine name is `run_workers` (`asyncio.all_tasks()` filter, or assert the recorded runner task `.done()` via a monkeypatched `asyncio.ensure_future` if a direct handle is preferred). Avoid real-time sleeps for synchronization (issue #70) — gate on `asyncio.Event`.

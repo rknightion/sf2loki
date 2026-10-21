@@ -272,12 +272,10 @@ class Metrics:
             )
 
             headers = dict(otlp_headers) if otlp_headers is not None else dict(telemetry.headers)
-            exporter_kwargs: dict[str, object] = {}
-            if telemetry.endpoint:
-                exporter_kwargs["endpoint"] = telemetry.endpoint
-            if headers:
-                exporter_kwargs["headers"] = headers
-            exporter = OTLPMetricExporter(**exporter_kwargs)  # type: ignore[arg-type]
+            exporter = OTLPMetricExporter(
+                endpoint=telemetry.endpoint or None,
+                headers=headers or None,
+            )
             readers.append(
                 PeriodicExportingMetricReader(
                     exporter,

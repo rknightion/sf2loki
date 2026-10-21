@@ -27,9 +27,7 @@ Two values reach a SOQL `WHERE` clause through raw f-string interpolation withou
 
 ```python
 if since_id:
-    where = [
-        f"(StartTime > {ts_literal} OR (StartTime = {ts_literal} AND Id > '{since_id}'))"
-    ]
+    where = [f"(StartTime > {ts_literal} OR (StartTime = {ts_literal} AND Id > '{since_id}'))"]
 ```
 
 `since_id` originates at `src/sf2loki/sources/apexlog_source.py:177` (`since_id = window[-1] if window else ""`). `window` is decoded from the persisted checkpoint by `_parse_checkpoint` (`src/sf2loki/sources/apexlog_source.py:80-90`), which coerces each element with `str(i)` and applies no charset check. Only the *timestamp* half of the compound cursor is validated: `src/sf2loki/sources/apexlog_source.py:165-172` runs `_is_valid_watermark` (defined at `:76`) and falls back to `now - lookback` with a WARNING when the stored value is unusable. The Id half has no equivalent guard.
