@@ -2,7 +2,7 @@
 
 # --- Builder: resolve deps + install the project with uv ----------------------
 # Digest-pinned (tag kept alongside for readability): reproducible builds +
-# Renovate proposes bumps to the digest as new 3.14-slim images publish
+# Renovate proposes bumps to the digest as new 3.15-slim images publish
 # (":latest" or a bare tag defeats both).
 # renovate: datasource=docker depName=python versioning=docker
 FROM python:3.15-slim@sha256:f5b92f2a669a4c347044f29367f31983280b648250ca94dea66f98c53bc87e58 AS builder
