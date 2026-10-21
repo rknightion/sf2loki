@@ -27,10 +27,7 @@ default), `FileLeaseCoordinator` (a lease document on shared storage) and `K8sLe
 ## Fencing (`StateFenceError`, in `base.py`)
 
 A stale leader - one that lost the lease mid-commit, say to a GC pause - must not advance
-checkpoints and race the new leader. `app.py` wires the active coordinator's `check_fence` into the
-state store through `state.set_fence(...)`, a duck-typed optional hook: `FileCheckpointStore`,
-`S3CheckpointStore` and `GcsCheckpointStore` all implement it, but the `CheckpointStore` protocol
-does not declare it.
+checkpoints and race the new leader. The state stores expose the fence through duck-typed hooks; see `state/AGENTS.md`.
 
 A fenced commit is not data loss. The batch already landed in the sink, so the cost is at most a
 bounded re-ingest once the new leader resumes (at-least-once). The fence lives here rather than in
