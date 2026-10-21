@@ -25,10 +25,14 @@ ordinal: 16000
 
 ```python
 def _record_commit_metric(self, key: str, value: str) -> None:
-    if key.startswith("pubsub:"): ...
-    elif key.startswith("eventlog_objects:"): ...
-    elif key.startswith("eventlogfile:"): ...
-    elif key == "apexlog": ...
+    if key.startswith("pubsub:"):
+        ...
+    elif key.startswith("eventlog_objects:"):
+        ...
+    elif key.startswith("eventlogfile:"):
+        ...
+    elif key == "apexlog":
+        ...
 ```
 
 In multi-org mode every key reaching that function carries an `org=<name>:` prefix, so none of the four branches match and neither gauge is ever set.
@@ -64,6 +68,7 @@ Blast radius is bounded: no shipped Grafana resource queries either gauge (`rg '
 
    ```python
    _ORG_KEY_RE = re.compile(r"^org=([A-Za-z0-9_-]+):")
+
 
    def split_org_key(key: str) -> tuple[str, str]:
        """Split ``org=<name>:<rest>`` → ``("<name>", "<rest>")``; ``("", key)`` if unprefixed."""

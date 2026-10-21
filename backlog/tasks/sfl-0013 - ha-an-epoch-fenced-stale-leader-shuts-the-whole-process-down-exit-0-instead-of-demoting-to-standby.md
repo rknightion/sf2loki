@@ -36,7 +36,7 @@ def _on_pipeline_done(task: asyncio.Task[None], run_stop: asyncio.Event) -> None
     # Clean completion while we never asked it to stop means the sources
     # exhausted on their own (a finite run) -> shut down. ...
     if not run_stop.is_set():
-        stop.set()          # <-- GLOBAL stop event
+        stop.set()  # <-- GLOBAL stop event
 ```
 
 `run_stop` is only ever set by `_stop_acquisition` (`src/sf2loki/app.py:1281-1287`), reached from `on_lose` (`src/sf2loki/app.py:1198-1206`) — i.e. only after the coordinator itself has noticed the loss. There are two fences, and only one of them satisfies that precondition:

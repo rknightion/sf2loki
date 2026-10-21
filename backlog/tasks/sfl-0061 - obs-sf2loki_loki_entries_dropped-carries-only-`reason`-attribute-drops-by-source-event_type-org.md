@@ -62,9 +62,8 @@ Aggregate per-entry at drop time, keyed off the labels the entries already carry
    ```python
    _DROP_ATTR_KEYS = ("source", "event_type", "org")
 
-   def record_entries_dropped(
-       metrics: Metrics, entries: Sequence[LogEntry], reason: str
-   ) -> None:
+
+   def record_entries_dropped(metrics: Metrics, entries: Sequence[LogEntry], reason: str) -> None:
        """Increment the drop counter once per (source, event_type, org) group."""
        groups: dict[tuple[tuple[str, str], ...], int] = defaultdict(int)
        for e in entries:

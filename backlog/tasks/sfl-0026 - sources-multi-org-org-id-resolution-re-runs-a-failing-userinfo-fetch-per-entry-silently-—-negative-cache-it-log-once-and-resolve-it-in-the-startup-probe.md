@@ -25,13 +25,13 @@ ordinal: 26000
 `OrgSource._resolve_org_id` (`src/sf2loki/sources/org_adapter.py:76-91`) caches only successful resolution and swallows every failure without a trace:
 
 ```python
-if self._org_id:            # org_adapter.py:83-84 — success cache only
+if self._org_id:  # org_adapter.py:83-84 — success cache only
     return self._org_id
 if self._org_id_provider is None:
     return ""
 try:
     self._org_id = await self._org_id_provider()
-except Exception:           # org_adapter.py:89-90 — no log, no negative cache, no cap
+except Exception:  # org_adapter.py:89-90 — no log, no negative cache, no cap
     return ""
 ```
 

@@ -97,10 +97,12 @@ Recorder shape:
 ```python
 captured: dict[str, object] = {}
 
+
 async def _recorder(cfg, **kwargs):
     captured["cfg"] = cfg
     captured.update(kwargs)
     return 0
+
 
 monkeypatch.setattr("sf2loki.backfill.run_backfill", _recorder)
 ```
