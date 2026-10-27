@@ -5,7 +5,7 @@
 # Renovate proposes bumps to the digest as new 3.15-slim images publish
 # (":latest" or a bare tag defeats both).
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.15-slim@sha256:533b0b2f9b5d46fd097091cf826f27902f1d6c3bca714b6dc74551356aa97a51 AS builder
+FROM python:3.15-slim@sha256:2fb224844bc0ebfca5f117d1c0b93895652c8ceb01acf2c8c54c3d3a44bdcc7c AS builder
 
 # Pinned minor tag + digest: reproducible builds + Renovate can propose bumps
 # (":latest" defeats both).
@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- Runtime: slim, non-root --------------------------------------------------
 # renovate: datasource=docker depName=python versioning=docker
-FROM python:3.15-slim@sha256:533b0b2f9b5d46fd097091cf826f27902f1d6c3bca714b6dc74551356aa97a51 AS runtime
+FROM python:3.15-slim@sha256:2fb224844bc0ebfca5f117d1c0b93895652c8ceb01acf2c8c54c3d3a44bdcc7c AS runtime
 
 # Runtime dependencies are installed by uv in the builder; omit the unused
 # installer and its independently vendored dependency copies from the image.
