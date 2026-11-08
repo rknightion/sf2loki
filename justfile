@@ -170,4 +170,19 @@ activity *args="--env-file .env.dev":
 clean:
     rm -rf dist .venv .ruff_cache .mypy_cache .pytest_cache
 
+# GitHub issues and the rknightion Project; maintainers only (needs the tracker tools and credentials)
+[group('tracker')]
+[positional-arguments]
+tracker *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TRACKER_REPO=rknightion/sf2loki TRACKER_PROJECT_OWNER=rknightion TRACKER_PROJECT=7
+    export TRACKER_ISSUE_IDENTITY=app TRACKER_PROJECT_IDENTITY=user
+    exec tracker-with-token "$@"
+
+# print the issue a legacy board id (SFL-0001) became
+[group('tracker')]
+issue id:
+    TRACKER_REPO=rknightion/sf2loki tracker legacy {{ quote(id) }}
+
 alias gate := check
