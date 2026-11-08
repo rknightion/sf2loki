@@ -51,7 +51,5 @@ Use [GitHub issues](https://github.com/rknightion/sf2loki/issues) for bugs and f
 For security problems, use the private process in [Security](../security.md) instead — never a
 public issue.
 
-The tracker looks empty because maintainer work is tracked in-repo with
-[Backlog.md](https://github.com/MrLesk/Backlog.md) under `backlog/` — run `backlog task list --plain`
-to see what is planned, or read the task files directly. Bug reports and feature requests from
-outside are still very welcome as GitHub issues.
+Work is tracked in the repository's GitHub issues; a pull request says how it relates to one (`Closes #N`
+with the acceptance evidence table, `Refs #N`, or `Task: none, <reason>`).

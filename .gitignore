@@ -59,8 +59,10 @@ docs/assets/social-card.png
 docs/assets/social-card.svg
 docs/fonts/
 
-# Track only the Claude Code settings and the hooks, which exist to mechanically
-.claude/
+# Claude Code local state (worktrees, scheduler locks, settings.local.json) is never committed.
+# .claude/skills/ is tracked: it holds the links to the contributor skills in .agents/skills/.
+.claude/*
+!.claude/skills/
 
 # Machine-local agent artefacts, never committed
 codex/

@@ -46,26 +46,32 @@ and type errors there are invisible.
   `| json` explodes stream cardinality. Connector-health queries hit Prometheus OTLP metrics whose
   names carry the `_total` / `_bucket` / `_count` / `_sum` suffixes - keep `add_metric_suffixes` on.
 
-## Task tracking
+## Tracking work
 
-`backlog/` is the source of truth for what work is left; it replaced GitHub Issues.
+Work is tracked in this repository's GitHub issues; they are the only queue. Do not add a checklist
+file such as `ROADMAP.md` beside them.
 
-Loops: the protocol lives in `~/repos/agent-docs/sources/loop/` (this board's "Loop protocol pointer" doc points there); this repository's loop facts are in `LOOP.md`.
-
-- `backlog/` is committed, so tasks and docs carry no real account identifiers or personal data: no
-  org IDs, instance URLs, tenant IDs, email addresses or tokens. Write the shape, not the instance.
-  Aggregate counts, timings and structural findings are fine.
-- `#NN` in this repo's history is a deleted GitHub issue, never a task ID. Resolve one against
-  `archive/issues-dump.json` (`jq '.[] | select(.number == 86)' archive/issues-dump.json`); the
-  closed set is indexed in the "Closed GitHub issues" doc.
+- A pull request body says how it relates to an issue, on a line of its own: `Closes #N` with the
+  `Acceptance evidence` table from `.github/pull_request_template.md` (one row for each acceptance
+  criterion of that issue), `Refs #N` when it only relates to one, or `Task: none, <reason>`.
+- A pull request that changes `.github/workflows/` or `.github/actions/` carries no closing keyword:
+  write `Task: none, <reason>`, with `Refs #N` beside it if you like.
+- Contributors never need the project board or the tracker tooling; a maintainer handles both.
+- Issues and pull requests are public, so they carry no real identifiers: no org IDs, instance URLs,
+  tenant IDs, email addresses or tokens. Write the shape, not the instance.
+- Older commits, docs and tests cite legacy board ids such as `SFL-0001`. `just issue <ID>` prints the
+  issue each one became; `.github/tracker/id-map.json` is the map.
+- `#NN` below 156 in this repo's older history is a deleted GitHub issue from before the board, never a
+  task ID. Resolve one against `archive/issues-dump.json`
+  (`jq '.[] | select(.number == 86)' archive/issues-dump.json`); the closed set is indexed in
+  `.github/tracker/history/`. Live issues start at #248.
 
 ## Commits
 
 Conventional commits, always - release-please cuts releases and the changelog from the type and
-scope (`feat!:` or a `BREAKING CHANGE:` footer for a major). The commit that completes a task names
-the task ID (`SFL-0007`) in the subject or body. There is no auto-close keyword: closing is
-`backlog task edit SFL-0007 --check-ac 1 ... -s Done`, and the commit SHA goes in the task's final
-summary.
+scope (`feat!:` or a `BREAKING CHANGE:` footer for a major). Land every change by pull request
+with auto-merge; the squash commit takes the PR title, and the PR body carries the issue line described
+in "Tracking work".
 
 ## Conventions
 
@@ -82,27 +88,3 @@ summary.
 - `.env.dev` (gitignored) holds throwaway DEV Salesforce and Grafana Cloud credentials. Validate a
   new source's feasibility against it before building it.
 - Never name Datadog in committed code or docs.
-
-<!-- BACKLOG.MD GUIDELINES START -->
-<!-- backlog.md-instructions-version: 1.50.1 -->
-<CRITICAL_INSTRUCTION>
-
-## Backlog.md Workflow
-
-This project uses Backlog.md for task and project management.
-
-**For every user request in this project, run `backlog instructions overview` before answering or taking action.**
-
-Use the overview to decide whether to search, read, create, or update Backlog tasks.
-
-Before task lifecycle actions, read the matching detailed guide:
-- `backlog instructions task-creation` before creating or splitting tasks
-- `backlog instructions task-execution` before planning, changing status or assignee, adding a plan or implementation notes, or implementing task work
-- `backlog instructions task-finalization` before checking acceptance criteria, writing final summaries, or moving tasks to terminal statuses
-
-Use `backlog <command> --help` before running unfamiliar commands. Help shows options, fields, and examples.
-
-Do not edit Backlog task, draft, document, decision, or milestone markdown files directly. Use the `backlog` CLI so metadata, relationships, and history stay consistent.
-
-</CRITICAL_INSTRUCTION>
-<!-- BACKLOG.MD GUIDELINES END -->
