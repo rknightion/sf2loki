@@ -241,11 +241,21 @@ jobs:
           fi
           echo "No file under backlog/ is added or changed."
 
+  # zizmor fails a pull request on any finding (enforce); push runs upload SARIF instead.
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: rknightion/.github/.github/workflows/zizmor.yml@e5b9f15bc8ccafdbad75e623bbd0dbb27127f049 # v1.28.0
+    with:
+      enforce: true
+
   ci-success:
     name: ci-success
     runs-on: ubuntu-latest
     if: always()
-    needs: [gate, docker-build-test, package, helm-chart, helm-render-guard, ac-evidence, privacy-sweep, backlog-freeze]
+    needs: [gate, docker-build-test, package, helm-chart, helm-render-guard, ac-evidence, privacy-sweep, backlog-freeze, zizmor]
     steps:
       - name: Fail if any required job did not pass
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
