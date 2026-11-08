@@ -7,7 +7,6 @@ set -euo pipefail
 
 readonly UV_VERSION="0.12.5"
 readonly JUST_VERSION="1.58.0"
-readonly BACKLOG_VERSION="1.50.1"
 readonly LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -44,10 +43,6 @@ if ! version_is just "${JUST_VERSION}"; then
   cargo install --locked --root "${HOME}/.local" --version "${JUST_VERSION}" just
 fi
 
-if ! version_is backlog "${BACKLOG_VERSION}"; then
-  npm install --global --prefix "${HOME}/.local" "backlog.md@${BACKLOG_VERSION}"
-fi
-
 cd "${REPO_ROOT}"
 
 # Install the repo-pinned Python and locked default development dependency group.
@@ -59,7 +54,6 @@ uv sync --locked
 printf '\nCodex cloud environment ready:\n'
 uv --version
 just --version
-backlog --version
 uv run python --version
 uv run ruff --version
 uv run mypy --version

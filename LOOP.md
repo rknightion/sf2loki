@@ -3,9 +3,25 @@ tier: guarded
 gate: just check
 ci-required: ci-success
 grafana-stack: rkaidev
+tracker: github
+landing: pr
 
-`backlog/` is committed: no org ID, instance URL, tenant ID, email address or token in any task or doc;
-write the shape, not the instance. Run `just` with stdin from `/dev/null`.
+Issues are public: no org ID, instance URL, tenant ID, email address or token in any issue, pull request or
+doc. Write the shape, not the instance. Run `just` with stdin from `/dev/null`.
+
+The tracker working model is `~/repos/agent-docs/docs/github-tracker.md` (maintainers only).
+
+## Queue
+
+- The queue is `just tracker queue`: open issues at Project Status Ready on the rknightion Project.
+- A charter selects work by labels (`type:task`, `type:bug`, `type:feature`, `needs-owner`,
+  `needs-triage`, `phase-1` to `phase-5`, `roadmap`, `followup`) and Project fields (Status, Priority,
+  Effort, Lane). Never queue a `needs-owner` or `needs-triage` issue, or the Renovate Dependency
+  Dashboard (#10).
+- Only the root writes issues and the Project, through `just tracker`. A lane returns the status and
+  the AC ticks it wants.
+- A queue row names the issue as `#N`. A legacy board id (`SFL-0001`) resolves with `just issue <ID>`;
+  `.github/tracker/id-map.json` is the map.
 
 ## Credentials
 
@@ -36,8 +52,9 @@ write the shape, not the instance. Run `just` with stdin from `/dev/null`.
 - Frozen seams: the `Source`, `Sink`, `CheckpointStore` and `Coordinator` protocols in
   `src/sf2loki/*/base.py`, and the Loki label allowlist (`ALLOWED_LABELS`, where structured metadata
   is the escape hatch). Single-instance-by-default stands.
-- `#NN` in history is a deleted GitHub issue; resolve it with
-  `jq '.[] | select(.number == 86)' archive/issues-dump.json`, never by guessing a task ID.
+- A `#NN` below 156 in older history is a deleted GitHub issue from before the board; resolve it with
+  `jq '.[] | select(.number == 86)' archive/issues-dump.json`, never by guessing. Issues numbered 248 and
+  up are live. A legacy `SFL-NNNN` id resolves with `just issue`.
 
 ## Mutexes
 
