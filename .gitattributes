@@ -1,0 +1,8 @@
+# Generated files have separate source and validation.
+/.release-please-manifest.json linguist-generated=true
+/config.example.yaml linguist-generated=true
+/docs/config-reference.md linguist-generated=true
+/src/sf2loki/salesforce/_generated/pubsub_api_pb2.py linguist-generated=true
+/src/sf2loki/salesforce/_generated/pubsub_api_pb2_grpc.py linguist-generated=true
+/src/sf2loki/sinks/loki/_generated/loki_push_pb2.py linguist-generated=true
+/uv.lock linguist-generated=true
