@@ -14,6 +14,13 @@ default:
 setup:
     uv sync --locked
 
+# prepare the locked Python environment and local chart tools for Cursor Cloud
+[group('dev')]
+cloud-bootstrap:
+    uv python install "$(cat .python-version)"
+    UV_MANAGED_PYTHON=1 UV_COMPILE_BYTECODE=1 just setup
+    bash .cursor/install-chart-tools.sh
+
 # format Python sources and this justfile in place
 [group('check')]
 fmt:
