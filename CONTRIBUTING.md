@@ -11,7 +11,7 @@ facts is edited here; changes to the rest go to that repository.
 ## This repository
 
 <!-- vended:repo-facts:begin -->
-sf2loki is a Python 3.14 service. `just setup` runs `uv sync --locked` and expects `uv`, `just`, Helm
+sf2loki is a Python 3.15 service. `just setup` runs `uv sync --locked` and expects `uv`, `just`, Helm
 and kubeconform on your PATH. `just check` is the daemon-free gate (format, lint, typecheck, tests,
 generated-file drift, Helm lint and the package build) and pull request CI runs the same legs plus the
 container image build and smoke test, which need a Docker daemon (`just ci`), so you may leave those to

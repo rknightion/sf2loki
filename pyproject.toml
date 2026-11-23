@@ -3,7 +3,7 @@ name = "sf2loki"
 version = "1.0.0"
 description = "Ship Salesforce Event Monitoring data into Grafana Loki"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.15"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "Rob Knight" }]
@@ -73,7 +73,7 @@ packages = ["src/sf2loki"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py315"
 # .claude/hooks/ holds agent-harness scripts copied byte-for-byte from a shared
 # reference implementation used across repos; reformatting them here would break
 # that parity, and they are not shipped project source.
@@ -91,7 +91,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 "scripts/generate_activity.py" = ["E501"]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.15"
 strict = true
 files = ["src"]
 plugins = ["pydantic.mypy"]

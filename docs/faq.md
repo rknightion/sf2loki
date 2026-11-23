@@ -25,7 +25,7 @@ only. See [Troubleshooting](troubleshooting.md#sf2loki-doctor-reports-a-short-ev
 
 ### Which Python version does it need?
 
-3.14+, and only for a source checkout. The container needs no Python on the host at all, so the
+3.15+, and only for a source checkout. The container needs no Python on the host at all, so the
 version only matters if you are installing from source; `uv` provisions a matching interpreter for
 you. See [Installation](installation.md).
 

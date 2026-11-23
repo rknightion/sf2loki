@@ -5,7 +5,7 @@ description: How sf2loki is put together — the frozen seams, the pipeline, lan
 
 # Architecture
 
-`sf2loki` is a single long-running Python 3.14/asyncio process (running on `uvloop`) that pulls
+`sf2loki` is a single long-running Python 3.15/asyncio process (running on `uvloop`) that pulls
 Salesforce Event Monitoring data in and pushes Loki log lines out. It is built as a
 **composition root + frozen-seam** design: one entrypoint (`sf2loki.app.App.build`) wires concrete
 implementations behind four small `Protocol` interfaces, and everything else in the codebase only
