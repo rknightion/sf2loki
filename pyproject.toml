@@ -37,6 +37,7 @@ sf2loki = "sf2loki.cli:main"
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=7.1",
     "respx>=0.21",
     "mypy>=1.10",
     "ruff>=0.5",

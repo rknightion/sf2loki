@@ -36,6 +36,14 @@ FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87
 # installer and its independently vendored dependency copies from the image.
 RUN python -m pip uninstall --yes pip
 
+# Pick up Debian security fixes published after the pinned base digest (zlib1g
+# CVE-2026-85091). Only fixed packages move; findings with no Debian fix are
+# filtered by the publish gate's trivy-ignore-unfixed. Drop this once a newer
+# base digest carries the fix.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends --only-upgrade zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Injected by the shared container-publish pipeline (release tag or short SHA).
 ARG VERSION=dev
 LABEL org.opencontainers.image.version="${VERSION}"

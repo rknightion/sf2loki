@@ -53,6 +53,12 @@ typecheck:
 test filter="":
     uv run pytest -q {{ if filter == "" { "" } else { "-k " + quote(filter) } }}
 
+# run the test suite and write coverage.xml (CI uploads it to Codacy)
+[group('check')]
+[no-exit-message]
+test-cov:
+    uv run pytest -q --cov=sf2loki --cov-report=xml
+
 # THE GATE — everything that needs no Docker daemon. Must be green before any commit.
 [group('check')]
 check: fmt-check lint typecheck test gen-check helm-lint dist-check

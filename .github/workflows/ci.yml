@@ -20,6 +20,11 @@ jobs:
   gate:
     name: lint · fmt · type · test · generated drift
     runs-on: ubuntu-latest
+    # Fork PRs do not receive repo secrets, and codacy-coverage-reporter-action hard-errors on an
+    # empty token. The `secrets` context is not available in a step-level `if:`, so resolve it to a
+    # job-level env var and gate the upload step on that.
+    env:
+      HAS_CODACY_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN != '' }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
@@ -55,7 +60,15 @@ jobs:
         run: just typecheck
 
       - name: Tests
-        run: just test
+        run: just test-cov
+
+      - name: Upload coverage to Codacy
+        if: success() && env.HAS_CODACY_TOKEN == 'true'
+        continue-on-error: true # reporting only; the tests above are the gate
+        uses: codacy/codacy-coverage-reporter-action@89d6c85cfafaec52c72b6c5e8b2878d33104c699 # v1.3.0
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: coverage.xml
 
       - name: Generated artifact drift
         run: just gen-check
