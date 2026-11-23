@@ -4,7 +4,7 @@ sf2loki is a small project with a strict green bar — the workflow below keeps 
 
 ## Dev setup
 
-Requirements: Python 3.14, [uv](https://docs.astral.sh/uv/),
+Requirements: Python 3.15, [uv](https://docs.astral.sh/uv/),
 [just](https://github.com/casey/just), Helm, and kubeconform.
 
 ```bash

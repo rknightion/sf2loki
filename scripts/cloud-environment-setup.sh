@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-readonly UV_VERSION="0.12.5"
+readonly UV_VERSION="0.13.9"
 readonly JUST_VERSION="1.58.0"
 readonly LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

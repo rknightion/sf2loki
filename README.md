@@ -74,8 +74,8 @@ Full documentation is published at **[m7kni.io/sf2loki](https://m7kni.io/sf2loki
 
 sf2loki ships as a **container image** and as a **source checkout**. It is deliberately not
 published to PyPI, so there is no `pip`, `pipx` or `uvx` route: the container needs no Python on
-the host at all, and a source checkout needs **Python 3.14+** because the package uses 3.14
-language features.
+the host at all, and a source checkout needs **Python 3.15+**, the version the project builds,
+tests and ships on.
 
 | Use case | Install | Notes |
 | --- | --- | --- |
@@ -734,7 +734,7 @@ just gen           # regenerate every committed generated artifact
 just image         # build the container image (requires a Docker daemon)
 ```
 
-Python 3.14, `uv`-managed. Generated proto stubs are committed; CI fails on drift. Tooling: `uv`,
+Python 3.15, `uv`-managed. Generated proto stubs are committed; CI fails on drift. Tooling: `uv`,
 `ruff`, `mypy --strict`, `pytest` + `pytest-asyncio`, `just`, Helm, kubeconform, and Docker for
 `just ci`.
 

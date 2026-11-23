@@ -7,8 +7,8 @@ description: Install sf2loki with its container image, Docker Compose or a uv so
 
 sf2loki ships as a **container image** and as a **source checkout**. It is deliberately not
 published to PyPI, so there is no `pip`, `pipx` or `uvx` route. The container needs no Python on
-the host at all; a source checkout requires **Python 3.14+**, because the package uses 3.14
-language features.
+the host at all; a source checkout requires **Python 3.15+**, the version the project builds,
+tests and ships on.
 
 | Use case | Install | Notes |
 | --- | --- | --- |
