@@ -105,19 +105,6 @@ with `--cleanup` deletes from) a live Salesforce org, and `clean` deletes `dist/
 tool caches. Ask before running either; never pass `--yes` or `JUST_YES=1`. Run `just` with stdin
 from `/dev/null` so a `[confirm]` prompt fails fast instead of hanging.
 
-## Cursor Cloud specific instructions
-
-The pinned [environment](.cursor/environment.json) runs `just cloud-bootstrap`.
-It uses the Python version in `.python-version`, syncs the locked dependencies,
-compiles bytecode and installs Helm and kubeconform under `.venv/bin`.
-
-- Run `just fmt-check lint typecheck </dev/null` for a fast check.
-- Run `PATH="$PWD/.venv/bin:$PATH" just check </dev/null` for the full gate from
-  the repository root. Chart validation fetches Kubernetes and CRD schemas.
-- Use hosted CI for image and smoke checks, or run `just ci </dev/null` with
-  the chart tools on `PATH` and a Docker daemon available. Live Salesforce and
-  Loki checks require a separately authorized environment.
-
 ## Generated artifacts - never hand-edit
 
 `config.example.yaml`, `docs/config-reference.md`, the spliced `config:` block in
