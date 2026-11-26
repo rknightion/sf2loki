@@ -30,7 +30,7 @@ jobs:
       id-token: write        # cosign keyless signing + provenance attestation
       attestations: write    # build-provenance attestation
       security-events: write # Trivy SARIF upload
-    uses: rknightion/.github/.github/workflows/container-publish.yml@b31fba795a67b1a413ec1e11a7cd4ac9c2447f15 # v1.32.7
+    uses: rknightion/.github/.github/workflows/container-publish.yml@47976d7e85fddb1c3c329cc870612b59ac433849 # v1.32.8
     with:
       release-tag: ${{ inputs.release_tag }}
       # Also package + push the Helm chart as an OCI artifact to
